@@ -96,6 +96,18 @@ impl<'a> TaskSources<'a> {
     }
 }
 
+/// Agent id → the tool-use id that spawned it, for every spawn `transcript`
+/// records, read by the same index the archive matches files with: a
+/// structured result before a text one. The completeness audit asks it which
+/// subagents a sealed prefix owes the shard.
+pub(crate) fn spawned_agents(transcript: &[u8]) -> BTreeMap<String, String> {
+    let mut index = SpawnIndex::default();
+    index.scan(transcript);
+    let mut spawned = index.by_text;
+    spawned.extend(index.by_agent);
+    spawned
+}
+
 impl SpawnIndex {
     /// Index every spawn and spawn result one transcript records. Only lines
     /// that can carry one are parsed.

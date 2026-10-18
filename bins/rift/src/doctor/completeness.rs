@@ -97,7 +97,7 @@ mod tests {
         let sub = shard(empty, "cp-doc", 1, &sealed(main), Some(&sealed(main)), None);
         let (human, json) = completeness_leg(&sub, &client.sources(Budget::default()));
         assert!(
-            human.contains("completeness: 0 complete, 0 appended after seal, 0 client file gone, 0 mismatch, 2 unverifiable (no_address 2"),
+            human.contains("completeness: 0 complete, 0 appended after seal, 0 client file gone, 0 mismatch, 0 not sealed, 2 unverifiable (no_address 2"),
             "{human}"
         );
         assert!(

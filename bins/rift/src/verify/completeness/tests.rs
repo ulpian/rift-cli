@@ -481,12 +481,135 @@ fn only_the_newest_shard_naming_a_session_is_audited_and_older_ones_are_counted(
         None,
         None,
     );
-    let sub = shard(sub, "cp-newer", 2, &sealed(&whole), None, None);
+    let sub = shard(
+        sub,
+        "cp-newer",
+        2,
+        &sealed(&whole),
+        Some(&sealed(&std::fs::read(client.subagent()).unwrap())),
+        Some(&sealed(&std::fs::read(client.spill()).unwrap())),
+    );
+    let summary = audit(&sub, &client.sources(Budget::default())).unwrap();
+    assert_eq!(summary.findings.len(), 3, "{:?}", words(&summary));
+    assert!(summary.findings.iter().all(|f| f.checkpoint == "cp-newer"));
+    assert_eq!(summary.count(Word::Complete), 3);
+    assert_eq!(summary.shards_skipped_older, 1);
+}
+
+/// A shard with no `transcript.jsonl` while the client holds the file the
+/// session cache names: the artifact is missing, a class of its own.
+#[test]
+fn a_main_transcript_the_shard_never_sealed_is_not_sealed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (client, _) = sealed_session(tmp.path());
+    let sub = shard_without_main(MemorySubstrate::local(), "cp-short");
+    let summary = audit(&sub, &client.sources(Budget::default())).unwrap();
+    let main = finding(&summary, "transcript.jsonl");
+    assert_eq!((main.word, main.reason), (Word::NotSealed, None));
+    assert_eq!((main.sealed_lines, main.client_lines), (0, 4));
+    assert_eq!(summary.findings.len(), 1, "{:?}", words(&summary));
+}
+
+/// The sealed transcript records the spawn and the spill, the client holds
+/// both files, and the shard sealed neither: each is `not_sealed` under the
+/// artifact name the archive would have given it.
+#[test]
+fn a_subagent_and_a_spill_named_in_the_sealed_prefix_but_absent_are_not_sealed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (client, _) = sealed_session(tmp.path());
+    let whole = sealed(&std::fs::read(&client.main).unwrap());
+    let sub = shard(MemorySubstrate::local(), "cp-1", 1, &whole, None, None);
+    let summary = audit(&sub, &client.sources(Budget::default())).unwrap();
+    assert_eq!(finding(&summary, "transcript.jsonl").word, Word::Complete);
+    let task = finding(&summary, &format!("tasks/{SPAWN}/transcript.jsonl"));
+    assert_eq!(
+        (task.word, task.task.as_deref()),
+        (Word::NotSealed, Some(SPAWN))
+    );
+    assert_eq!((task.sealed_lines, task.client_lines), (0, 2));
+    let spill = finding(&summary, &format!("tool-results/{SPILL}.txt"));
+    assert_eq!((spill.word, spill.client_lines), (Word::NotSealed, 3));
+    assert_eq!(summary.count(Word::NotSealed), 2);
+}
+
+/// What the client wrote after the seal is not owed by the shard: a spawn and
+/// a spill recorded only past the sealed prefix are not looked for.
+#[test]
+fn a_spawn_and_a_spill_recorded_after_the_seal_are_not_owed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (client, _) = sealed_session(tmp.path());
+    let whole = std::fs::read(&client.main).unwrap();
+    let first: Vec<u8> = whole
+        .split_inclusive(|b| *b == b'\n')
+        .take(1)
+        .flatten()
+        .copied()
+        .collect();
+    let sub = shard(
+        MemorySubstrate::local(),
+        "cp-1",
+        1,
+        &sealed(&first),
+        None,
+        None,
+    );
     let summary = audit(&sub, &client.sources(Budget::default())).unwrap();
     assert_eq!(summary.findings.len(), 1, "{:?}", words(&summary));
-    assert_eq!(summary.findings[0].checkpoint, "cp-newer");
-    assert_eq!(summary.findings[0].word, Word::Complete);
-    assert_eq!(summary.shards_skipped_older, 1);
+    assert_eq!(
+        finding(&summary, "transcript.jsonl").word,
+        Word::ClientAppendedAfterSeal
+    );
+}
+
+/// A spawn the sealed prefix records whose file no seam can find is
+/// unverifiable for want of an address, never a pass and never a miss.
+#[test]
+fn a_recorded_spawn_with_no_client_file_is_unverifiable_no_address() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (client, _) = sealed_session(tmp.path());
+    std::fs::remove_file(client.subagent()).unwrap();
+    std::fs::remove_file(client.spill()).unwrap();
+    let whole = sealed(&std::fs::read(&client.main).unwrap());
+    let sub = shard(MemorySubstrate::local(), "cp-1", 1, &whole, None, None);
+    let summary = audit(&sub, &client.sources(Budget::default())).unwrap();
+    let task = finding(&summary, &format!("tasks/{SPAWN}/transcript.jsonl"));
+    assert_eq!(
+        (task.word, task.reason),
+        (Word::Unverifiable, Some(Reason::NoAddress))
+    );
+    // The spill's address is named, its file gone: the client lost it.
+    let spill = finding(&summary, &format!("tool-results/{SPILL}.txt"));
+    assert_eq!(spill.word, Word::ClientFileGone);
+    assert_eq!(summary.count(Word::NotSealed), 0);
+}
+
+/// A shard of `SESSION` that seals no main transcript, nothing else either.
+fn shard_without_main(sub: MemorySubstrate, id: &str) -> MemorySubstrate {
+    sub.with_shard(CheckpointShard {
+        checkpoint_id: id.to_owned(),
+        dialect: Dialect::Rift,
+        prev: None,
+        ordinal: 1,
+    })
+    .with_artifact(
+        id,
+        "redaction_report.json",
+        format!(
+            r#"{{"rule_pack_versions":{},"input_sha256":"{}"}}"#,
+            versions_json(),
+            "a".repeat(64)
+        )
+        .as_bytes(),
+    )
+    .with_artifact(
+        id,
+        "metadata.json",
+        format!(
+            r#"{{"canon_version":3,"strategy":"manual-commit","merkle_root":"{}","sessions":["{SESSION}"]}}"#,
+            "9".repeat(64)
+        )
+        .as_bytes(),
+    )
 }
 
 #[test]
@@ -557,6 +680,7 @@ fn the_vocabulary_is_closed_and_each_word_spells_itself_once() {
             "client_file_gone",
             "client_appended_after_seal",
             "mismatch",
+            "not_sealed",
             "unverifiable"
         ]
     );
@@ -568,7 +692,8 @@ fn the_vocabulary_is_closed_and_each_word_spells_itself_once() {
     let empty = CompletenessSummary::empty();
     assert_eq!(
         empty.human(),
-        "0 complete, 0 appended after seal, 0 client file gone, 0 mismatch, 0 unverifiable \
+        "0 complete, 0 appended after seal, 0 client file gone, 0 mismatch, 0 not sealed, \
+         0 unverifiable \
          (no_address 0, packs_changed 0, over_budget 0, unreadable 0)"
     );
 }

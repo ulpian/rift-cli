@@ -16,6 +16,13 @@
 //! shard's report says which pack versions sealed it, and a different list
 //! makes the comparison meaningless rather than a finding.
 //!
+//! **Missing is its own class.** A sealed artifact that differs is a
+//! `mismatch`; an artifact the shard owed and does not hold is `not_sealed`:
+//! a main transcript the session cache names, and every subagent spawn and
+//! spill the client transcript records **within the sealed prefix** — its
+//! first sealed-line-count lines, since the gate keeps lines one for one — so
+//! what the client wrote after the seal is never counted as an omission.
+//!
 //! **Originals are not audited.** The spool of a rewritten result's original
 //! is deleted at seal by design, so there is no client evidence left to
 //! compare the sealed original with; counting them would be counting what
@@ -48,12 +55,12 @@ use std::path::{Path, PathBuf};
 
 use rift_core::{Result, SecretBytes};
 use rift_recall_substrate::{Dialect, SubstrateReader};
-use rift_shadow::backend::TRANSCRIPT_FULL_NAME;
+use rift_shadow::backend::{SPILLS_DIR, SPILL_SUFFIX, TRANSCRIPT_FULL_NAME};
 use rift_shadow::redact::{redact_with, RulePackSet};
 
 use super::artifacts::{shard_header, NativeArtifacts, ShardHeader};
 use crate::hooks::subagent_claims::read_claims;
-use crate::hooks::{contained, list_subagent_files, subagents_dir};
+use crate::hooks::{contained, list_subagent_files, spawned_agents, subagents_dir};
 
 /// The most of one client file the audit reads.
 pub(crate) const PER_FILE_BYTES: u64 = 32 * 1024 * 1024;
@@ -74,17 +81,22 @@ pub(crate) enum Word {
     ClientAppendedAfterSeal,
     /// Neither equal nor a prefix.
     Mismatch,
+    /// The client holds a file the shard owed and has no artifact for: a
+    /// main transcript the session cache names, or a subagent transcript or
+    /// spill that the sealed prefix records. Missing, not corrupt.
+    NotSealed,
     /// The comparison could not be made; [`Reason`] says why.
     Unverifiable,
 }
 
 impl Word {
     /// Every word, in reporting order.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Complete,
         Self::ClientFileGone,
         Self::ClientAppendedAfterSeal,
         Self::Mismatch,
+        Self::NotSealed,
         Self::Unverifiable,
     ];
 
@@ -94,6 +106,7 @@ impl Word {
             Self::ClientFileGone => "client_file_gone",
             Self::ClientAppendedAfterSeal => "client_appended_after_seal",
             Self::Mismatch => "mismatch",
+            Self::NotSealed => "not_sealed",
             Self::Unverifiable => "unverifiable",
         }
     }
@@ -188,12 +201,13 @@ impl CompletenessSummary {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "{} complete, {} appended after seal, {} client file gone, {} mismatch, {} \
-             unverifiable ({reasons})",
+            "{} complete, {} appended after seal, {} client file gone, {} mismatch, {} not \
+             sealed, {} unverifiable ({reasons})",
             self.count(Word::Complete),
             self.count(Word::ClientAppendedAfterSeal),
             self.count(Word::ClientFileGone),
             self.count(Word::Mismatch),
+            self.count(Word::NotSealed),
             self.count(Word::Unverifiable),
         )
     }
@@ -367,6 +381,41 @@ struct Source<'a> {
     kind: Kind,
 }
 
+/// The parts of one shard every source it yields shares.
+struct ShardCtx<'a> {
+    id: &'a str,
+    session: &'a str,
+    /// The main transcript's address, the default of every source.
+    main: Option<PathBuf>,
+    sealed_versions: &'a [String],
+}
+
+impl ShardCtx<'_> {
+    /// A source of this shard held to the main address, compared as a
+    /// transcript when the shard sealed `sealed`, as absent when it did not.
+    fn source<'s>(
+        &'s self,
+        task: Option<&'s str>,
+        artifact: String,
+        sealed: Option<&'s [u8]>,
+    ) -> Source<'s> {
+        Source {
+            checkpoint: self.id,
+            session: self.session,
+            task,
+            artifact,
+            sealed: sealed.unwrap_or_default(),
+            address: self.main.clone(),
+            sealed_versions: self.sealed_versions,
+            kind: if sealed.is_some() {
+                Kind::Transcript
+            } else {
+                Kind::Absent
+            },
+        }
+    }
+}
+
 /// How a source is compared.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -374,6 +423,9 @@ enum Kind {
     Transcript,
     /// A spill is written once: anything but equality is a mismatch.
     Whole,
+    /// The shard has no artifact for a file the client holds: any line of it
+    /// is `not_sealed`, and no pack list matters to that.
+    Absent,
 }
 
 /// One run's state: what was found and what of the budget is left.
@@ -432,7 +484,8 @@ pub(crate) fn audit(
 }
 
 impl Run<'_> {
-    /// Every source one shard seals for `session`.
+    /// Every source one shard seals for `session`, then every source the
+    /// sealed prefix owed it and it does not hold.
     fn audit_shard(
         &mut self,
         reader: &impl SubstrateReader,
@@ -442,89 +495,123 @@ impl Run<'_> {
     ) -> Result<()> {
         let sealed_versions = sealed_versions(reader, id)?;
         let native = NativeArtifacts::read(reader, id, header)?;
-        let main = self.sources.main_address(session);
-        // The client bytes each transcript comparison read, kept for the
-        // spill addresses they name; the key is the task, `None` the session's.
-        let mut raw: BTreeMap<Option<String>, SecretBytes> = BTreeMap::new();
-        if let Some(sealed) = native.transcript_full.as_deref() {
-            let read = self.audit_source(Source {
-                checkpoint: id,
-                session,
-                task: None,
-                artifact: TRANSCRIPT_FULL_NAME.to_owned(),
-                sealed,
-                address: main.clone(),
-                sealed_versions: &sealed_versions,
-                kind: Kind::Transcript,
-            });
-            raw.extend(read.map(|bytes| (None, bytes)));
-        }
+        let shard = ShardCtx {
+            id,
+            session,
+            main: self.sources.main_address(session),
+            sealed_versions: &sealed_versions,
+        };
+        // The captured prefix of each client transcript the comparisons read,
+        // for the spawns and spill addresses it records; the key is the task,
+        // `None` the session's.
+        let mut prefixes: BTreeMap<Option<String>, SecretBytes> = BTreeMap::new();
+        // A shard with no transcript is owed one only where the session cache
+        // names a client file; with neither there is no evidence to hold it to.
+        let sealed = native.transcript_full.as_deref();
+        let main = match (sealed, &shard.main) {
+            (None, None) => None,
+            _ => self.audit_source(shard.source(None, TRANSCRIPT_FULL_NAME.to_owned(), sealed)),
+        };
+        prefixes.extend(main.map(|bytes| (None, bytes)));
         for task in &native.tasks {
             let Some(sealed) = task.transcript_full.as_deref() else {
                 continue;
             };
-            let address = agent_id_of(&task.metadata)
-                .and_then(|agent| self.sources.task_address(session, main.as_deref(), &agent));
-            let read = self.audit_source(Source {
-                checkpoint: id,
-                session,
-                task: Some(&task.tool_use_id),
-                artifact: format!("tasks/{}/{TRANSCRIPT_FULL_NAME}", task.tool_use_id),
-                sealed,
-                address,
-                sealed_versions: &sealed_versions,
-                kind: Kind::Transcript,
+            let address = agent_id_of(&task.metadata).and_then(|agent| {
+                self.sources
+                    .task_address(session, shard.main.as_deref(), &agent)
             });
-            raw.extend(read.map(|bytes| (Some(task.tool_use_id.clone()), bytes)));
+            let read = self.audit_source(Source {
+                address,
+                ..shard.source(
+                    Some(&task.tool_use_id),
+                    task_artifact(&task.tool_use_id),
+                    Some(sealed),
+                )
+            });
+            prefixes.extend(read.map(|bytes| (Some(task.tool_use_id.clone()), bytes)));
         }
-        // The archive's containment root: `<dir of the transcript>/<session>`.
-        let session_dir = main
-            .as_deref()
-            .and_then(|m| Some(m.parent()?.join(session)));
-        self.audit_spills(
-            id,
-            session,
-            &native,
-            session_dir.as_deref(),
-            &raw,
-            &sealed_versions,
-        );
+        self.audit_unsealed_tasks(&shard, &native, &prefixes);
+        self.audit_spills(&shard, &native, &prefixes);
         Ok(())
     }
 
-    /// Every spill body the shard seals, at the address the client's own
-    /// transcript names for it.
+    /// Every subagent a sealed prefix records the spawn of whose transcript
+    /// the shard holds no subtree for, at the address the archive would have
+    /// read it from.
+    fn audit_unsealed_tasks(
+        &mut self,
+        shard: &ShardCtx<'_>,
+        native: &NativeArtifacts,
+        prefixes: &BTreeMap<Option<String>, SecretBytes>,
+    ) {
+        let sealed: BTreeSet<String> = native
+            .tasks
+            .iter()
+            .flat_map(|t| [Some(t.tool_use_id.clone()), agent_id_of(&t.metadata)])
+            .flatten()
+            .collect();
+        let mut owed = BTreeMap::new();
+        for prefix in prefixes.values() {
+            owed.extend(spawned_agents(prefix.as_slice()));
+        }
+        for (agent, call) in owed {
+            if sealed.contains(&agent) || sealed.contains(&call) {
+                continue;
+            }
+            let address = self
+                .sources
+                .task_address(shard.session, shard.main.as_deref(), &agent);
+            self.audit_source(Source {
+                address,
+                ..shard.source(Some(&call), task_artifact(&call), None)
+            });
+        }
+    }
+
+    /// Every spill a sealed prefix names, at the address the client's own
+    /// transcript names for it: held to its sealed body, or `not_sealed`
+    /// when the shard holds none.
     fn audit_spills(
         &mut self,
-        id: &str,
-        session: &str,
+        shard: &ShardCtx<'_>,
         native: &NativeArtifacts,
-        session_dir: Option<&Path>,
-        raw: &BTreeMap<Option<String>, SecretBytes>,
-        sealed_versions: &[String],
+        prefixes: &BTreeMap<Option<String>, SecretBytes>,
     ) {
-        let mut by_transcript: BTreeMap<Option<String>, BTreeMap<String, String>> = BTreeMap::new();
+        // The archive's containment root: `<dir of the transcript>/<session>`.
+        let session_dir = shard
+            .main
+            .as_deref()
+            .and_then(|m| Some(m.parent()?.join(shard.session)));
+        let named: BTreeMap<Option<String>, BTreeMap<String, String>> = prefixes
+            .iter()
+            .map(|(task, prefix)| (task.clone(), named_spills(prefix.as_slice())))
+            .collect();
+        let address = |task: &Option<String>, call: &str| {
+            contained(session_dir.as_deref()?, named.get(task)?.get(call)?)
+        };
+        let mut sealed: BTreeSet<(Option<String>, String)> = BTreeSet::new();
         for spill in &native.spills {
-            let Some(sealed) = spill.body.as_deref() else {
+            sealed.insert((spill.task.clone(), spill.claim.tool_use_id.clone()));
+            let Some(body) = spill.body.as_deref() else {
                 continue;
             };
-            let address = session_dir.and_then(|dir| {
-                let transcript = raw.get(&spill.task)?;
-                let names = by_transcript
-                    .entry(spill.task.clone())
-                    .or_insert_with(|| named_spills(transcript.as_slice()));
-                contained(dir, names.get(&spill.claim.tool_use_id)?)
-            });
             self.audit_source(Source {
-                checkpoint: id,
-                session,
-                task: spill.task.as_deref(),
-                artifact: spill.path(),
-                sealed,
-                address,
-                sealed_versions,
+                address: address(&spill.task, &spill.claim.tool_use_id),
                 kind: Kind::Whole,
+                ..shard.source(spill.task.as_deref(), spill.path(), Some(body))
             });
+        }
+        for (task, calls) in &named {
+            for call in calls.keys() {
+                if sealed.contains(&(task.clone(), call.clone())) {
+                    continue;
+                }
+                self.audit_source(Source {
+                    address: address(task, call),
+                    ..shard.source(task.as_deref(), spill_artifact(task.as_deref(), call), None)
+                });
+            }
         }
     }
 
@@ -569,7 +656,7 @@ impl Run<'_> {
         &mut self,
         src: &Source<'_>,
     ) -> std::result::Result<(Compared, Option<SecretBytes>), Reason> {
-        if src.sealed_versions != self.versions.as_slice() {
+        if src.kind != Kind::Absent && src.sealed_versions != self.versions.as_slice() {
             return Err(Reason::PacksChanged);
         }
         let Some(address) = &src.address else {
@@ -599,7 +686,10 @@ impl Run<'_> {
         let raw = SecretBytes::new(bytes);
         let current = redact_with(&raw, &self.sources.packs).map_err(|_| Reason::Unreadable)?;
         let compared = compare(src.sealed, current.redacted.as_slice(), src.kind);
-        Ok((compared, Some(raw)))
+        // Only the captured prefix is evidence of what the shard owed: the
+        // gate keeps lines one for one, so the sealed line count bounds it.
+        let prefix = first_lines(raw.as_slice(), lines(src.sealed).len());
+        Ok((compared, Some(SecretBytes::new(prefix.to_vec()))))
     }
 }
 
@@ -621,6 +711,32 @@ fn lines(bytes: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
+/// The first `n` lines of `bytes`, their terminators included.
+fn first_lines(bytes: &[u8], n: usize) -> &[u8] {
+    let Some(last) = n.checked_sub(1) else {
+        return &[];
+    };
+    let end = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'\n')
+        .nth(last)
+        .map_or(bytes.len(), |(at, _)| at + 1);
+    bytes.get(..end).unwrap_or(bytes)
+}
+
+/// `tasks/<call>/transcript.jsonl`, the subtree the archive seals a subagent
+/// under.
+fn task_artifact(call: &str) -> String {
+    format!("tasks/{call}/{TRANSCRIPT_FULL_NAME}")
+}
+
+/// The shard-relative name the archive seals a spill under.
+fn spill_artifact(task: Option<&str>, call: &str) -> String {
+    let dir = task.map_or_else(String::new, |task| format!("tasks/{task}/"));
+    format!("{dir}{SPILLS_DIR}/{call}{SPILL_SUFFIX}")
+}
+
 /// Line by line: equal is complete; a sealed strict prefix is an append for
 /// a transcript and a mismatch for a spill; anything else a mismatch naming
 /// the first index where the two differ or one ends.
@@ -632,6 +748,7 @@ fn compare(sealed: &[u8], current: &[u8], kind: Kind) -> Compared {
         .position(|(a, b)| a != b)
         .or_else(|| (sealed.len() != current.len()).then_some(sealed.len().min(current.len())));
     let word = match divergent {
+        Some(_) if kind == Kind::Absent => Word::NotSealed,
         None => Word::Complete,
         Some(at) if at == sealed.len() && kind == Kind::Transcript => Word::ClientAppendedAfterSeal,
         Some(_) => Word::Mismatch,

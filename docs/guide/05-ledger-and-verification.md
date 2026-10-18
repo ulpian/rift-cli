@@ -316,7 +316,10 @@ transcript file with the repository's current packs where the archive found it
 and compares it with the sealed bytes line by line, reporting one closed word per
 source: `complete`, `client_file_gone`, `client_appended_after_seal` (the sealed
 bytes are a strict prefix — the client wrote on, not a capture omission),
-`mismatch`, or `unverifiable` with a reason — `no_address`, `packs_changed` (a
+`mismatch`, `not_sealed` (the client holds a file the shard owed and has no
+artifact for — a main transcript the session cache names, or a subagent or spill
+the sealed prefix records; missing is reported apart from corrupt), or
+`unverifiable` with a reason — `no_address`, `packs_changed` (a
 different pack list makes the comparison meaningless rather than a finding),
 `over_budget`, `unreadable`. Subagent transcripts and spills are audited the same
 way; originals are not, since once sealed no client evidence of the original

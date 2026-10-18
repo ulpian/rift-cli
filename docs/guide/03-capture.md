@@ -109,7 +109,9 @@ Antigravity names its transcript on every hook as `transcriptPath` — the clien
 `transcript_full.jsonl`; the bridge copies only that address into the session
 cache, nothing on the hook path opens the file, and the archive seals it like
 every other agent's. Its records are not the shapes the compactor reduces, so
-for it the full copy is the record and the compaction saves little.
+for it the full copy is the record and the compaction saves little. The same holds
+for Codex: its rollout's records are not those shapes either, its compact form is
+nearly empty, and the full rollout sealed beside it is the record — nothing is lost.
 
 ### The wire
 
