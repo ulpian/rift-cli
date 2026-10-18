@@ -12,6 +12,8 @@
 
 #[cfg(unix)]
 mod archive;
+#[cfg(unix)]
+mod carrier;
 mod codec;
 #[cfg(unix)]
 mod cut;
