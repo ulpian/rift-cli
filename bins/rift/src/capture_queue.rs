@@ -12,9 +12,11 @@
 //! when a worker owns the checkout; missing historical or input proof can leave
 //! a delivery owed rather than authorize a guessed completion.
 //!
-//! Execution failures have a bounded retry budget. Uncertain input and ownership
-//! remain visible debt without spending that budget. Queue publication syncs
-//! file contents; directory updates are not guaranteed durable across power loss.
+//! Execution failures raise a retry count and a backoff recorded on the
+//! delivery; the third parks it — kept and named, never removed. Uncertain
+//! input and ownership remain visible debt without spending that budget. Queue
+//! publication syncs file contents; directory updates are not guaranteed
+//! durable across power loss.
 
 pub(crate) mod delivery;
 
@@ -51,17 +53,19 @@ pub(crate) struct QueueEntry {
     pub attempts: u32,
 }
 
-/// How many times one entry may fail before it is dropped with its reason.
+/// How many execution failures **park** a delivery (L-0A §4.1).
 ///
 /// A retry is worth having — an archive can lose a race for `index.lock` and
 /// succeed a second later. An *unbounded* retry is not: measured on a repo
 /// whose route needs a backend that fails every time, the queue grew one entry
 /// per commit and every commit re-attempted all of them, so the deferred work
-/// went quadratic in a repository that was never going to succeed. The C-diff
-/// facts are already durable when the archive fails (`archive_and_capture_with`
-/// persists them before it surfaces the error), so what a dropped entry costs
-/// is the checkpoint, and what it buys is a queue that stays bounded.
-pub(crate) const MAX_ATTEMPTS: u32 = 3;
+/// went quadratic in a repository that was never going to succeed. This bound
+/// used to **remove** the entry; it now parks it: the ordinary worker skips a
+/// parked delivery (and a not-yet-due one, by the backoff recorded beside
+/// `attempts`), `rift doctor` names it, and `rift doctor --fix` or
+/// `rift session retry` drains it regardless. The checkpoint is never given
+/// up on by a counter; it waits for a hand.
+pub(crate) const PARK_AFTER: u32 = 3;
 
 /// The queue directory for `git_dir`.
 ///
@@ -98,11 +102,42 @@ pub(crate) fn enqueue(git_dir: &Path, entry: &QueueEntry) -> Result<PathBuf> {
 /// `rift doctor` rather than deleted.
 ///
 /// The filename must match the validated context or supported legacy stem.
-/// Owned retries replace only attempts at the same validated context path.
+/// Owned retries replace only the retry state at the same validated context path.
 pub(crate) fn entries(git_dir: &Path) -> Vec<(PathBuf, QueueEntry)> {
     entries_from_paths(rift_shadow::hooks::run_state::list_entries(&queue_dir(
         git_dir,
     )))
+}
+
+/// The entries an ordinary pass runs at `now_ms`: due and unparked
+/// (`DrainPolicy::Due`). A repair road lists [`entries`] instead.
+pub(crate) fn entries_due(git_dir: &Path, now_ms: i64) -> Vec<(PathBuf, QueueEntry)> {
+    entry_states(git_dir)
+        .into_iter()
+        .filter(|(_, _, state)| state.is_due(now_ms))
+        .map(|(path, entry, _)| (path, entry))
+        .collect()
+}
+
+/// Every readable entry with its retry state, oldest first: the doctor's and
+/// the drain policy's reading.
+pub(crate) fn entry_states(git_dir: &Path) -> Vec<(PathBuf, QueueEntry, delivery::RetryState)> {
+    let mut out: Vec<(PathBuf, QueueEntry, delivery::RetryState)> =
+        rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter_map(|p| {
+                let (value, entry) = read_entry(&p).ok()?;
+                let state = delivery::retry_state(&value).ok()?;
+                Some((p, entry, state))
+            })
+            .collect();
+    out.sort_by(|a, b| {
+        a.1.queued_at_ms
+            .cmp(&b.1.queued_at_ms)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out
 }
 
 /// Advisory readable entries without resolving a writer or journaling migration.
@@ -189,12 +224,7 @@ pub(crate) fn mark_error(path: &Path, reason: &str) {
 /// that fails is dropped in silence: a marker is a diagnostic, and refusing to
 /// write one must never be louder than what it was going to say.
 pub(crate) fn mark_note(git_dir: &Path, key: &str, reason: &str) {
-    let usable = !key.is_empty()
-        && key.len() <= 64
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !usable {
+    if !is_note_key(key) {
         return;
     }
     let dir = queue_dir(git_dir);
@@ -215,6 +245,56 @@ pub(crate) fn take_errors(git_dir: &Path) -> Vec<String> {
 /// this diagnostic form so `/doctor` cannot mutate repository state.
 pub(crate) fn peek_errors(git_dir: &Path) -> Vec<String> {
     read_errors(git_dir, false)
+}
+
+/// Read the one note under `key` (`mark_note`'s channel) without consuming
+/// it: how report-only doctor pairs a parked job with its last note. A
+/// second report reads the same text.
+pub(crate) fn peek_note(git_dir: &Path, key: &str) -> Option<String> {
+    let path =
+        rift_shadow::hooks::run_state::read_path(&queue_dir(git_dir), &format!("{key}.error"));
+    std::fs::read_to_string(path).ok()
+}
+
+/// The last failure reason recorded under `key`, which no hook consumes: the
+/// note itself is said once and deleted, so "one note per new reason" and the
+/// doctor's parked line both need the reason to outlive the saying.
+pub(crate) fn last_reason(git_dir: &Path, key: &str) -> Option<String> {
+    let path =
+        rift_shadow::hooks::run_state::read_path(&queue_dir(git_dir), &format!("{key}.reason"));
+    std::fs::read_to_string(path).ok()
+}
+
+/// Record `reason` as the last failure reason under `key` (see
+/// [`last_reason`]), screened and best-effort exactly as [`mark_note`];
+/// whether it differs from the reason recorded before it.
+pub(crate) fn record_reason(git_dir: &Path, key: &str, reason: &str) -> bool {
+    let one_line: String = reason.chars().filter(|c| *c != '\n').take(300).collect();
+    let changed = last_reason(git_dir, key).as_deref() != Some(one_line.as_str());
+    if !is_note_key(key) {
+        return changed;
+    }
+    let dir = queue_dir(git_dir);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join(format!("{key}.reason")), one_line);
+    }
+    changed
+}
+
+/// Forget the last failure reason under `key`: the job it described landed.
+pub(crate) fn forget_reason(git_dir: &Path, key: &str) {
+    if is_note_key(key) {
+        let _ = std::fs::remove_file(queue_dir(git_dir).join(format!("{key}.reason")));
+    }
+}
+
+/// Whether `key` may name a note file: non-empty `[a-z0-9-]`, at most 64 bytes.
+fn is_note_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn read_errors(git_dir: &Path, consume: bool) -> Vec<String> {
@@ -299,29 +379,54 @@ pub(crate) fn remove_owned(path: &Path, owner: &QueueLock) -> Result<()> {
     }
 }
 
+/// Record one execution failure at `failed_at_ms` (the worker's clock, not
+/// the entry's): the retry state advances per §4.1 and the reason lands
+/// beside the entry, said as [`failure_note`] spells it. The entry is **kept**
+/// whatever the count — the third failure parks it. Returns the new state.
 pub(crate) fn record_failure_owned(
     path: &Path,
     entry: &QueueEntry,
     reason: &str,
     owner: &QueueLock,
-) -> Result<bool> {
+    failed_at_ms: i64,
+) -> Result<delivery::RetryState> {
     owner.check_path(path)?;
     let (value, actual) = read_entry(path)?;
     if actual != *entry {
         return Err(deferred("capture delivery changed before retry"));
     }
-    let attempts = entry.attempts.saturating_add(1);
-    if attempts >= MAX_ATTEMPTS {
-        mark_error(
-            path,
-            &format!("{reason} (gave up after {attempts} attempts)"),
-        );
-        remove_owned(path, owner)?;
-        return Ok(false);
+    let next = delivery::retry_state(&value)?.after_failure(failed_at_ms);
+    delivery::replace_retry_state(path, &entry.commit, &value, next, owner)?;
+    mark_error(path, &failure_note(reason, next, None));
+    Ok(next)
+}
+
+/// The note one failure leaves, by where the retry state stands (§4.1):
+/// before the park, the reason and when it is retried; at the park, the two
+/// roads that retry it, naming the session when the job has one; past the
+/// park, the reason alone — the caller rewrites it only when it changed.
+pub(crate) fn failure_note(
+    reason: &str,
+    state: delivery::RetryState,
+    session: Option<&str>,
+) -> String {
+    use std::cmp::Ordering;
+    match state.attempts.cmp(&PARK_AFTER) {
+        Ordering::Less => format!(
+            "{reason}; retried after {}",
+            rift_core::Timestamp::from_millis(state.next_due_ms)
+        ),
+        Ordering::Equal => {
+            let retry = session.map_or_else(
+                || "`rift session retry --all`".to_owned(),
+                |session| format!("`rift session retry --session {session}`"),
+            );
+            format!(
+                "{reason} — parked after {PARK_AFTER} attempts; `rift doctor --fix` or {retry} retries it"
+            )
+        }
+        Ordering::Greater => reason.to_owned(),
     }
-    delivery::replace_attempts(path, &entry.commit, &value, attempts, owner)?;
-    mark_error(path, reason);
-    Ok(true)
 }
 
 /// Why ownership could not be established. No queue payload belongs in it.
@@ -776,35 +881,53 @@ mod tests {
         assert!(acquire_lock(tmp.path(), 2).is_some());
     }
 
+    /// Re-pinned per L-0A Q5 / design §4.1: the bound is still three
+    /// execution failures, and it still keeps the queue off the quadratic road
+    /// (a parked entry is skipped by the ordinary pass, so nothing re-attempts
+    /// it on every commit) — but the third failure **parks** the entry rather
+    /// than removing it. Both halves are proven: the file is still present
+    /// after the third failure AND `parked == true` with `next_due_ms` set.
     #[test]
-    fn an_entry_that_keeps_failing_is_dropped_rather_than_retried_forever() {
+    fn an_entry_that_keeps_failing_is_parked_rather_than_retried_forever_or_dropped() {
         // Measured, not imagined: on a repository whose route needs a backend
         // that fails every time, the queue grew one entry per commit and every
         // commit re-attempted all of them — the deferred work went quadratic
         // in a repository that was never going to succeed.
         let tmp = tempfile::tempdir().unwrap();
         let owner = acquire_owner(tmp.path()).unwrap();
+        let now = 1_790_000_000_000;
         let mut e = entry(A, 1);
         let mut path = enqueue(tmp.path(), &e).unwrap();
-        for attempt in 1..MAX_ATTEMPTS {
-            assert!(
-                record_failure_owned(&path, &e, "boom", &owner).unwrap(),
-                "attempt {attempt} keeps the entry"
-            );
+        for attempt in 1..PARK_AFTER {
+            let state = record_failure_owned(&path, &e, "boom", &owner, now).unwrap();
+            assert_eq!(state.attempts, attempt);
+            assert!(!state.parked, "attempt {attempt} keeps the entry due later");
             let back = entries(tmp.path());
             assert_eq!(back.len(), 1, "one entry, rewritten in place");
             e = back[0].1.clone();
             path = back[0].0.clone();
             assert_eq!(e.attempts, attempt, "the count is durable");
+            assert!(entries_due(tmp.path(), now).is_empty(), "not due yet");
+            assert_eq!(entries_due(tmp.path(), state.next_due_ms).len(), 1);
         }
+        let parked = record_failure_owned(&path, &e, "boom", &owner, now).unwrap();
+        assert_eq!(parked.attempts, PARK_AFTER);
+        assert!(parked.parked, "the third failure parks");
+        assert_eq!(parked.next_due_ms, now + 120_000);
+        assert!(path.exists(), "the entry is kept, never dropped");
+        assert_eq!(entries(tmp.path()).len(), 1, "a repair road still lists it");
         assert!(
-            !record_failure_owned(&path, &e, "boom", &owner).unwrap(),
-            "the last attempt gives up"
+            entries_due(tmp.path(), i64::MAX).is_empty(),
+            "the ordinary pass never runs a parked entry"
         );
-        assert!(entries(tmp.path()).is_empty(), "queue stays bounded");
+        let states = entry_states(tmp.path());
+        assert_eq!(states[0].2, parked);
         let said = take_errors(tmp.path());
         assert_eq!(said.len(), 1);
-        assert!(said[0].contains("gave up after"), "and says so: {said:?}");
+        assert!(
+            said[0].contains("parked after 3 attempts") && said[0].contains("rift doctor --fix"),
+            "and says so: {said:?}"
+        );
     }
 
     #[test]
@@ -837,9 +960,20 @@ mod tests {
         assert_eq!(entry_file_count(tmp.path()), 0, "drained");
     }
 
+    /// Re-asserted per L-0A Q5 / design §4.1: three execution failures is
+    /// still the bound (the sync-format note says so), and what it bounds is
+    /// now the park, not a removal — `PARK_AFTER` has no "remove" meaning.
     #[test]
     fn the_retry_bound_remains_three_actual_execution_failures() {
-        assert_eq!(MAX_ATTEMPTS, 3, "sync-format says three execution failures");
+        assert_eq!(
+            PARK_AFTER, 3,
+            "sync-format says three execution failures park"
+        );
+        let third = delivery::RetryState::default()
+            .after_failure(0)
+            .after_failure(0)
+            .after_failure(0);
+        assert!(third.parked && third.attempts == PARK_AFTER);
     }
 
     #[test]

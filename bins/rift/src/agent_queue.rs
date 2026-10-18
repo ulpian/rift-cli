@@ -19,9 +19,11 @@
 //! under a stale identity. No capture bytes of either kind are journaled, for
 //! the reason `capture_queue` gives.
 //!
-//! Filenames bind the complete context except attempts. Identical publication
-//! keeps the retained retry count; distinct context remains a separate delivery.
-//! Completion requires the worker's per-kind proof, not the filename alone.
+//! Filenames bind the complete context except the retry state (`attempts`,
+//! `next_due_ms`, `parked`, read through `delivery::retry_state`). Identical
+//! publication keeps the retained retry state; distinct context remains a
+//! separate delivery. Completion requires the worker's per-kind proof, not the
+//! filename alone.
 
 use std::path::{Path, PathBuf};
 
@@ -493,6 +495,27 @@ fn session_key(session_id: &str) -> String {
 }
 
 impl JobKind {
+    /// The session a job belongs to, when its kind names one — what the retry
+    /// verb and the doctor's parked lines are keyed by.
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Condense { session_id, .. } | Self::ToolResultTokens { session_id, .. } => {
+                Some(session_id)
+            }
+            Self::Archive(archive) => Some(&archive.session_id),
+            Self::BoundarySnapshot(snapshot) => Some(&snapshot.session_id),
+            Self::ReadTokens { .. }
+            | Self::ServeAudit(_)
+            | Self::AttributeServe(_)
+            | Self::SearchIndex
+            | Self::DocConvert { .. }
+            | Self::BasisSnapshot { .. }
+            | Self::DocSweep
+            | Self::SweepIdle { .. }
+            | Self::MoveRunState => None,
+        }
+    }
+
     /// The file stem this job is journaled under: its identity, so the same
     /// work enqueued twice is one file.
     fn stem(&self) -> Option<String> {
@@ -717,24 +740,52 @@ pub(crate) fn logical_stem(job: &AgentJob) -> Option<String> {
     job.kind.stem()
 }
 
-/// How many job FILES the journal holds, parseable or not (the doctor count;
-/// see `capture_queue::entry_file_count` for why it is not [`jobs`]`.len()`).
-pub(crate) fn job_file_count(git_dir: &Path) -> usize {
-    rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
-        .iter()
-        .filter(|path| path.extension().is_some_and(|x| x == "json"))
-        .count()
+/// The jobs an ordinary pass runs at `now_ms`: due and unparked
+/// (`DrainPolicy::Due`), in [`jobs`]' order. A repair road lists [`jobs`].
+pub(crate) fn jobs_due(git_dir: &Path, now_ms: i64) -> Vec<(PathBuf, AgentJob)> {
+    retry_states(git_dir)
+        .into_iter()
+        .filter(|(_, _, state)| state.is_due(now_ms))
+        .map(|(path, job, _)| (path, job))
+        .collect()
 }
 
-/// Record a failed attempt: keep the job with its count raised, or — once it
-/// has spent `capture_queue::MAX_ATTEMPTS` — drop it. Either way the reason
-/// lands on the said-once channel. Returns whether the job survives.
-pub(crate) fn record_failure_owned(
+/// Every readable job with its retry state, in [`jobs`]' order: the doctor's,
+/// the retry verb's and the drain policy's one reading of the two sibling
+/// members (L-0A §4.1 as amended 2026-10-17).
+pub(crate) fn retry_states(
+    git_dir: &Path,
+) -> Vec<(
+    PathBuf,
+    AgentJob,
+    crate::capture_queue::delivery::RetryState,
+)> {
+    let mut out: Vec<_> = rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| {
+            let (value, job) = read_job(&p).ok()?;
+            let state = crate::capture_queue::delivery::retry_state(&value).ok()?;
+            Some((p, job, state))
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.1.kind
+            .rank()
+            .cmp(&b.1.kind.rank())
+            .then_with(|| a.1.queued_at_ms.cmp(&b.1.queued_at_ms))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out
+}
+
+/// Reset a parked job to due-now under the member owner, keeping its
+/// `attempts`: the retry verb's one write.
+pub(crate) fn unpark_owned(
     path: &Path,
     job: &AgentJob,
-    reason: &str,
     owner: &crate::capture_queue::QueueLock,
-) -> Result<bool> {
+) -> Result<()> {
     owner.check_path(path)?;
     let (value, actual) = read_job(path)?;
     if actual != *job {
@@ -744,19 +795,52 @@ pub(crate) fn record_failure_owned(
     }
     let stem = logical_stem(job)
         .ok_or_else(|| crate::capture_queue::deferred("agent identity unavailable"))?;
-    let attempts = job.attempts.saturating_add(1);
-    if attempts >= crate::capture_queue::MAX_ATTEMPTS {
-        crate::capture_queue::mark_note(
-            owner.git_dir(),
-            &note_key(job),
-            &format!("{reason} (gave up after {attempts} attempts)"),
-        );
-        crate::capture_queue::remove_owned(path, owner)?;
-        return Ok(false);
+    let next = crate::capture_queue::delivery::retry_state(&value)?.unparked();
+    crate::capture_queue::delivery::replace_retry_state(path, &stem, &value, next, owner)
+}
+
+/// How many job FILES the journal holds, parseable or not (the doctor count;
+/// see `capture_queue::entry_file_count` for why it is not [`jobs`]`.len()`).
+pub(crate) fn job_file_count(git_dir: &Path) -> usize {
+    rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
+        .iter()
+        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .count()
+}
+
+/// Record one execution failure at `failed_at_ms` (the worker's clock): the
+/// job is **kept** with its retry state advanced per §4.1 — the third failure
+/// parks it, nothing removes it — and the reason lands on the said-once
+/// channel as `capture_queue::failure_note` spells it, rewritten past the park
+/// only when the reason changed (one note per new reason). Returns the new
+/// state.
+pub(crate) fn record_failure_owned(
+    path: &Path,
+    job: &AgentJob,
+    reason: &str,
+    owner: &crate::capture_queue::QueueLock,
+    failed_at_ms: i64,
+) -> Result<crate::capture_queue::delivery::RetryState> {
+    owner.check_path(path)?;
+    let (value, actual) = read_job(path)?;
+    if actual != *job {
+        return Err(crate::capture_queue::deferred(
+            "agent delivery changed before retry",
+        ));
     }
-    crate::capture_queue::delivery::replace_attempts(path, &stem, &value, attempts, owner)?;
-    crate::capture_queue::mark_note(owner.git_dir(), &note_key(job), reason);
-    Ok(true)
+    let stem = logical_stem(job)
+        .ok_or_else(|| crate::capture_queue::deferred("agent identity unavailable"))?;
+    let next = crate::capture_queue::delivery::retry_state(&value)?.after_failure(failed_at_ms);
+    crate::capture_queue::delivery::replace_retry_state(path, &stem, &value, next, owner)?;
+    let key = note_key(job);
+    let note = crate::capture_queue::failure_note(reason, next, job.kind.session_id());
+    // Past the park the note is said once per new reason; the reason record
+    // outlives the note, which the next hook consumes.
+    let changed = crate::capture_queue::record_reason(owner.git_dir(), &key, reason);
+    if changed || next.attempts <= crate::capture_queue::PARK_AFTER {
+        crate::capture_queue::mark_note(owner.git_dir(), &key, &note);
+    }
+    Ok(next)
 }
 
 /// The marker a finished condense leaves, keyed by session: the worker that
@@ -795,6 +879,12 @@ pub(crate) fn note_key(job: &AgentJob) -> String {
     let stem = job.kind.stem().unwrap_or_else(|| "agent-job".to_owned());
     let short: String = stem.chars().take(40).collect();
     format!("agent-{short}")
+}
+
+/// A path-safe key for a said-once note about `session_id` that no one job
+/// owns (the cleanup a stale completion left owed, §4.3).
+pub(crate) fn note_key_for_session(session_id: &str) -> String {
+    session_key(session_id).chars().take(16).collect()
 }
 
 #[cfg(test)]
@@ -918,26 +1008,70 @@ mod tests {
         assert!(moved.exists(), "left for the doctor, not deleted");
     }
 
-    /// Failure is loud, bounded and idempotent: the note lands on the shared
-    /// said-once channel, the job survives until the bound, then it goes.
+    /// Re-pinned per L-0A Q5 / design §4.1. Failure is loud, bounded and
+    /// idempotent: the note lands on the shared said-once channel with the
+    /// §4.1 texts, the count and the backoff are durable, and the third failure
+    /// **parks** the job — both halves proven: the file is still present after
+    /// the third failure AND `parked == true` with `next_due_ms` set. Past the
+    /// park the note is rewritten only for a new reason.
     #[test]
     fn a_failing_job_is_said_once_and_bounded() {
         let tmp = tempfile::tempdir().unwrap();
         let owner = crate::capture_queue::acquire_owner(tmp.path()).unwrap();
+        let now = 1_790_000_000_000;
         let mut job = condense("s", 1);
         let path = enqueue(tmp.path(), &job).unwrap();
-        for attempt in 1..crate::capture_queue::MAX_ATTEMPTS {
-            assert!(record_failure_owned(&path, &job, "no head", &owner).unwrap());
-            assert_eq!(
-                crate::capture_queue::take_errors(tmp.path()),
-                vec!["no head"]
-            );
+        for attempt in 1..crate::capture_queue::PARK_AFTER {
+            let state = record_failure_owned(&path, &job, "no head", &owner, now).unwrap();
+            assert_eq!((state.attempts, state.parked), (attempt, false));
+            let said = crate::capture_queue::take_errors(tmp.path());
+            assert_eq!(said.len(), 1);
+            assert!(said[0].starts_with("no head; retried after "), "{said:?}");
             job = read_job(&path).unwrap().1;
             assert_eq!(job.attempts, attempt);
+            assert!(
+                jobs_due(tmp.path(), now).is_empty(),
+                "not due before the backoff"
+            );
+            assert_eq!(jobs_due(tmp.path(), state.next_due_ms).len(), 1);
         }
-        assert!(!record_failure_owned(&path, &job, "no head", &owner).unwrap());
-        assert!(jobs(tmp.path()).is_empty(), "spent its actual attempts");
-        assert!(crate::capture_queue::take_errors(tmp.path())[0].contains("gave up"));
+        let parked = record_failure_owned(&path, &job, "no head", &owner, now).unwrap();
+        assert!(parked.parked && parked.attempts == crate::capture_queue::PARK_AFTER);
+        assert_eq!(parked.next_due_ms, now + 120_000);
+        assert!(path.exists(), "parked, never removed");
+        assert_eq!(jobs(tmp.path()).len(), 1, "a repair road still lists it");
+        assert!(
+            jobs_due(tmp.path(), i64::MAX).is_empty(),
+            "the ordinary pass skips it"
+        );
+        assert_eq!(retry_states(tmp.path())[0].2, parked);
+        assert_eq!(
+            crate::capture_queue::take_errors(tmp.path()),
+            vec![
+                "no head — parked after 3 attempts; `rift doctor --fix` or \
+                 `rift session retry --session s` retries it"
+            ]
+        );
+        // Past the park: the same reason says nothing new; a new reason does.
+        job = read_job(&path).unwrap().1;
+        record_failure_owned(&path, &job, "no head", &owner, now).unwrap();
+        assert!(crate::capture_queue::take_errors(tmp.path()).is_empty());
+        job = read_job(&path).unwrap().1;
+        record_failure_owned(&path, &job, "disk full", &owner, now).unwrap();
+        assert_eq!(
+            crate::capture_queue::take_errors(tmp.path()),
+            vec!["disk full"]
+        );
+        // The retry verb's write: due now, unparked, the history kept.
+        job = read_job(&path).unwrap().1;
+        unpark_owned(&path, &job, &owner).unwrap();
+        let (_, job, state) = retry_states(tmp.path()).remove(0);
+        assert_eq!(
+            (state.attempts, state.next_due_ms, state.parked),
+            (5, 0, false)
+        );
+        assert_eq!(job.attempts, 5);
+        assert_eq!(jobs_due(tmp.path(), 0).len(), 1);
     }
 
     fn audit(call_id: &str, at: i64) -> AgentJob {
@@ -1286,7 +1420,8 @@ mod tests {
         );
         std::fs::remove_file(legacy).unwrap();
         let path = crate::capture_queue::delivery::publish(&dir, &stem, &value).unwrap();
-        assert!(record_failure_owned(&path, &job, "test execution failure", &owner).unwrap());
+        let state = record_failure_owned(&path, &job, "test execution failure", &owner, 1).unwrap();
+        assert!(!state.parked && state.attempts == 1);
         let (retained, retried) = read_job(&path).unwrap();
         assert_eq!(retained["future"], value["future"]);
         assert_eq!(retried.attempts, 1);

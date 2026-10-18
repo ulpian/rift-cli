@@ -236,7 +236,7 @@ pub async fn archive_and_capture(
         backend,
         store,
         repo,
-        commit_hex,
+        Some(commit_hex),
         session,
         raw_capture,
         decision,
@@ -254,7 +254,9 @@ pub async fn archive_and_capture(
 
 /// [`archive_and_capture`] over a **precomputed** [`CommitCapture`] — for callers
 /// that already diffed the commit (e.g. to evaluate the sensitive-path trigger)
-/// and must not pay for the diff twice.
+/// and must not pay for the diff twice. `commit_hex` is the anchor the shard
+/// names; the commit road always has one, the session roads pass `None` on an
+/// unborn HEAD.
 ///
 /// # Errors
 /// [`rift_core::RiftError`] if the archive or an insert fails.
@@ -264,7 +266,7 @@ pub async fn archive_and_capture_with(
     backend: &impl ShadowBackend,
     store: &impl CanonicalStore,
     repo: &Path,
-    commit_hex: &str,
+    commit_hex: Option<&str>,
     session: &str,
     raw_capture: &SecretBytes,
     decision: ArchiveDecision,

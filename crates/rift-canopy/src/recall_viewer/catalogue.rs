@@ -197,11 +197,14 @@ fn draw_checkpoint_row(
     } else {
         "(no user/assistant text)"
     });
-    let anchor = row.anchor_commit.as_deref().map_or("—", short_id);
     let details = [
         (excerpt.to_owned(), style),
         (
-            format!("cp {} · commit {anchor}", short_id(&row.checkpoint_id)),
+            format!(
+                "cp {} · {}",
+                short_id(&row.checkpoint_id),
+                anchor_label(row)
+            ),
             vm.theme.dim().with_bg_if(selected, crate::theme::SELECT_BG),
         ),
         (
@@ -274,6 +277,19 @@ fn chain_summary(row: &ViewerCheckpointRow) -> String {
         })
 }
 
+/// The one spelling of a missing anchor on every surface: a checkpoint
+/// minted on an unborn HEAD names no commit, and the row says so rather than
+/// inventing one from the local path or showing a blank.
+pub(super) const NO_ANCHOR_LABEL: &str = "no commit anchor";
+
+/// `commit <short id>` for an anchored row, [`NO_ANCHOR_LABEL`] otherwise.
+fn anchor_label(row: &ViewerCheckpointRow) -> String {
+    row.anchor_commit.as_deref().map_or_else(
+        || NO_ANCHOR_LABEL.to_owned(),
+        |oid| format!("commit {}", short_id(oid)),
+    )
+}
+
 /// The first local branch containing the anchor, with a `+n` for the rest.
 fn branch_summary(row: &ViewerCheckpointRow) -> String {
     let Some(name) = row.local_branches.first() else {
@@ -296,6 +312,18 @@ fn more_suffix(more: usize) -> String {
 mod tests {
     use super::*;
     use crate::recall_viewer::fixtures::seeded_row;
+
+    /// A row with no anchor names the absence with the one label every
+    /// surface uses; an anchored row shows its commit. Nothing is invented
+    /// from where the row was read.
+    #[test]
+    fn a_row_without_an_anchor_is_labelled_rather_than_blank() {
+        let mut r = seeded_row("c1", "");
+        assert_eq!(anchor_label(&r), "no commit anchor");
+        assert_eq!(anchor_label(&r), NO_ANCHOR_LABEL);
+        r.anchor_commit = Some("0123456789abcdef".to_owned());
+        assert_eq!(anchor_label(&r), "commit 0123456789ab");
+    }
 
     /// ★ worktree provenance, the catalogue's half: a checkpoint with no
     /// `checkpoint_worktree` row badges `unknown` — never `main`, never a

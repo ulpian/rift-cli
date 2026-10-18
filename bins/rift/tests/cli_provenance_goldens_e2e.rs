@@ -135,7 +135,7 @@ fn archive_for(
     let mut archive = CheckpointArchive {
         boundary_gaps: None,
         repo: repo.to_path_buf(),
-        commit: String::new(),
+        commit: None,
         checkpoint_id: String::new(),
         sessions: vec![seed.session.to_owned()],
         strategy: "manual-commit".to_owned(),
@@ -181,8 +181,8 @@ fn archive_both_shards(
     ck_x: &mut CheckpointArchive,
     ck_y: &mut CheckpointArchive,
 ) {
-    anchor.clone_into(&mut ck_x.commit);
-    anchor.clone_into(&mut ck_y.commit);
+    ck_x.commit = Some(anchor.to_owned());
+    ck_y.commit = Some(anchor.to_owned());
     let git_repo = rift_git::discover(repo).unwrap();
     let backend = rift_shadow::NativeBackend::new(rift_git::PlumbingGitWrite::new(git_repo));
     backend.archive_checkpoint(ck_x).unwrap();

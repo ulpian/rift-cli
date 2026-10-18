@@ -46,10 +46,14 @@ fn exact_own_hold_uses_normal_readiness_and_preserves_migrated_context_and_attem
     assert_eq!(crate::agent_queue::read_job(&target).unwrap().1.attempts, 2);
     let job = crate::agent_queue::read_job(&target).unwrap().1;
     assert!(crate::capture_queue::remove_owned(&target, &f.owner).is_err());
-    assert!(
-        crate::agent_queue::record_failure_owned(&target, &job, "fixture-failure", &f.owner)
-            .is_err()
-    );
+    assert!(crate::agent_queue::record_failure_owned(
+        &target,
+        &job,
+        "fixture-failure",
+        &f.owner,
+        1
+    )
+    .is_err());
     assert_eq!(std::fs::read(&target).unwrap(), bytes);
     assert_eq!(std::fs::read(f.hold_path()).unwrap(), hold);
 }

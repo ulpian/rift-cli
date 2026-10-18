@@ -162,7 +162,13 @@ fn drain(root: &Path, repo: &rift_git::RepoPaths, frozen: &[FrozenDelivery]) -> 
     let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
     let timer = crate::hooktime::HookTimer::new("recovery-hold-fixture", false);
     let mut attempted = BTreeSet::new();
-    super::drain_locked(&timer, &repo.git_dir, &owner, &mut attempted);
+    super::drain_locked(
+        &timer,
+        &repo.git_dir,
+        &owner,
+        &mut attempted,
+        super::DrainPolicy::Due,
+    );
     observe_after_drain(root, &repo.git_dir, frozen)
 }
 
@@ -260,6 +266,7 @@ fn direct_migration_removal_and_retry_refuse_a_hold_without_spending_attempts() 
             &job,
             "fixture execution failure",
             &owner,
+            1,
         )
         .unwrap_err();
         assert!(crate::capture_queue::is_deferred(&retried));

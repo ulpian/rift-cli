@@ -276,6 +276,7 @@ mod tests {
             &repo.git_dir,
             &owner,
             &mut std::collections::BTreeSet::new(),
+            crate::hooks::worker::DrainPolicy::Due,
         );
 
         let order: Vec<&str> = t
@@ -421,19 +422,17 @@ mod tests {
             .unwrap()
         };
         let before = facts();
-        for attempt in 1..=crate::capture_queue::MAX_ATTEMPTS {
+        // L-0A Q5 / design §4.1: three failures park the job — present AND
+        // parked with a backoff — where they used to remove it.
+        for attempt in 1..=crate::capture_queue::PARK_AFTER {
             crate::hooks::worker::drain_jobs(
                 repo.git_dir.to_str(),
                 crate::hooks::worker::LockWait::None,
             );
-            if attempt < crate::capture_queue::MAX_ATTEMPTS {
-                assert_eq!(
-                    crate::agent_queue::read_job(&path).unwrap().1.attempts,
-                    attempt
-                );
-            } else {
-                assert!(!path.exists());
-            }
+            let (_, _, state) = crate::agent_queue::retry_states(&repo.git_dir).remove(0);
+            assert_eq!(state.attempts, attempt);
+            assert_eq!(state.parked, attempt == crate::capture_queue::PARK_AFTER);
+            assert!(state.next_due_ms > 0 && path.exists());
             assert_eq!(
                 std::fs::read(&obstruction).unwrap(),
                 b"blob-write-obstruction"

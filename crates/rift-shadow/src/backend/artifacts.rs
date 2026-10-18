@@ -234,7 +234,12 @@ impl CheckpointArchive {
             "sessions".into(),
             serde_json::Value::from(self.sessions.clone()),
         );
-        obj.insert("commit".into(), self.commit.clone().into());
+        // Absent-when-empty like every optional member: an anchorless shard
+        // (unborn HEAD) writes no key rather than a sentinel a reader would
+        // have to screen and name.
+        if let Some(commit) = &self.commit {
+            obj.insert("commit".into(), commit.clone().into());
+        }
         self.insert_worktree_members(&mut obj);
         canonical_json(&serde_json::Value::Object(obj))
     }
@@ -1022,6 +1027,25 @@ mod tests {
         assert_eq!(n.writer().structural_count(), 6);
     }
 
+    /// The anchor is the document's one optional member a live seal may lack:
+    /// a checkpoint minted on an unborn HEAD names no commit, and the member
+    /// is then absent — never `""`, which a reader would have to screen as a
+    /// malformed oid and name as an issue. A present anchor is written as it
+    /// always was, so every committed shard's bytes stand.
+    #[test]
+    fn an_absent_anchor_is_omitted_from_metadata_and_a_present_one_is_written() {
+        let mut anchorless = archive();
+        anchorless.commit = None;
+        let meta: serde_json::Value = serde_json::from_slice(&anchorless.metadata_json()).unwrap();
+        assert!(
+            meta.get("commit").is_none(),
+            "an absent anchor writes no member: {meta}"
+        );
+        let anchored: serde_json::Value =
+            serde_json::from_slice(&archive().metadata_json()).unwrap();
+        assert_eq!(anchored["commit"], "abc123");
+    }
+
     #[test]
     fn metadata_and_report_are_canonical_and_valid() {
         use rift_recall_types::checkpoint::{CheckpointMetadata, RedactionReportFacts};
@@ -1032,7 +1056,7 @@ mod tests {
             Some(a.merkle_root().to_hex()).as_deref()
         );
         assert_eq!(meta.sessions, a.sessions);
-        assert_eq!(meta.commit.as_deref(), Some(a.commit.as_str()));
+        assert_eq!(meta.commit, a.commit);
         let report: RedactionReportFacts =
             serde_json::from_slice(&a.redaction_report_json()).unwrap();
         assert!(
@@ -1106,7 +1130,7 @@ mod tests {
         // move it, or a second commit in one session would mint a new root for
         // unchanged capture and the shard's idempotence would break.
         let mut later = archive();
-        later.commit = "def456".to_owned();
+        later.commit = Some("def456".to_owned());
         later.created_at_ms = later.created_at_ms.map(|ms| ms + 60_000);
         assert_eq!(
             later.merkle_root(),

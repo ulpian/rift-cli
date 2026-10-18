@@ -130,6 +130,43 @@ async fn a_shard_that_names_no_commit_gets_no_row() {
     assert!(linked_commits(&s).await.is_empty());
 }
 
+/// Writer to reader, the anchorless case: the `metadata.json` the shard
+/// writer produces for an archive with no anchor carries no `commit` member,
+/// and the bridge takes that as the answer — no `checkpoint_commit` row and
+/// no issue — where a malformed claim (next test) is refused and named.
+#[tokio::test]
+async fn an_absent_anchor_is_omitted_from_metadata_and_names_no_commit_row() {
+    let s = store();
+    let id = shard_id(0x64);
+    let mut anchorless = crate::backend::fixtures::archive();
+    anchorless.commit = None;
+    anchorless.checkpoint_id = id.clone();
+    anchorless.sessions = vec!["native-1".to_owned()];
+    let metadata = anchorless.metadata_json();
+    let doc: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+    assert!(
+        doc.get("commit").is_none(),
+        "the writer omits the member: {doc}"
+    );
+    let sub = MemorySubstrate::local()
+        .with_shard(shard(&id, 0))
+        .with_artifact(&id, "redaction_report.json", valid_report().as_bytes())
+        .with_artifact(&id, "metadata.json", &metadata)
+        .with_artifact(&id, "full.jsonl", full_jsonl().as_bytes());
+    let r = ingest_from_substrate(&s, &sub, "repo", "claude-code", 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.parse_issues, 0,
+        "absence is not an issue: {:?}",
+        r.parse_notes
+    );
+    assert!(
+        linked_commits(&s).await.is_empty(),
+        "no anchor row is invented"
+    );
+}
+
 /// A header claiming something that cannot be an object id is REFUSED and
 /// SAID — no row, and a note naming the shard. The checkpoint itself still
 /// projects: one bad field does not cost the chain row.

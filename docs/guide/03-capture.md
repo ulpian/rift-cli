@@ -229,8 +229,9 @@ archiver of the same commit. Sweeping early is safe because no phase is a trap.
 `rift doctor` is the alarm and the manual arm (*sweepable* past the floor, **STUCK**
 past 24 hours; `--fix` sweeps under the same lock — [05](05-ledger-and-verification.md)).
 A deferral carries one cause from a closed vocabulary (`worker-holds-lock`,
-`no-idle-edge`, `no-commit-to-anchor`, `archive-produced-nothing`,
-`done-mark-failed`); only `worker-holds-lock` is someone else's to finish, and every
+`no-idle-edge`, `archive-produced-nothing`, `done-mark-failed`; the retired
+`no-commit-to-anchor` still reads from an old report, since a condense no longer
+needs a commit); only `worker-holds-lock` is someone else's to finish, and every
 other cause waits for the next `rift doctor --fix`.
 
 ---
@@ -389,9 +390,12 @@ Queue context includes the full payload apart from its attempt counter. An
 identical context stays queued without resetting retries; a changed session,
 worktree or queue time remains separate. Migration removes an old ticket only
 when its complete payload, including attempts, matches the installed copy.
-Actual execution failures have three attempts. Ownership barriers and unproved
-input or completion facts stay owed without spending that budget, and doctor
-reports the available reason.
+Actual execution failures have three attempts, each followed by a backoff
+recorded on the ticket (30 s, doubling, at most an hour); the third parks the
+ticket — kept and named by `rift doctor`, skipped by the ordinary worker, and
+retried by `rift doctor --fix` or `rift session retry`. Ownership barriers and
+unproved input or completion facts stay owed without spending that budget, and
+doctor reports the available reason.
 
 An exact-context condense marker also names an existing checkpoint. Legacy
 markers, ended caches and token counts without their original inputs cannot

@@ -454,7 +454,7 @@ mod tests {
         n.archive_checkpoint(&archive()).unwrap();
         let tip1 = n.writer().branch_tip();
         let mut later = archive();
-        later.commit = "def456".to_owned();
+        later.commit = Some("def456".to_owned());
         later.created_at_ms = later.created_at_ms.map(|ms| ms + 60_000);
         n.archive_checkpoint(&later).unwrap();
         assert_eq!(n.writer().branch_tip(), tip1, "first anchor kept");

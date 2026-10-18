@@ -339,6 +339,10 @@ fn route_session(root: &Path, cmd: &cli::SessionCmd) -> rift_core::Result<Outcom
                 session_verbs::attach(s, rt, root, &a.session_id, &a.agent, a.force)
             }),
         },
+        SessionCmd::Retry(a) => match not_init_guard(root) {
+            Some(refusal) => Ok(refusal),
+            None => session_verbs::retry(root, a.session.as_deref(), a.all),
+        },
     }
 }
 

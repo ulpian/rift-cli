@@ -473,7 +473,7 @@ fn on_pr_archive(git_dir: Option<&str>) -> Result<()> {
             &rt,
             &store,
             &repo.work_tree,
-            &commit,
+            Some(&commit),
             &sess.session_id,
             &sess.agent,
             decision,
