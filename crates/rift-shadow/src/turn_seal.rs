@@ -8,19 +8,21 @@
 //! reconciliation rather than ending a segment no one can prove safe. And the
 //! earlier parts are read back and checked before anything is appended (design
 //! §2.6): their line counts against `segment_raw_lines`, their concatenation
-//! against the previous checkpoint's full-transcript leaf, and each against a
-//! second pass through the gate with the current packs. Any miss refuses the
-//! segment path for this turn — a whole reseal plus a `segment-chain-broken`
-//! finding — and never re-bases onto whatever the tree holds.
+//! against the previous checkpoint's full-transcript leaf, and each part's
+//! bytes against the blob oid its tree records. Any miss refuses the segment
+//! path for this turn — a whole reseal plus a `segment-chain-broken` finding —
+//! and never re-bases onto whatever the tree holds.
 //!
-//! The second pass is also how a read-back part becomes [`RedactedBytes`]
-//! again: the gate is the only constructor, so a part from an earlier shard
-//! re-enters the record through it, exactly as a spooled original does.
+//! A checked part is carried forward by that oid, never passed through the
+//! gate again (L-5 ruling, 2026-10-18): re-redacting the prefix each turn
+//! would make a turn's cost O(transcript), which per-turn segments exist to
+//! remove. A carried part is not [`rift_core::RedactedBytes`] — the gate stays
+//! the one constructor — and no blob is written for it.
 
-use rift_core::{RedactedBytes, Result, SecretBytes, Sha256Id};
-use rift_shadow_redact::RulePackSet;
+use rift_core::{Result, SecretBytes, Sha256Id};
+use rift_shadow_redact::{RedactionOutput, RulePackSet};
 
-use crate::backend::{RedactionFallback, Segments, TranscriptBody};
+use crate::backend::{CarriedPart, RedactionFallback, Segments, TranscriptBody};
 
 /// The finding a refused chain records, naming the checkpoint it read back.
 pub const SEGMENT_CHAIN_BROKEN: &str = "segment-chain-broken";
@@ -29,11 +31,20 @@ pub const SEGMENT_CHAIN_BROKEN: &str = "segment-chain-broken";
 /// from its shard tree.
 pub struct PriorChain {
     /// `transcript.segments/NNNNNN`, in order, as the tree holds them.
-    pub parts: Vec<Vec<u8>>,
+    pub parts: Vec<PriorPart>,
     /// Its `segment_raw_lines` metadata member.
     pub raw_lines: Vec<u64>,
     /// Its recorded full-transcript leaf (`leaf_hash` over the concatenation).
     pub leaf: Sha256Id,
+}
+
+/// One earlier part: the blob oid its tree entry names, and the bytes read
+/// from that blob.
+pub struct PriorPart {
+    /// The tree entry's blob oid.
+    pub oid: String,
+    /// The blob's bytes.
+    pub bytes: Vec<u8>,
 }
 
 /// Why the earlier parts could not be trusted.
@@ -46,8 +57,8 @@ pub enum ChainBreak {
     LeafMismatch,
     /// The transcript now holds fewer lines than the parts cover.
     Truncated,
-    /// The current packs seal a part differently than it was sealed.
-    Regated,
+    /// A part's bytes are not the blob its tree entry names.
+    OidMismatch,
 }
 
 impl ChainBreak {
@@ -91,56 +102,56 @@ pub fn seal_turn(
     prior: Option<PriorChain>,
     packs: &RulePackSet,
 ) -> Result<TurnSeal> {
+    let mut gate = |bytes: &SecretBytes, first_line: usize| {
+        rift_shadow_redact::redact_with_at(bytes, packs, first_line)
+    };
+    seal_turn_through(raw, prior, packs, &mut gate)
+}
+
+/// The gate as `seal_turn_through` calls it: bytes and their first line.
+type Gate<'a> = dyn FnMut(&SecretBytes, usize) -> Result<RedactionOutput> + 'a;
+
+/// [`seal_turn`] over an injected gate, so a test can count what enters it.
+fn seal_turn_through(
+    raw: &SecretBytes,
+    prior: Option<PriorChain>,
+    packs: &RulePackSet,
+    gate: &mut Gate<'_>,
+) -> Result<TurnSeal> {
     let lines = complete_lines(raw.as_slice());
-    let earlier = match prior {
+    let earlier = match prior.map(|chain| read_back(chain, lines.len())) {
         None => Vec::new(),
-        Some(chain) => match read_back(chain, lines.len(), packs)? {
-            Ok(parts) => parts,
-            Err(broken) => return whole_reseal(raw, broken, packs),
-        },
+        Some(Ok(parts)) => parts,
+        Some(Err(broken)) => return whole_reseal(raw, broken, gate),
     };
     let frontier = covered(&earlier);
     let Some(cut) = last_admitted_cut(&lines, frontier, packs) else {
         return Ok(TurnSeal::Unchanged);
     };
     let delta: Vec<u8> = lines.get(frontier..cut).unwrap_or_default().concat();
-    let out = rift_shadow_redact::redact_with_at(&SecretBytes::new(delta), packs, frontier)?;
+    let out = gate(&SecretBytes::new(delta), frontier)?;
     let fallback = RedactionFallback::of(&[&out.report]);
-    let mut parts = earlier;
-    parts.push(out.redacted);
     Ok(TurnSeal::Appended {
-        body: TranscriptBody::Segments(Segments::new(parts)?),
+        body: TranscriptBody::Segments(Segments::carrying(earlier, out.redacted)?),
         document_lines: u64::try_from(cut).unwrap_or(u64::MAX),
         fallback,
     })
 }
 
-/// Check the earlier parts and pass each through the gate again; the outer
-/// error is the gate's, the inner one the reason the chain is refused.
+/// Check the earlier parts and admit each by its recorded blob oid.
 fn read_back(
     chain: PriorChain,
     available: usize,
-    packs: &RulePackSet,
-) -> Result<std::result::Result<Vec<RedactedBytes>, ChainBreak>> {
-    if let Err(broken) = check_layout(&chain, available) {
-        return Ok(Err(broken));
-    }
-    let mut first_line = 0;
-    let mut parts = Vec::with_capacity(chain.parts.len());
-    for part in chain.parts {
-        let lines = line_count(&part);
-        let out =
-            rift_shadow_redact::redact_with_at(&SecretBytes::new(part.clone()), packs, first_line)?;
-        if out.redacted.as_slice() != part.as_slice() {
-            return Ok(Err(ChainBreak::Regated));
-        }
-        first_line += lines;
-        parts.push(out.redacted);
-    }
-    Ok(Ok(parts))
+) -> std::result::Result<Vec<CarriedPart>, ChainBreak> {
+    check_layout(&chain, available)?;
+    chain
+        .parts
+        .into_iter()
+        .map(|part| CarriedPart::verified(part.oid, part.bytes).ok_or(ChainBreak::OidMismatch))
+        .collect()
 }
 
-/// The cheap checks, before any part re-enters the gate.
+/// The cheap checks, before any part is admitted.
 fn check_layout(chain: &PriorChain, available: usize) -> std::result::Result<(), ChainBreak> {
     let counts_match = chain.parts.len() == chain.raw_lines.len()
         && chain
@@ -148,16 +159,21 @@ fn check_layout(chain: &PriorChain, available: usize) -> std::result::Result<(),
             .iter()
             .zip(&chain.raw_lines)
             .all(|(part, declared)| {
-                part.last() == Some(&b'\n')
-                    && u64::try_from(line_count(part)).is_ok_and(|n| n == *declared)
+                part.bytes.last() == Some(&b'\n')
+                    && u64::try_from(line_count(&part.bytes)).is_ok_and(|n| n == *declared)
             });
     if !counts_match || chain.parts.is_empty() {
         return Err(ChainBreak::LineCount);
     }
-    if rift_hashchain::leaf_hash(&chain.parts.concat()) != chain.leaf {
+    let joined: Vec<u8> = chain
+        .parts
+        .iter()
+        .flat_map(|p| p.bytes.iter().copied())
+        .collect();
+    if rift_hashchain::leaf_hash(&joined) != chain.leaf {
         return Err(ChainBreak::LeafMismatch);
     }
-    let sealed: usize = chain.parts.iter().map(|p| line_count(p)).sum();
+    let sealed: usize = chain.parts.iter().map(|p| line_count(&p.bytes)).sum();
     if sealed > available {
         return Err(ChainBreak::Truncated);
     }
@@ -165,8 +181,8 @@ fn check_layout(chain: &PriorChain, available: usize) -> std::result::Result<(),
 }
 
 /// The refused path: the whole file through the gate once, as before L-5.
-fn whole_reseal(raw: &SecretBytes, broken: ChainBreak, packs: &RulePackSet) -> Result<TurnSeal> {
-    let out = rift_shadow_redact::redact_with(raw, packs)?;
+fn whole_reseal(raw: &SecretBytes, broken: ChainBreak, gate: &mut Gate<'_>) -> Result<TurnSeal> {
+    let out = gate(raw, 0)?;
     Ok(TurnSeal::Whole {
         fallback: RedactionFallback::of(&[&out.report]),
         body: out.redacted.into(),
@@ -199,7 +215,7 @@ fn line_count(part: &[u8]) -> usize {
     complete_lines(part).len()
 }
 
-fn covered(parts: &[RedactedBytes]) -> usize {
+fn covered(parts: &[CarriedPart]) -> usize {
     parts.iter().map(|p| line_count(p.as_slice())).sum()
 }
 

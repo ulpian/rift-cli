@@ -12,6 +12,7 @@ use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::parse::segments::{
     segment_name, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_KEY,
 };
+use rift_recall_substrate::worktree::git_blob_oid;
 
 use super::TRANSCRIPT_FULL_NAME;
 
@@ -32,10 +33,69 @@ pub enum TranscriptBody {
 /// line-count check both assume every part ends with `\n`.
 #[derive(Clone)]
 pub struct Segments {
-    parts: Vec<RedactedBytes>,
+    parts: Vec<SegmentPart>,
     /// The concatenation, kept so the body reads as one slice. It is a copy
     /// of gate output, never a write path: each part takes the durable door.
     joined: Vec<u8>,
+}
+
+/// One part of a segmented body.
+///
+/// No `Debug`, for the reason [`TranscriptBody`] has none.
+#[derive(Clone)]
+pub enum SegmentPart {
+    /// Sealed this turn by the gate; it takes the durable door.
+    Sealed(RedactedBytes),
+    /// An earlier turn's part, referenced by the blob the previous shard
+    /// already holds (L-5 ruling: earlier segments are reused, never
+    /// re-redacted). No bytes are written for it.
+    Carried(CarriedPart),
+}
+
+/// A part read back from the previous shard whose bytes hash to the blob oid
+/// its tree records. The bytes are already-redacted output Rift wrote; they
+/// are kept only so the body still reads as the whole document, and never
+/// reach a blob write — which is why this is not a second way to make
+/// [`RedactedBytes`].
+#[derive(Clone)]
+pub struct CarriedPart {
+    oid: String,
+    bytes: Vec<u8>,
+}
+
+impl CarriedPart {
+    /// Admit a read-back part if its bytes are the blob `oid` names.
+    ///
+    /// The check is git's default (SHA-1) blob id, so in a SHA-256 object
+    /// format every part misses and each turn takes the whole reseal: slower,
+    /// never wrong.
+    #[must_use]
+    pub fn verified(oid: String, bytes: Vec<u8>) -> Option<Self> {
+        (git_blob_oid(&bytes) == oid).then_some(Self { oid, bytes })
+    }
+
+    /// The blob oid the previous shard recorded, reused in the new tree.
+    #[must_use]
+    pub fn oid(&self) -> &str {
+        &self.oid
+    }
+
+    /// The part's bytes, as the previous shard holds them.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl SegmentPart {
+    /// The part's bytes, sealed now or carried.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Sealed(sealed) => sealed.as_slice(),
+            Self::Carried(carried) => carried.as_slice(),
+        }
+    }
 }
 
 impl Segments {
@@ -45,6 +105,20 @@ impl Segments {
     /// [`RiftError::Validity`] for no parts, an empty part, or a part that does
     /// not end at a line boundary.
     pub fn new(parts: Vec<RedactedBytes>) -> Result<Self> {
+        Self::of(parts.into_iter().map(SegmentPart::Sealed).collect())
+    }
+
+    /// The earlier parts carried by oid, then this turn's sealed one.
+    ///
+    /// # Errors
+    /// As [`Segments::new`].
+    pub fn carrying(earlier: Vec<CarriedPart>, new: RedactedBytes) -> Result<Self> {
+        let mut parts: Vec<SegmentPart> = earlier.into_iter().map(SegmentPart::Carried).collect();
+        parts.push(SegmentPart::Sealed(new));
+        Self::of(parts)
+    }
+
+    fn of(parts: Vec<SegmentPart>) -> Result<Self> {
         if parts.is_empty() {
             return Err(RiftError::validity("a segmented transcript has no parts"));
         }
@@ -55,7 +129,7 @@ impl Segments {
         }
         let joined = parts
             .iter()
-            .flat_map(RedactedBytes::as_slice)
+            .flat_map(SegmentPart::as_slice)
             .copied()
             .collect();
         Ok(Self { parts, joined })
@@ -63,7 +137,7 @@ impl Segments {
 
     /// The parts, in document order.
     #[must_use]
-    pub fn parts(&self) -> &[RedactedBytes] {
+    pub fn parts(&self) -> &[SegmentPart] {
         &self.parts
     }
 
@@ -73,7 +147,7 @@ impl Segments {
     pub fn raw_lines(&self) -> Vec<u64> {
         // Every part ends with `\n` (the constructor's rule), so its pieces
         // split after each newline are exactly its lines.
-        let lines = |p: &RedactedBytes| p.as_slice().split_inclusive(|b| *b == b'\n').count();
+        let lines = |p: &SegmentPart| p.as_slice().split_inclusive(|b| *b == b'\n').count();
         self.parts
             .iter()
             .map(|p| u64::try_from(lines(p)).unwrap_or(u64::MAX))

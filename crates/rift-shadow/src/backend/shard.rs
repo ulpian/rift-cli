@@ -8,8 +8,8 @@ use rift_core::{RedactedBytes, Result};
 use rift_git::{GitFileMode, NativeGitWrite, OrphanCommit, TreeWriteEntry};
 
 use super::{
-    ArchivedTask, ArchivedTranscript, CheckpointArchive, NativeBackend, TranscriptBody,
-    NATIVE_CHECKPOINT_REF, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
+    ArchivedTask, ArchivedTranscript, CheckpointArchive, NativeBackend, SegmentPart,
+    TranscriptBody, NATIVE_CHECKPOINT_REF, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
 use rift_recall_substrate::parse::segments::TRANSCRIPT_SEGMENTS_DIR;
 
@@ -163,7 +163,17 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         };
         let mut parts = Vec::with_capacity(segments.parts().len());
         for (index, part) in segments.parts().iter().enumerate() {
-            parts.push(self.durable_entry(&format!("{index:06}"), part)?);
+            let name = format!("{index:06}");
+            parts.push(match part {
+                SegmentPart::Sealed(sealed) => self.durable_entry(&name, sealed)?,
+                // A carried part is the previous shard's blob: the tree names
+                // its oid, and no bytes are written again.
+                SegmentPart::Carried(carried) => TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name,
+                    oid: carried.oid().into(),
+                },
+            });
         }
         self.tree_entry(TRANSCRIPT_SEGMENTS_DIR.into(), &parts)
     }
