@@ -267,7 +267,7 @@ fn archive_for_id(
     CheckpointArchive {
         boundary_gaps: facts.boundary_gaps,
         repo: std::path::PathBuf::new(),
-        commit: String::new(),
+        commit: None,
         checkpoint_id: String::new(),
         sessions: vec![session.to_owned()],
         strategy: String::new(),
@@ -300,7 +300,9 @@ fn archive_for_id(
 
 /// Condense raw shadow capture into a durable, redacted checkpoint and record the
 /// `archive_decision`. `commit_oid` is the anchoring commit (HEAD) the substrate
-/// archives against.
+/// archives against, `None` on an unborn HEAD: the checkpoint lands with the
+/// anchor absent, because a condense never needs a commit (Q78) and the id
+/// never read it.
 ///
 /// # Errors
 /// [`rift_core::RiftError`] if redaction, the substrate archive, or the audit
@@ -314,7 +316,7 @@ pub async fn condense(
     raw_capture: &SecretBytes,
     strategy: StrategyKind,
     reason: ArchiveReason,
-    commit_oid: &str,
+    commit_oid: Option<&str>,
     now_ms: i64,
     facts: SessionFacts,
     packs: &RulePackSet,
@@ -338,7 +340,7 @@ pub async fn condense(
     // cannot get it wrong: there is nowhere left to supply it.
     let mut archive = CheckpointArchive {
         repo: repo.to_path_buf(),
-        commit: commit_oid.to_owned(),
+        commit: commit_oid.map(str::to_owned),
         // Filled from the archive itself on the next line: the id is a function
         // of the artifacts this archive will write, and the only way to be sure
         // it addresses them is to ask the assembled archive rather than to
@@ -550,7 +552,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             SessionFacts::default(),
             &RulePackSet::builtin(),
@@ -585,7 +587,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             SessionFacts::default(),
             &RulePackSet::builtin(),
@@ -603,7 +605,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             SessionFacts::default(),
             &RulePackSet::builtin(),
@@ -642,7 +644,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             SessionFacts::default(),
             &RulePackSet::builtin(),
@@ -681,7 +683,7 @@ mod tests {
         let mut archive = CheckpointArchive {
             boundary_gaps: None,
             repo: std::path::PathBuf::from("/tmp/r"),
-            commit: "abc123".to_owned(),
+            commit: Some("abc123".to_owned()),
             checkpoint_id: String::new(),
             sessions: vec![SESSION.to_owned()],
             strategy: "manual-commit".to_owned(),
@@ -793,13 +795,26 @@ mod tests {
     fn anchor_drift_leaves_the_archived_id_alone() {
         let (archive, id) = archive_with_id();
         let mut later = archive.clone();
-        later.commit = "def456".to_owned();
+        later.commit = Some("def456".to_owned());
         later.created_at_ms = later.created_at_ms.map(|ms| ms + 60_000);
         assert_eq!(
             later.derived_checkpoint_id().unwrap(),
             id,
             "anchor drift is not capture drift"
         );
+    }
+
+    /// An anchorless archive (unborn HEAD) derives the same id as the same
+    /// capture anchored anywhere: the id never read the member, so a session
+    /// that starts before its repository's first commit mints the shard its
+    /// later anchored re-archive would keep (`existing_shard_tip`).
+    #[test]
+    fn an_absent_anchor_derives_the_same_id_as_any_present_one() {
+        let (archive, id) = archive_with_id();
+        let mut anchorless = archive.clone();
+        anchorless.commit = None;
+        assert_eq!(anchorless.derived_checkpoint_id().unwrap(), id);
+        assert_eq!(anchorless.merkle_root(), archive.merkle_root());
     }
 
     /// N ≥ 2 is DEFINED — and it is a different identity from any single
@@ -916,7 +931,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             SessionFacts::default(),
             &packs,
@@ -941,7 +956,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             2,
             SessionFacts::default(),
             &packs,
@@ -998,7 +1013,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             facts,
             &packs,
@@ -1048,7 +1063,7 @@ mod tests {
             &SecretBytes::new(b"capture".to_vec()),
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             now_ms,
             facts,
             &RulePackSet::builtin(),
@@ -1294,7 +1309,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1_000,
             SessionFacts::default(),
             &packs,
@@ -1383,7 +1398,7 @@ mod tests {
             &raw,
             StrategyKind::ManualCommit,
             ArchiveReason::Commit,
-            "abc123",
+            Some("abc123"),
             1,
             SessionFacts::default(),
             &RulePackSet::builtin(),

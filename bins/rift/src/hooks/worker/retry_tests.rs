@@ -3,7 +3,7 @@ use super::*;
 use crate::agent_queue::{AgentJob, IntervalArchive, IntervalReason, JobKind};
 use rift_store::CanonicalStore as _;
 
-fn owed_interval(root: &Path) -> (rift_git::RepoPaths, AgentJob, std::path::PathBuf) {
+pub(super) fn owed_interval(root: &Path) -> (rift_git::RepoPaths, AgentJob, std::path::PathBuf) {
     let (repo, condense) = super::tests::queue_session_end(root, "owed-interval");
     let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
     crate::capture_queue::remove_owned(&condense, &owner).unwrap();
@@ -31,7 +31,7 @@ fn owed_interval(root: &Path) -> (rift_git::RepoPaths, AgentJob, std::path::Path
 }
 
 #[test]
-fn an_admitted_interval_publication_failure_spends_exactly_three_attempts() {
+fn an_admitted_interval_publication_failure_spends_three_attempts_then_parks() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, job, path) = owed_interval(tmp.path());
     let store = rift_store::open_capture_projection(projection_db_at(tmp.path()).unwrap()).unwrap();
@@ -50,16 +50,16 @@ fn an_admitted_interval_publication_failure_spends_exactly_three_attempts() {
     let obstruction = repo.common_dir.join("refs/heads/rift/checkpoints/v1.lock");
     std::fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
     std::fs::write(&obstruction, b"publication-obstruction").unwrap();
-    for attempt in 1..=crate::capture_queue::MAX_ATTEMPTS {
+    // L-0A Q5 / design §4.1: the sweep's drain ignores the backoff, so each
+    // pass spends one attempt; the third parks the job — present AND parked,
+    // with its backoff set — where it used to remove it.
+    for attempt in 1..=crate::capture_queue::PARK_AFTER {
         drain_jobs(repo.git_dir.to_str(), LockWait::None);
-        if attempt < crate::capture_queue::MAX_ATTEMPTS {
-            assert_eq!(
-                crate::agent_queue::read_job(&path).unwrap().1.attempts,
-                attempt
-            );
-        } else {
-            assert!(!path.exists());
-        }
+        let (_, _, state) = crate::agent_queue::retry_states(&repo.git_dir).remove(0);
+        assert_eq!(state.attempts, attempt);
+        assert!(state.next_due_ms > 0);
+        assert_eq!(state.parked, attempt == crate::capture_queue::PARK_AFTER);
+        assert!(path.exists(), "parked, never removed");
         assert_eq!(
             std::fs::read(&obstruction).unwrap(),
             b"publication-obstruction"

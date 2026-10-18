@@ -1,7 +1,8 @@
 //! The session verbs an operator runs by hand, one module per concern:
 //! `intake` adopts transcripts an agent already wrote (`attach`, `import`),
 //! `inspect` reads sessions back (`list`, `info`), `sweep` removes what is
-//! spent (`stop`, `clean`) and `restore` continues prior work (`resume`).
+//! spent (`stop`, `clean`), `restore` continues prior work (`resume`) and
+//! `retry` re-runs a session's parked jobs.
 //! Three readers sit under them: `journals` enumerates the family's session
 //! caches, `transcripts` knows where an agent keeps its own logs, and
 //! `shard` resolves the checkpoint a branch claims.
@@ -14,6 +15,7 @@ mod inspect;
 mod intake;
 mod journals;
 mod restore;
+mod retry;
 mod shard;
 mod sweep;
 mod transcripts;
@@ -25,6 +27,7 @@ pub(crate) use inspect::{info, list};
 pub(crate) use intake::{attach, import};
 pub(crate) use journals::{family_journal, MemberJournal};
 pub(crate) use restore::resume;
+pub(crate) use retry::retry;
 pub(crate) use sweep::{clean, document_store, shadow_refs, stop};
 
 /// The checkpoint branch every rung of the fetch ladder targets — the same

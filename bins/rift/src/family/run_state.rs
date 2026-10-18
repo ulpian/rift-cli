@@ -754,6 +754,65 @@ fn settle(ctx: &MoveCtx<'_>, sleep: &mut dyn FnMut(Duration)) -> std::io::Result
     Ok(report)
 }
 
+/// What the session-end cleanup removed, by kind; a report, never a verdict.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionCleanup {
+    /// `<sessions>/<session>.subagents/`, the subagent claim markers.
+    pub(crate) claims: bool,
+    /// `<common_dir>/rift-family/spool/<session>/`, the originals spool.
+    pub(crate) spool: bool,
+    /// `<sessions>/<session>.transcript`, the transcript-progress sidecar.
+    pub(crate) transcript_sidecar: bool,
+    /// `<sessions>/<session>.usage`, the usage-progress sidecar.
+    pub(crate) usage_sidecar: bool,
+}
+
+/// Remove what a session leaves behind once its **final** archive landed
+/// (L-0A §4.3): the claim markers, the originals spool and the two sidecars.
+/// The `condensed-<key>` marker and the session cache stay — the first is the
+/// completion proof the next drain reads, the second is retained as `ended`
+/// by its own rule — and no content-addressed cache (linehash, outline) or
+/// S3 window-journal line is touched. Never on a turn seal, an interval or a
+/// first seal: a reactivated session would lose its spool.
+///
+/// Best-effort: a removal that fails leaves the file for the next final
+/// archive, and the caller says so once. A session id that cannot name a
+/// path removes nothing.
+pub(crate) fn cleanup_session(
+    sessions_dir: &Path,
+    family_state_dir: &Path,
+    session: &str,
+) -> SessionCleanup {
+    if !rift_shadow::hooks::is_safe_session_id(session) {
+        return SessionCleanup::default();
+    }
+    let sidecar = |suffix: &str| {
+        rift_shadow::hooks::run_state::read_path(sessions_dir, &format!("{session}.{suffix}"))
+    };
+    SessionCleanup {
+        claims: remove_tree(&sidecar("subagents")),
+        spool: remove_tree(&family_state_dir.join("spool").join(session)),
+        transcript_sidecar: remove_one(&sidecar("transcript")),
+        usage_sidecar: remove_one(&sidecar("usage")),
+    }
+}
+
+/// Remove a directory and what it holds; `true` when it is gone now.
+fn remove_tree(dir: &Path) -> bool {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Remove one file; `true` when it is gone now.
+fn remove_one(path: &Path) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Resolve run state for a report on this thread until the guard drops.
 pub(crate) fn report_only() -> ReportOnly {
     ReportOnly(REPORTING.with(|reporting| reporting.replace(true)))

@@ -194,11 +194,12 @@ fn the_recovery_gate_refuses_every_unknown_field_tree_time_id_and_head_shape() {
     assert!(matches!(gate(&other_kind, "/fixture"), Ok(Shape::Other)));
 }
 
-/// The context digest is the queue's full value minus ONLY top-level attempts:
-/// nested attempts and a retained unknown field change it, whitespace does not;
-/// the ticket digest is the raw bytes and changes with whitespace.
+/// The context digest is the queue's full value minus ONLY the three top-level
+/// retry members (`attempts`, `next_due_ms`, `parked`): nested attempts and a
+/// retained unknown field change it, whitespace does not; the ticket digest is
+/// the raw bytes and changes with whitespace.
 #[test]
-fn the_context_digest_drops_top_level_attempts_only_and_the_ticket_digest_is_raw() {
+fn the_context_digest_drops_top_level_retry_members_only_and_the_ticket_digest_is_raw() {
     use sha2::{Digest as _, Sha256};
     let digest = |value: &Value| {
         let context = crate::capture_queue::delivery::context(value).unwrap();
@@ -214,11 +215,22 @@ fn the_context_digest_drops_top_level_attempts_only_and_the_ticket_digest_is_raw
     let mut nested = value.clone();
     nested["kind"]["attempts"] = serde_json::json!(7);
     assert_ne!(digest(&value), digest(&nested));
-    let mut due = value.clone();
-    due["next_due_ms"] = serde_json::json!(1);
+    let mut retried = value.clone();
+    retried["next_due_ms"] = serde_json::json!(1);
+    retried["parked"] = serde_json::json!(true);
+    assert_eq!(
+        digest(&value),
+        digest(&retried),
+        "retry state is not context"
+    );
+    let mut nested_due = value.clone();
+    nested_due["kind"]["next_due_ms"] = serde_json::json!(1);
+    assert_ne!(digest(&value), digest(&nested_due), "only top level strips");
+    let mut retained = value.clone();
+    retained["future_context"] = serde_json::json!(1);
     assert_ne!(
         digest(&value),
-        digest(&due),
+        digest(&retained),
         "a retained sibling is context"
     );
     let compact = serde_json::to_vec(&value).unwrap();
@@ -228,4 +240,28 @@ fn the_context_digest_drops_top_level_attempts_only_and_the_ticket_digest_is_raw
         digest(&crate::capture_queue::delivery::decode(&spaced).unwrap())
     );
     assert_ne!(Sha256::digest(&compact), Sha256::digest(&spaced));
+}
+
+/// The retry-member pin owed at the L-4 rebase: a ticket the delivery path
+/// rewrites with `next_due_ms`/`parked` keeps its `stem--ctx` name valid, so
+/// recovery decodes it with the same context and digest; a changed context
+/// field under that same name still refuses.
+#[test]
+fn retry_members_never_change_the_context_id_a_versioned_name_binds() {
+    let (name, value) = input();
+    let before = decode(OsStr::new(&name), &serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut retried = value.clone();
+    retried["attempts"] = serde_json::json!(3);
+    retried["next_due_ms"] = serde_json::json!(4000);
+    retried["parked"] = serde_json::json!(true);
+    let after = decode(OsStr::new(&name), &serde_json::to_vec(&retried).unwrap()).unwrap();
+    assert_eq!(after.attempts, 3);
+    assert_eq!(after.context, before.context);
+    assert_eq!(
+        context_sha256(&after).unwrap(),
+        context_sha256(&before).unwrap()
+    );
+    let mut moved = value;
+    moved["queued_at_ms"] = serde_json::json!(2000);
+    assert!(decode(OsStr::new(&name), &serde_json::to_vec(&moved).unwrap()).is_err());
 }

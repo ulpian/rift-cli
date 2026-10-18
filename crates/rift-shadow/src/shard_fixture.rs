@@ -212,7 +212,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
     let mut archive = CheckpointArchive {
         boundary_gaps: None,
         repo: PathBuf::from("/shard-goldens"),
-        commit: "9".repeat(40),
+        commit: Some("9".repeat(40)),
         checkpoint_id: String::new(),
         sessions: FIXTURE_SESSIONS.iter().map(|s| (*s).to_owned()).collect(),
         strategy: "manual-commit".to_owned(),

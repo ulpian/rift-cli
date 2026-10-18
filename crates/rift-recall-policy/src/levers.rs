@@ -196,6 +196,13 @@ pub struct InterceptionPolicy {
     /// bound outline, once. Never above the read lever, and `observe` until
     /// its own pool and the paired evaluation say otherwise.
     pub first_contact: Mode,
+    /// Declining the held part of a read that overlaps lines this window
+    /// holds, asking for the unheld range only. Never above the read lever,
+    /// and `observe` until its own pool says otherwise: the frame asks the
+    /// model to make a different read than the one it made, and how often a
+    /// model re-issues the original instead is the figure the observe window
+    /// publishes first.
+    pub narrow: Mode,
     /// The fewest lines a file has for `first_contact` to consider it.
     pub first_contact_min_lines: u32,
     /// The fewest bytes a file has for `first_contact` to consider it.
@@ -225,6 +232,7 @@ impl Default for InterceptionPolicy {
             basis_ttl_days: DEFAULT_BASIS_TTL_DAYS,
             inherit_by_name: Mode::Observe,
             first_contact: Mode::Observe,
+            narrow: Mode::Observe,
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
             decline_family_held: Mode::Observe,

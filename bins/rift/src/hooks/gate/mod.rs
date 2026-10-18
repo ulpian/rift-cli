@@ -458,6 +458,7 @@ fn gate_limits(effective: &rift_recall_policy::Effective) -> rift_agent::window_
             ..rift_agent::window_journal::InheritModes::default()
         },
         matched: gate_mode(effective.recognise_by_output),
+        narrow_mode: gate_mode(effective.narrow),
         ..rift_agent::window_journal::Limits::default()
     }
 }

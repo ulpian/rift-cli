@@ -65,7 +65,11 @@ pub(crate) enum DeferCause {
     OwnershipUnready,
     /// The machine answered the idle timeout without asking for a condense.
     NoIdleEdge,
-    /// HEAD is unborn: there is no commit to anchor a checkpoint to.
+    /// **Retired, read-only.** HEAD is unborn. No writer emits it since a
+    /// condense stopped needing a commit (L-4: an anchorless checkpoint lands
+    /// with the member absent); the variant stays so a journaled old token
+    /// still parses as itself rather than as a corrupt document.
+    #[allow(dead_code)] // retired: read back by `parse`, constructed by no writer
     NoCommitToAnchor,
     /// The archive ran against HEAD and minted no checkpoint.
     ArchiveProducedNothing,
@@ -82,7 +86,8 @@ struct SweepCtx<'a> {
     store: rift_store::SqliteStore,
     /// The runtime every bridge call is driven on.
     rt: tokio::runtime::Runtime,
-    /// The commit every condense anchors to; `None` on an unborn HEAD.
+    /// The commit every condense anchors to; `None` on an unborn HEAD, which
+    /// archives with the anchor absent.
     head: Option<String>,
     /// The configured checkpoint strategy, recorded on each decision.
     strategy: rift_shadow::hooks::strategy::StrategyKind,
@@ -105,10 +110,34 @@ impl DeferCause {
         }
     }
 
+    /// The cause a wire token names, so an old journal reads back as the
+    /// vocabulary it was written in; `None` for a token this build never wrote.
+    /// No production reader needs it yet; the vocabulary pin holds it.
+    #[cfg(test)]
+    pub(crate) fn parse(token: &str) -> Option<Self> {
+        [
+            Self::WorkerHoldsLock,
+            Self::OwnershipUnready,
+            Self::NoIdleEdge,
+            Self::NoCommitToAnchor,
+            Self::ArchiveProducedNothing,
+            Self::DoneMarkFailed,
+        ]
+        .into_iter()
+        .find(|cause| cause.as_str() == token)
+    }
+
     /// Whether a worker that is already running finishes this condense, so
     /// the caller is told to wait rather than to retry or look.
     pub(crate) fn is_left_to_worker(self) -> bool {
         matches!(self, Self::WorkerHoldsLock)
+    }
+
+    /// Whether no writer in this build emits the cause any more: it is read
+    /// from old journals and never defers a session today.
+    #[cfg(test)]
+    pub(crate) fn is_retired(self) -> bool {
+        matches!(self, Self::NoCommitToAnchor)
     }
 
     /// What stopped the condense, in one clause.
@@ -117,7 +146,9 @@ impl DeferCause {
             Self::WorkerHoldsLock => "a capture worker holds the member's queue lock",
             Self::OwnershipUnready => "run-state ownership or migration remains unresolved",
             Self::NoIdleEdge => "the session machine did not ask for a condense",
-            Self::NoCommitToAnchor => "no commit to anchor to, nothing archived",
+            Self::NoCommitToAnchor => {
+                "no commit to anchor to (retired cause: a condense no longer needs one)"
+            }
             Self::ArchiveProducedNothing => "the archive ran and minted no checkpoint",
             Self::DoneMarkFailed => {
                 "the checkpoint was written but the session could not be closed"
@@ -289,6 +320,13 @@ pub(crate) fn sweep_idle_family(
     }
     let ttl = super::worker::linehash::LINEHASH_TTL_MS;
     super::worker::linehash::sweep_linehash_cache(&paths.common_dir, now, ttl);
+    // The graft indexes a killed worker left: the sweep is the one remover,
+    // never a hook, and it takes only what nobody holds and a day has passed on.
+    for member in journal.iter().map(|j| &j.member) {
+        if let Ok(repo) = rift_git::discover(&member.work_tree) {
+            let _ = rift_git::sweep_stale_graft_indexes(&repo.git_dir, now);
+        }
+    }
     sweep
 }
 
@@ -463,6 +501,13 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
     };
     sweep.condensed_checkpoints.push(checkpoint);
     if mark_swept_condensed(ctx, cache) {
+        // The final archive landed and the session closed: what it left
+        // behind goes now, never on a turn seal or an interval (§4.3).
+        let _ = crate::family::run_state::cleanup_session(
+            &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
+            &super::family_state::family_state_dir(&ctx.repo.common_dir),
+            &id,
+        );
         sweep.finalized.push(id);
     } else {
         sweep.defer(id, DeferCause::DoneMarkFailed);
@@ -534,26 +579,25 @@ fn settle_last_turn(ctx: &SweepCtx<'_>, cache: &SessionCache) {
         ));
 }
 
-/// The ordinary session-end condense, against HEAD, and the checkpoint it
-/// minted.
+/// The ordinary session-end condense, against HEAD when there is one, and
+/// the checkpoint it minted.
 ///
-/// An archive that returned without minting is not a condense, however
-/// successfully it returned: only a minted checkpoint id counts, and anything
-/// else answers the cause the session is deferred under.
+/// An unborn HEAD is not a deferral: the archive names no anchor and lands
+/// (Q78 — a condense never needs a commit). An archive that returned without
+/// minting is not a condense, however successfully it returned: only a minted
+/// checkpoint id counts, and anything else answers the cause the session is
+/// deferred under.
 fn condense_swept_session(
     ctx: &SweepCtx<'_>,
     cache: &SessionCache,
 ) -> std::result::Result<rift_shadow::CheckpointId, DeferCause> {
     use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason};
 
-    let Some(commit) = ctx.head.as_ref() else {
-        return Err(DeferCause::NoCommitToAnchor);
-    };
     let archived = archive_now(
         &ctx.rt,
         &ctx.store,
         &ctx.repo.work_tree,
-        commit,
+        ctx.head.as_deref(),
         &cache.session_id,
         &cache.agent,
         ArchiveDecision {
@@ -654,6 +698,10 @@ mod tests {
         assert_eq!(std::fs::read(&legacy).unwrap(), b"unknown-legacy-liveness");
     }
 
+    /// Six tokens, each distinct and each parsing back to itself; only the
+    /// held lock is a worker's to finish; and exactly one token is retired —
+    /// `no-commit-to-anchor` still reads from an old journal, and no writer in
+    /// this file names it (L-4: a condense never needs a commit).
     #[test]
     fn every_defer_cause_has_its_own_token_and_only_the_lock_is_left_to_a_worker() {
         let all = [
@@ -668,7 +716,23 @@ mod tests {
         tokens.sort_unstable();
         tokens.dedup();
         assert_eq!(tokens.len(), all.len());
+        for cause in all {
+            assert_eq!(DeferCause::parse(cause.as_str()), Some(cause));
+        }
+        assert_eq!(
+            DeferCause::parse("no-commit-to-anchor"),
+            Some(DeferCause::NoCommitToAnchor)
+        );
+        assert_eq!(DeferCause::parse("not-a-cause"), None);
         let left: Vec<DeferCause> = all.into_iter().filter(|c| c.is_left_to_worker()).collect();
         assert_eq!(left, vec![DeferCause::WorkerHoldsLock]);
+        let retired: Vec<DeferCause> = all.into_iter().filter(|c| c.is_retired()).collect();
+        assert_eq!(retired, vec![DeferCause::NoCommitToAnchor]);
+        let source = include_str!("sweep.rs");
+        let writers = source
+            .lines()
+            .filter(|line| line.contains(concat!("Err(DeferCause::", "NoCommitToAnchor)")))
+            .count();
+        assert_eq!(writers, 0, "the retired cause has no writer left");
     }
 }

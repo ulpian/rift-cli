@@ -183,8 +183,11 @@ pub struct CheckpointArchive {
     pub boundary_gaps: Option<super::FrozenBoundaryGaps>,
     /// The repo root the archive belongs to.
     pub repo: PathBuf,
-    /// The anchoring working-tree commit oid (hex).
-    pub commit: String,
+    /// The anchoring working-tree commit oid (hex); `None` when the checkpoint
+    /// was minted on an unborn HEAD. A condense never needs a commit (Q78), and
+    /// the id never read this member, so absence changes nothing but the
+    /// `commit` key of `metadata.json`, which is then omitted.
+    pub commit: Option<String>,
     /// The content-addressed checkpoint id (64-hex).
     pub checkpoint_id: String,
     /// The native session ids this checkpoint covers.

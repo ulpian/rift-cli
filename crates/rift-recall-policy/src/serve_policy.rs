@@ -35,6 +35,7 @@ inherit_by_name = "observe"    # a subagent's lines of a path its spawning promp
 first_contact = "observe"      # a first read of a large file answered with its outline, once; never above mode
 first_contact_min_lines = 400  # a file this long, or
 first_contact_min_bytes = 16384 # this large, is large enough to outline
+narrow = "observe"             # the held part of a partly held read, declined for the unheld range; never above mode
 decline_family_held = "observe" # a read another live window holds, declined once with a cheaper route; never above mode
 recognise_by_output = "observe" # lines a command's output was matched to a file as carrying; never above mode
 
@@ -561,6 +562,23 @@ mod tests {
         assert_eq!(DEFAULT_MIN_SLICE_LINES, 28);
         assert_eq!(DEFAULT_MAX_INLINE_HASH_BYTES, 1024 * 1024);
         assert_eq!(DEFAULT_MAX_INPUT_BYTES, 16 * 1024 * 1024);
+    }
+
+    /// ★ Narrowing ships at `observe`, a written mode is read as written, and
+    /// a mode that is not one shuts every lever. An `[interception]` table
+    /// that leaves the key unwritten — an enforcing family among them — is
+    /// the default.
+    #[test]
+    fn narrowing_ships_at_observe() {
+        assert_eq!(InterceptionPolicy::default().narrow, Mode::Observe);
+        let (written, _d) = load_src("[interception]\nnarrow = \"enforce\"\n");
+        assert_eq!(written.policy.interception.narrow, Mode::Enforce);
+        let (off, _d) = load_src("[interception]\nnarrow = \"off\"\n");
+        assert_eq!(off.policy.interception.narrow, Mode::Off);
+        let (unwritten, _d) = load_src("[interception]\nmode = \"enforce\"\n");
+        assert_eq!(unwritten.policy.interception.narrow, Mode::Observe);
+        let (unknown, _d) = load_src("[interception]\nnarrow = \"always\"\n");
+        assert!(unknown.policy.fail_closed);
     }
 
     /// ★ Recognising reads by their output ships at `observe`, a written

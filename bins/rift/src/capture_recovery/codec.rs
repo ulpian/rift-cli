@@ -45,8 +45,9 @@ pub(super) fn decode(name: &OsStr, bytes: &[u8]) -> PinResult<Decoded> {
         return Err(PinError);
     }
     let attempts = crate::capture_queue::delivery::attempts(&full).map_err(|_| PinError)?;
-    let mut context = full.clone();
-    context.as_object_mut().ok_or(PinError)?.remove("attempts");
+    // The queue's own strip, never a local copy: a second definition is how
+    // the recovery codec once kept retry members the queue had stopped naming.
+    let context = crate::capture_queue::delivery::context(&full).map_err(|_| PinError)?;
     Ok(Decoded {
         full,
         context,

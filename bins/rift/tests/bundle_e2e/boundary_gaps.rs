@@ -48,7 +48,7 @@ fn anchor(repo: &Path) -> String {
 fn source_audit(repo: &Path) -> rift_shadow::backend::CheckpointArchive {
     let mut archive = fixture_archive("two_turn");
     repo.clone_into(&mut archive.repo);
-    archive.commit = anchor(repo);
+    archive.commit = Some(anchor(repo));
     let native = archive.sessions.first().unwrap().clone();
     archive
         .session_agents
@@ -65,7 +65,7 @@ fn source_audit(repo: &Path) -> rift_shadow::backend::CheckpointArchive {
                 session_key: SessionKey::parse_hex(&format!("{:02x}", n + 6).repeat(32)).unwrap(),
                 turn_ordinal: u32::from(n),
                 boundary: BoundaryEdge::End,
-                head_oid: Some(archive.commit.clone()),
+                head_oid: archive.commit.clone(),
                 captured_at: 10,
                 queued_at: 20,
                 attempts: u32::from(n),

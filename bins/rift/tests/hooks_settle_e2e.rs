@@ -254,8 +254,20 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
         )],
         "the sweep settled the last turn at its Stop event's ids"
     );
-    let len = std::fs::metadata(&transcript).unwrap().len();
-    assert_eq!(usage_sidecar(&repo, session), (len, 1));
+    // The settle was `Final` and the final archive landed, so the session-end
+    // cleanup (L-0A §4.3) removed the progress the sidecar carried: nothing is
+    // left to settle, and a stale frontier must not outlive the session.
+    let sessions = hooks_fixture::sessions_of(&repo);
+    for suffix in ["usage", "transcript"] {
+        assert!(
+            !sessions.join(format!("{session}.{suffix}")).exists(),
+            "the .{suffix} sidecar is cleaned up after the final archive"
+        );
+    }
+    assert!(
+        sessions.join(format!("{session}.json")).exists(),
+        "the cache stays"
+    );
 }
 
 /// The agent-hook journal's marker files, keyed by session: the worker's

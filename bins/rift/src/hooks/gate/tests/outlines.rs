@@ -145,16 +145,19 @@ fn a_miss_or_a_small_file_is_a_plain_read() {
     assert!(first_contact_rows(here).is_empty());
 }
 
-/// ★ However the lever is written, no first read is answered in this build,
-/// and the identical repeat is no first contact: the window holds the file
-/// now, so the re-read lever decides it as it decides any repeat.
+/// ★ Under the default policy an enforcing family's first read is only
+/// observed — the `first_contact` key is unwritten, so the family's mode
+/// alone answers nothing — and the identical repeat is no first contact: the
+/// window holds the file now, so the re-read lever decides it as it decides
+/// any repeat.
 #[test]
-fn an_enforcing_family_is_still_only_observed_and_the_repeat_runs() {
+fn under_the_default_policy_an_enforcing_family_only_observes_and_the_repeat_runs() {
     let (tmp, file) = checkout(900);
     let here = tmp.path();
     bind(here, "src.rs", 900);
-    let mut enforce = enforcing();
-    enforce.first_contact = rift_recall_policy::Mode::Enforce;
+    let enforce = enforcing();
+    assert_eq!(enforce.read_deny, rift_recall_policy::Mode::Enforce);
+    assert_eq!(enforce.first_contact, rift_recall_policy::Mode::Observe);
     let call = hook(
         "claude-code",
         "PreToolUse",
@@ -172,5 +175,45 @@ fn an_enforcing_family_is_still_only_observed_and_the_repeat_runs() {
         first_contact_rows(here).len(),
         1,
         "one first contact per revision"
+    );
+}
+
+/// ★ With `first_contact` written `enforce` the first read is answered with
+/// the bound outline: the frame travels, the row it owes carries it, the
+/// window is credited with the outline and not the file, and the identical
+/// repeat runs — once answered, the request is honoured.
+#[test]
+fn a_first_read_is_answered_with_the_outline_once_first_contact_is_written_enforce() {
+    let (tmp, file) = checkout(900);
+    let here = tmp.path();
+    bind(here, "src.rs", 900);
+    let mut written = enforcing();
+    written.first_contact = rift_recall_policy::Mode::Enforce;
+    let call = hook(
+        "claude-code",
+        "PreToolUse",
+        "s-written",
+        read_call(&file, None, None),
+    );
+    let outcome = gate_under(&call, here, &written);
+    let frame = outcome.deny_reason.expect("the outline is the answer");
+    assert!(frame.starts_with("[rift] Read outlined:"), "{frame}");
+    assert!(frame.contains("src.rs"), "{frame}");
+    let kinds: Vec<&str> = lines_of(here, "s-written", None)
+        .iter()
+        .map(rift_agent::window_journal::Line::kind)
+        .collect();
+    assert_eq!(kinds, ["outline"], "the outline is not coverage");
+    let rows = first_contact_rows(here);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].decision,
+        crate::agent_queue::ServeAuditKind::ReadIntercepted
+    );
+    assert_eq!(rows[0].frame, frame);
+    assert_eq!(
+        gate_under(&call, here, &written).deny_reason,
+        None,
+        "the identical repeat is allowed"
     );
 }

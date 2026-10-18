@@ -555,7 +555,7 @@ fn empty_archive() -> CheckpointArchive {
     CheckpointArchive {
         boundary_gaps: None,
         repo: PathBuf::from("/parity-sandbox"),
-        commit: "0".repeat(40),
+        commit: Some("0".repeat(40)),
         checkpoint_id,
         sessions: vec![session],
         strategy: "manual-commit".to_owned(),
@@ -628,7 +628,7 @@ fn two_turn_archive() -> CheckpointArchive {
     CheckpointArchive {
         boundary_gaps: None,
         repo: PathBuf::from("/parity-sandbox"),
-        commit: "1".repeat(40),
+        commit: Some("1".repeat(40)),
         checkpoint_id: "ab".to_string() + &"cd".repeat(31),
         sessions: vec![session],
         strategy: "manual-commit".to_owned(),
@@ -856,7 +856,7 @@ mod tests {
         CheckpointArchive {
             boundary_gaps: None,
             repo: PathBuf::from("/parity-sandbox"),
-            commit: format!("{commit_byte:02x}").repeat(20),
+            commit: Some(format!("{commit_byte:02x}").repeat(20)),
             checkpoint_id: format!("{commit_byte:02x}").repeat(32),
             sessions: vec![session],
             strategy: "manual-commit".to_owned(),

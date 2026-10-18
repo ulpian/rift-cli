@@ -6,8 +6,52 @@ use std::process::Command;
 
 use crate::dogfood::measure::{parse_savings, SavingsSample};
 use crate::dogfood::process::{capture, must};
-use crate::dogfood::Client;
+use crate::dogfood::{Client, Lever};
 use crate::dogfood_compare::Arm;
+
+/// Which checkout one client's sessions play in: the client, the arm, and
+/// the levers the line asked to write at `enforce`.
+///
+/// One context rather than three parameters, because the three travel
+/// together from the run's loop to the preparation that writes the policy.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ArmOf<'a> {
+    /// The client being driven.
+    pub(super) client: Client,
+    /// The arm the checkout plays; `None` is the single-arm run.
+    pub(super) arm: Option<Arm>,
+    /// The levers `--enforce` named, in order.
+    pub(super) enforce: &'a [Lever],
+}
+
+/// What the preparation writes into a checkout's policy, if anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct LeverWrites {
+    /// Every read lever off: the calibration's removal.
+    pub(super) off: bool,
+    /// The levers written at `enforce`, in the order the line named them.
+    pub(super) enforce: Vec<Lever>,
+}
+
+/// The policy writes an arm gets.
+///
+/// The off arm is the removal and carries no lever at `enforce` whatever the
+/// line asked: an off arm with a lever on would measure two changes. Every
+/// other arm — the on arm, the shell arm, the single-arm run — carries
+/// exactly the levers named, and a run without the flag carries none, which
+/// is the run as it was.
+pub(super) fn lever_writes(arm: Option<Arm>, enforce: &[Lever]) -> LeverWrites {
+    if arm == Some(Arm::Off) {
+        return LeverWrites {
+            off: true,
+            enforce: Vec::new(),
+        };
+    }
+    LeverWrites {
+        off: false,
+        enforce: enforce.to_vec(),
+    }
+}
 
 /// The two documents the scripted sessions read, copied (never moved, never
 /// edited) out of the converter's own corpus.
@@ -152,10 +196,9 @@ pub fn refuse_shared_family(
 pub(super) fn prepare(
     root: &Path,
     rift: &Path,
-    client: Client,
     scratch: &Path,
     seen: &[(String, String)],
-    arm: Option<Arm>,
+    of: ArmOf<'_>,
 ) -> Result<Prepared, String> {
     clone_with_documents(root, scratch)?;
     must(
@@ -171,16 +214,31 @@ pub(super) fn prepare(
     // developer's, and not the other arm's.
     let theirs = read_savings(rift, scratch)?;
     refuse_shared_family(&theirs, seen)?;
-    wire_client(rift, client, scratch)?;
+    wire_client(rift, of.client, scratch)?;
     prime_documents(rift, scratch);
     // Last, so that everything before it — the clone, the wiring, the primed
     // documents — is the same work in both arms and the levers are the only
     // thing that differs.
-    // The shell arm keeps the overlay as it ships: its one difference from
-    // the on arm is how the client is driven, not what the policy says.
-    if arm == Some(Arm::Off) {
+    // The shell arm keeps the overlay as the on arm has it: its one
+    // difference from the on arm is how the client is driven, not what the
+    // policy says.
+    let writes = lever_writes(of.arm, of.enforce);
+    if writes.off {
         let policy = crate::dogfood_compare::write_levers_off(scratch)?;
         println!("dogfood: every read lever off in {}", policy.display());
+    }
+    if !writes.enforce.is_empty() {
+        let policy = crate::dogfood_compare::write_levers_enforced(scratch, &writes.enforce)?;
+        println!(
+            "dogfood: {} at enforce in {}",
+            writes
+                .enforce
+                .iter()
+                .map(|l| l.key())
+                .collect::<Vec<_>>()
+                .join(", "),
+            policy.display()
+        );
     }
     // The baseline, taken here rather than beside the refusal above: everything
     // the preparation books — the four primed `doc read` calls above most of
@@ -443,6 +501,41 @@ mod tests {
              a shared family through"
         );
     }
+    /// What a checkout's policy is written with: the off arm goes off and
+    /// never carries a lever at enforce, every other arm carries exactly the
+    /// levers the line named, and without the flag nothing is written at all.
+    #[test]
+    fn without_the_flag_no_lever_is_written_and_the_off_arm_stays_off() {
+        assert_eq!(
+            lever_writes(None, &[]),
+            LeverWrites::default(),
+            "today's run: nothing written"
+        );
+        assert_eq!(lever_writes(Some(Arm::On), &[]), LeverWrites::default());
+        assert_eq!(
+            lever_writes(None, &[Lever::Narrow]),
+            LeverWrites {
+                off: false,
+                enforce: vec![Lever::Narrow]
+            }
+        );
+        assert_eq!(
+            lever_writes(Some(Arm::Shell), &[Lever::FirstContact, Lever::Narrow]),
+            LeverWrites {
+                off: false,
+                enforce: vec![Lever::FirstContact, Lever::Narrow]
+            }
+        );
+        assert_eq!(
+            lever_writes(Some(Arm::Off), &[Lever::Narrow]),
+            LeverWrites {
+                off: true,
+                enforce: Vec::new()
+            },
+            "the off arm is the removal, whatever the line asks to enforce"
+        );
+    }
+
     /// The documents the scripted sessions read are copied out of the
     /// converter's own corpus, and both are still there.
     #[test]

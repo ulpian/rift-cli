@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{value, DocumentMut, Item, Table};
 
-use crate::dogfood::{Client, ClientRun, Status};
+use crate::dogfood::{Client, ClientRun, Lever, Status};
 
 /// Which side of the calibration a scratch checkout is playing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -103,16 +103,62 @@ pub fn levers_off(text: &str) -> Result<String, String> {
     Ok(doc.to_string())
 }
 
-/// Switch every read lever off in one scratch checkout, and say where.
+/// Rewrite a serving overlay so that the named levers are at `enforce`.
 ///
-/// The file is a repository-owned path in a clone this harness made moments
-/// ago, so the write refuses a link rather than following one, and lands
-/// through a sibling temporary file so a crash cannot leave half a policy.
+/// Only the keys named move, each under `[interception]`, and the rest of the
+/// document is left exactly as it was: the arm differs from a run without the
+/// flag in those keys and in nothing else. `mode` is not touched — the family
+/// and channel caps the resolver applies still hold, so a lever written here
+/// acts only where a run without the flag would have observed it.
 ///
 /// # Errors
-/// A refused path, an unreadable or unwritable file, or a document the lever
-/// rewrite could not apply.
+/// A document that is not TOML, or one whose `[interception]` is not a table.
+pub fn levers_enforced(text: &str, levers: &[Lever]) -> Result<String, String> {
+    let mut doc = if text.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        text.parse::<DocumentMut>()
+            .map_err(|e| format!("dogfood: the serving overlay is not TOML: {e}"))?
+    };
+    let interception = table_mut(&mut doc, "interception")?;
+    for lever in levers {
+        set_str(interception, lever.key(), "enforce");
+    }
+    Ok(doc.to_string())
+}
+
+/// Switch every read lever off in one scratch checkout, and say where.
+///
+/// # Errors
+/// What `write_overlay` refuses, or a document the lever rewrite could not
+/// apply.
 pub fn write_levers_off(scratch: &Path) -> Result<PathBuf, String> {
+    write_overlay(scratch, levers_off)
+}
+
+/// Write the named levers at `enforce` in one scratch checkout, and say where.
+///
+/// # Errors
+/// What `write_overlay` refuses, or a document the lever rewrite could not
+/// apply.
+pub fn write_levers_enforced(scratch: &Path, levers: &[Lever]) -> Result<PathBuf, String> {
+    write_overlay(scratch, |text| levers_enforced(text, levers))
+}
+
+/// Rewrite one scratch checkout's serving overlay through `edit`.
+///
+/// The one place the harness writes a policy. The file is a repository-owned
+/// path in a clone this harness made moments ago, so the write refuses a link
+/// rather than following one, and lands through a sibling temporary file so a
+/// crash cannot leave half a policy.
+///
+/// # Errors
+/// A refused path, an unreadable or unwritable file, or an `edit` that
+/// refused the document.
+fn write_overlay(
+    scratch: &Path,
+    edit: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<PathBuf, String> {
     let mut path = scratch.to_path_buf();
     for part in SERVE_POLICY {
         path.push(part);
@@ -120,7 +166,7 @@ pub fn write_levers_off(scratch: &Path) -> Result<PathBuf, String> {
     if let Ok(meta) = std::fs::symlink_metadata(&path) {
         if !meta.is_file() {
             return Err(format!(
-                "dogfood: {} is not a regular file — refusing to write the off arm's policy",
+                "dogfood: {} is not a regular file — refusing to write an arm's policy",
                 path.display()
             ));
         }
@@ -130,7 +176,7 @@ pub fn write_levers_off(scratch: &Path) -> Result<PathBuf, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("dogfood: read {}: {e}", path.display())),
     };
-    let next = levers_off(&current)?;
+    let next = edit(&current)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("dogfood: {}: {e}", dir.display()))?;
     }
@@ -702,6 +748,62 @@ mod tests {
         assert_eq!(policy.interception.mode, Mode::Off);
         assert_eq!(policy.search.mode, Mode::Off);
         assert_eq!(policy.doc.mode, Mode::Off);
+    }
+
+    /// The enforce arm writes the named lever keys, and only those, at
+    /// `enforce` under `[interception]`, through the same writer the off arm
+    /// uses: the rest of the document — the other levers' defaults included —
+    /// survives untouched.
+    #[test]
+    fn the_enforce_arm_writes_only_the_named_levers() {
+        use rift_recall_policy::{Mode, ServePolicy};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let rift_dir = scratch.path().join(".rift");
+        std::fs::create_dir_all(rift_dir.join("policies")).unwrap();
+        std::fs::write(
+            rift_dir.join("policies").join("serve.toml"),
+            "# Injection is on, deliberately.\n\
+             injection_turn_budget = 400\n\n\
+             [interception]\n\
+             mode = \"enforce\"\n\
+             min_slice_lines = 24\n\
+             narrow = \"observe\"\n",
+        )
+        .unwrap();
+        let written =
+            write_levers_enforced(scratch.path(), &[Lever::Narrow, Lever::FirstContact]).unwrap();
+        assert!(written.ends_with("serve.toml"));
+        let policy = ServePolicy::load(&rift_dir);
+        assert!(
+            !policy.fail_closed,
+            "a lever at enforce is a readable policy"
+        );
+        assert_eq!(policy.interception.narrow, Mode::Enforce);
+        assert_eq!(policy.interception.first_contact, Mode::Enforce);
+        assert_eq!(
+            policy.interception.decline_family_held,
+            Mode::Observe,
+            "a lever the line did not name is left as it was"
+        );
+        assert_eq!(policy.interception.inherit_by_name, Mode::Observe);
+        assert_eq!(policy.interception.mode, Mode::Enforce);
+        assert_eq!(policy.injection_turn_budget, 400);
+        let text = std::fs::read_to_string(&written).unwrap();
+        assert!(text.contains("# Injection is on, deliberately."), "{text}");
+        assert!(text.contains("min_slice_lines = 24"), "{text}");
+
+        let bare = tempfile::tempdir().unwrap();
+        write_levers_enforced(bare.path(), &[Lever::InheritByName]).unwrap();
+        let policy = ServePolicy::load(&bare.path().join(".rift"));
+        assert_eq!(policy.interception.inherit_by_name, Mode::Enforce);
+        assert_eq!(policy.interception.narrow, Mode::Observe, "the default");
+        assert!(levers_enforced(
+            "[interception
+",
+            &[Lever::Narrow]
+        )
+        .is_err());
     }
 
     /// An overlay whose per-family table is inline is the same policy written

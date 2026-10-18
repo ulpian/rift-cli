@@ -349,7 +349,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
     let archive = CheckpointArchive {
         boundary_gaps: None,
         repo: tmp.path().to_path_buf(),
-        commit: "2".repeat(40),
+        commit: Some("2".repeat(40)),
         checkpoint_id: "cc".to_string() + &"dd".repeat(31),
         sessions: vec!["01JSECRET".into()],
         strategy: "manual-commit".into(),
@@ -417,7 +417,7 @@ fn archive_with_transcript(
     let mut archive = CheckpointArchive {
         boundary_gaps: None,
         repo: repo.to_path_buf(),
-        commit: "3".repeat(40),
+        commit: Some("3".repeat(40)),
         checkpoint_id: String::new(),
         sessions: vec!["01JDEDUP".into()],
         strategy: "manual-commit".into(),
