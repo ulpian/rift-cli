@@ -25,6 +25,7 @@ mod originals;
 mod recovery;
 pub(crate) mod subagent_claims;
 mod sweep;
+mod turn_end;
 mod worker;
 
 use std::path::{Path, PathBuf};

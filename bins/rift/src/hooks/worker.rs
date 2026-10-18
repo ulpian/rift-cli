@@ -426,6 +426,7 @@ fn run_job_kind(
         } => condense_agent_job(t, job, session_id, agent, repo_id, owner, context)
             .map(landed_condense),
         JobKind::Archive(archive) => interval_archive_job(t, job, archive).map(landed_if),
+        JobKind::SealTurn(seal) => super::turn_end::turn_end_job(t, job, seal).map(landed_if),
         JobKind::ReadTokens {
             tool_call_id,
             rel_path,

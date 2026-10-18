@@ -576,6 +576,38 @@ impl ShardWalker {
         }
     }
 
+    /// A native checkpoint's artifact with the blob oid its tree entry names,
+    /// so a caller can carry it forward by that oid (L-5 turn segments).
+    ///
+    /// # Errors
+    /// [`RiftError::Substrate`] on a read failure.
+    pub fn read_native_entry(
+        &self,
+        checkpoint_id: &str,
+        rel: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        if checkpoint_id.len() < 3 || !is_hex(checkpoint_id) {
+            return Ok(None);
+        }
+        let Some(root) = self.root_tree(Dialect::Rift)? else {
+            return Ok(None);
+        };
+        let path = Path::new(&checkpoint_id[..2])
+            .join(&checkpoint_id[2..])
+            .join(rel);
+        let entry = root
+            .lookup_entry_by_path(&path)
+            .map_err(|e| RiftError::substrate(format!("tree lookup: {e}")))?;
+        let Some(entry) = entry.filter(|e| e.mode().is_blob()) else {
+            return Ok(None);
+        };
+        let oid = entry.oid().to_string();
+        let blob = entry
+            .object()
+            .map_err(|e| RiftError::substrate(format!("read blob: {e}")))?;
+        Ok(Some((oid, blob.data.clone())))
+    }
+
     /// Capture one immutable native tree without exposing gix types.
     pub(crate) fn capture_native_tree(&self) -> Result<Option<String>> {
         Ok(self
