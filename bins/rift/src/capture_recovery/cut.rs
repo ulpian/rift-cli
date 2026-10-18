@@ -421,7 +421,7 @@ impl<'h> Operation<'h> {
             .map_err(|error| match error {
                 RecordError::Unavailable => Owed::HoldUnavailable,
                 RecordError::Conflict => Owed::CutConflict,
-                RecordError::Failed => Owed::PublishFailed,
+                RecordError::Failed | RecordError::Absent => Owed::PublishFailed,
                 RecordError::Resource => Owed::Resource,
             })?;
         let cut_sha256 = format!("{:x}", Sha256::digest(&bytes));

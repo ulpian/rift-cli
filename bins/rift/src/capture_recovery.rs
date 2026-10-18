@@ -16,6 +16,8 @@ mod cut;
 mod eligibility;
 #[cfg(unix)]
 mod files;
+#[cfg(unix)]
+mod gap;
 pub(crate) mod hold;
 #[cfg(unix)]
 mod inventory;
