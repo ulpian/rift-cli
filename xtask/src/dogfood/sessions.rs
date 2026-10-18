@@ -117,11 +117,17 @@ mod tests {
     use crate::workspace_root;
 
     /// Every session that ships parses, and the set is the one the command
-    /// promises: ten, numbered from one, each with an intent of its own.
+    /// promises: eleven, numbered from one, each with an intent of its own.
+    /// The eleventh hands two files the window has read to a subagent, so a
+    /// run plays the inheritance and family-held routes live.
     #[test]
     fn the_shipped_sessions_load() {
         let sessions = load_sessions(&workspace_root().join(SESSIONS_DIR)).unwrap();
-        assert_eq!(sessions.len(), 10, "ten scripted sessions ship");
+        assert_eq!(sessions.len(), 11, "eleven scripted sessions ship");
+        assert!(
+            sessions[10].prompt.contains("Agent tool"),
+            "the eleventh delegates to a subagent"
+        );
         for (at, s) in sessions.iter().enumerate() {
             assert_eq!(s.number as usize, at + 1, "{} is out of order", s.name);
             assert!(!s.intent.is_empty());

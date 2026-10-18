@@ -16,9 +16,10 @@ use crate::respond::Channel;
 
 /// How far interception is allowed to go.
 ///
-/// Ordered from least to most, so the cap one lever puts on another is a
-/// `min`: a narrowing decline goes no further than [`NARROW_MODE`] whatever the
-/// family's own mode allows.
+/// Ordered from least to most, so the cap one mode puts on another is a
+/// `min`: a narrowing decline goes no further than the family's own mode
+/// whatever the `narrow` lever is written, and no further than that lever
+/// whatever the family's mode is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mode {
     /// Nothing is decided and nothing is recorded. This is where an
@@ -33,15 +34,16 @@ pub enum Mode {
     Enforce,
 }
 
-/// How far a **narrowing** decline may go, before the family's own mode caps
-/// it.
+/// The mode the **narrowing** lever ships at: the documented default, which
+/// the repository's `narrow` policy key stands in for and
+/// [`Limits::default`] carries.
 ///
 /// Observe, so a read that is partly held is decided and recorded and never
 /// acted on: the frame that answers it asks the model to make a different
 /// read than the one it made, and how often a model re-issues the original
 /// instead is a figure the observe window has to publish before any session
-/// meets the frame. The move to enforce is a change to this one constant,
-/// made on its own when that figure is in.
+/// meets the frame. The move to enforce is a line written in the policy, not
+/// a change here: this constant caps nothing.
 pub const NARROW_MODE: Mode = Mode::Observe;
 
 /// The fewest **held** lines a narrowing decline may act on.
@@ -126,9 +128,10 @@ pub struct Limits {
     /// read is held to.
     pub max_shell_delivered_bytes: usize,
     /// How far a narrowing decline may go, before the family's mode caps it:
-    /// [`NARROW_MODE`] wherever a decision is taken for a session.
+    /// the repository's `narrow` lever as the hook resolved it, which ships at
+    /// [`NARROW_MODE`].
     ///
-    /// A field rather than the constant read in place, so one caller can ask a
+    /// A field rather than a constant read in place, so one caller can ask a
     /// different question of the same decision. The replay asks what the
     /// narrowing would have spared had it been enforced, and asks it of the
     /// shipped decision rather than of a copy of it; with the field at
@@ -393,9 +396,10 @@ fn decide_held(
 ///
 /// The gates are the plain decline's, in its order — the lever, then one
 /// decline per key, then the floor — with two differences. The mode is
-/// already capped by [`Limits::narrow_mode`]; and the floor is counted on the
-/// **held** lines against [`NARROW_MIN_HELD_LINES`], because the held lines
-/// are what a narrowing spares and its frame is priced on its own.
+/// already the lesser of the family's and [`Limits::narrow_mode`]; and the
+/// floor is counted on the **held** lines against [`NARROW_MIN_HELD_LINES`],
+/// because the held lines are what a narrowing spares and its frame is
+/// priced on its own.
 fn decide_narrow(
     read: &ResolvedRead,
     journal: &Journal,
