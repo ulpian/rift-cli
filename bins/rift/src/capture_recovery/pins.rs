@@ -769,3 +769,7 @@ mod platform {
     )
 )]
 pub(crate) use platform::{classify, preserve, DeliveryMatch, LivePin};
+#[cfg(unix)]
+pub(crate) use platform::{
+    inspect_retained, preserve_selected, reopen_expected, shared_scope, verify_pin, SharedScope,
+};

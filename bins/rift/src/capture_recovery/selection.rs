@@ -6,15 +6,13 @@
 //! Nothing here pins, cuts, archives, retires, releases or writes a cache: the
 //! result is the intent, its digest and the retained original descriptors the
 //! pin slice consumes. Any refusal before publication leaves nothing behind.
-mod intent;
+pub(super) mod intent;
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
-use cap_std::fs::{File, OpenOptions, OpenOptionsExt as _};
+use cap_std::fs::File;
 use rift_core::boundary_gap::MemberKey;
 use rift_shadow::hooks::AdapterRegistry;
 use rift_shadow::ids;
@@ -26,6 +24,7 @@ use super::files::{DirectoryIdentity, Namespace};
 use super::hold::OwnHold;
 use super::inventory::{self, Counts, Inventory, Source};
 use super::plan::Plan;
+use super::record::{self, Publication, RecordError, Step};
 use super::{codec, WireError};
 pub(crate) use intent::{
     Expectation, Identity, KnownBoundary, ReservedObservation, Scope, SelectionIntent,
@@ -65,13 +64,6 @@ pub(crate) struct Deferred {
 pub(crate) enum Cut {
     Historical,
     NoHistoricalCut,
-}
-
-/// Whether this attempt wrote the intent or found its exact bytes already there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Publication {
-    Fresh,
-    Resumed,
 }
 
 /// One retained original descriptor and the expectation frozen from it.
@@ -456,81 +448,36 @@ fn counts_of(counts: &Counts) -> intent::InventoryCounts {
     }
 }
 
-/// Create the record no-clobber, 0600, write it whole and sync it and its
-/// directory. An existing record holding exactly these bytes is the resume
-/// input; anything else there refuses — never overwritten.
+/// The intent record through the shared no-clobber publisher: an existing
+/// record holding exactly these bytes is the resume input and must still
+/// decode; anything else there refuses — never overwritten.
 fn publish(
     private: &Namespace,
     bytes: &[u8],
     observe: &mut impl FnMut(Phase) -> Result<(), ()>,
 ) -> Result<Publication, Owed> {
-    private.recheck().map_err(|_| Owed::HoldUnavailable)?;
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .follow(FollowSymlinks::No)
-        .mode(0o600);
-    let mut file = match private.dir.open_with(INTENT_NAME, &options) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return resume(private, bytes);
-        }
-        Err(_) => return Err(Owed::PublishFailed),
-    };
-    file.write_all(bytes).map_err(|_| Owed::PublishFailed)?;
-    observe(Phase::Written).map_err(|()| Owed::Resource)?;
-    file.sync_all().map_err(|_| Owed::PublishFailed)?;
-    private
-        .dir
-        .try_clone()
-        .map_err(|_| Owed::PublishFailed)?
-        .into_std_file()
-        .sync_all()
-        .map_err(|_| Owed::PublishFailed)?;
-    observe(Phase::Synced).map_err(|()| Owed::Resource)?;
-    if read_record(private)? != bytes {
-        return Err(Owed::PublishFailed);
+    let publication = record::publish_private_record(
+        private,
+        INTENT_NAME,
+        intent::MAX_INTENT_BYTES,
+        bytes,
+        &mut |step| {
+            observe(match step {
+                Step::Written => Phase::Written,
+                Step::Synced => Phase::Synced,
+            })
+        },
+    )
+    .map_err(|error| match error {
+        RecordError::Unavailable => Owed::HoldUnavailable,
+        RecordError::Conflict => Owed::IntentConflict,
+        RecordError::Failed => Owed::PublishFailed,
+        RecordError::Resource => Owed::Resource,
+    })?;
+    if publication == Publication::Resumed {
+        SelectionIntent::decode(bytes).map_err(|_| Owed::IntentConflict)?;
     }
-    Ok(Publication::Fresh)
-}
-
-fn resume(private: &Namespace, bytes: &[u8]) -> Result<Publication, Owed> {
-    let existing = read_record(private)?;
-    if existing != bytes {
-        return Err(Owed::IntentConflict);
-    }
-    SelectionIntent::decode(&existing).map_err(|_| Owed::IntentConflict)?;
-    Ok(Publication::Resumed)
-}
-
-/// The record read whole under its cap plus one, descriptor-relative and
-/// without following: a symlink, a directory or an oversize file is not it.
-fn read_record(private: &Namespace) -> Result<Vec<u8>, Owed> {
-    use std::io::Read as _;
-    private.recheck().map_err(|_| Owed::HoldUnavailable)?;
-    let before = private
-        .dir
-        .symlink_metadata(INTENT_NAME)
-        .map_err(|_| Owed::IntentConflict)?;
-    if !before.is_file() || before.len() > intent::MAX_INTENT_BYTES as u64 {
-        return Err(Owed::IntentConflict);
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let file = private
-        .dir
-        .open_with(INTENT_NAME, &options)
-        .map_err(|_| Owed::IntentConflict)?;
-    let mut bytes = Vec::new();
-    (&file)
-        .take(intent::MAX_INTENT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Owed::IntentConflict)?;
-    if bytes.len() > intent::MAX_INTENT_BYTES {
-        return Err(Owed::IntentConflict);
-    }
-    Ok(bytes)
+    Ok(publication)
 }
 
 /// The whole selection, under an admitted hold: the policy checked, the

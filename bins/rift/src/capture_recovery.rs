@@ -11,6 +11,8 @@
 )]
 
 mod codec;
+#[cfg(unix)]
+mod cut;
 mod eligibility;
 #[cfg(unix)]
 mod files;
@@ -19,6 +21,8 @@ pub(crate) mod hold;
 mod inventory;
 pub(crate) mod pins;
 pub(crate) mod plan;
+#[cfg(unix)]
+mod record;
 #[cfg(unix)]
 mod selection;
 
