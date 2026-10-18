@@ -85,3 +85,29 @@ fn rejected_retry_keeps_the_complete_previous_payload_and_unknown_fields() {
     replace_attempts(&path, "ticket", &payload(0), 1, &owner).unwrap();
     assert_eq!(decode(&std::fs::read(path).unwrap()).unwrap(), payload(1));
 }
+
+/// The session cache is `schema: 1`, not `schema_version: 1`: the structural
+/// half (unique keys at every depth, nothing trailing) reads it, and the queue
+/// decoder's own object/schema/attempts checks still refuse it.
+#[test]
+fn the_structural_decoder_accepts_a_cache_shape_the_queue_decoder_still_refuses() {
+    let cache = br#"{"schema":1,"session_id":"s","state":"active","agent":"codex","current_turn_ordinal":1,"turn_open":true,"compaction_boundary":null,"updated_at_ms":5}"#;
+    let value = decode_unique_value(cache).unwrap();
+    assert_eq!(value["schema"], 1);
+    assert_eq!(value["current_turn_ordinal"], 1);
+    assert!(
+        decode(cache).is_err(),
+        "no schema_version: the queue refuses"
+    );
+    for bytes in [
+        br#"{"schema":1,"schema":1}"#.as_slice(),
+        br#"{"schema":1,"nested":{"a":1,"a":2}}"#.as_slice(),
+        br#"{"schema":1} {"schema":1}"#.as_slice(),
+        br#"{"schema":1}x"#.as_slice(),
+    ] {
+        assert!(decode_unique_value(bytes).is_err());
+        assert!(decode(bytes).is_err());
+    }
+    let queue = br#"{"schema_version":1,"attempts":2}"#;
+    assert_eq!(decode_unique_value(queue).unwrap(), decode(queue).unwrap());
+}

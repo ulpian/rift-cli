@@ -12,10 +12,19 @@
 
 mod codec;
 #[cfg(unix)]
+mod cut;
+mod eligibility;
+#[cfg(unix)]
 mod files;
 pub(crate) mod hold;
+#[cfg(unix)]
+mod inventory;
 pub(crate) mod pins;
 pub(crate) mod plan;
+#[cfg(unix)]
+mod record;
+#[cfg(unix)]
+mod selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PinError;

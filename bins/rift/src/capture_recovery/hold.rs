@@ -26,6 +26,17 @@ struct HoldWire {
     plan_sha256: String,
 }
 
+#[cfg(unix)]
+pub(crate) use platform::queue::ReadyQueue;
+#[cfg(unix)]
+pub(crate) use platform::sessions::ReadySessions;
+/// Non-Unix builds hold no descriptors, so the capability is never admitted.
+#[cfg(not(unix))]
+pub(crate) struct ReadySessions<'h>(std::marker::PhantomData<&'h ()>);
+/// Non-Unix builds hold no descriptors, so the journal is never admitted.
+#[cfg(not(unix))]
+pub(crate) struct ReadyQueue<'h>(std::marker::PhantomData<&'h ()>);
+
 /// Borrows the actual owner and exact live evidence; it grants only readiness.
 pub(crate) struct OwnHold<'a> {
     owner: &'a QueueLock,
@@ -56,6 +67,40 @@ impl Hold {
 impl OwnHold<'_> {
     pub(crate) fn owner(&self) -> &QueueLock {
         self.owner
+    }
+
+    /// The member's CURRENT sessions tree as read-only evidence: derived from
+    /// the already-bound target scope after a recheck, held by descriptor, and
+    /// admitted only behind a regular moved marker in that exact member. It
+    /// never resolves, mints, records or moves; a member whose run state is
+    /// still in its git dir has no such capability until shared readiness
+    /// moves it.
+    pub(crate) fn sessions_namespace(&self) -> EvidenceResult<ReadySessions<'_>> {
+        self.check_current()?;
+        #[cfg(unix)]
+        {
+            ReadySessions::admit(self)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(EvidenceError)
+        }
+    }
+
+    /// The member's CURRENT agent-queue journal as read-only evidence: the
+    /// sibling of [`Self::sessions_namespace`], derived from the same bound
+    /// scope behind the same moved marker and rechecked the same way. It lists
+    /// and reads; it never publishes, retries, removes or moves.
+    pub(crate) fn agent_queue_namespace(&self) -> EvidenceResult<ReadyQueue<'_>> {
+        self.check_current()?;
+        #[cfg(unix)]
+        {
+            ReadyQueue::admit(self)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(EvidenceError)
+        }
     }
 
     pub(crate) fn check_current(&self) -> EvidenceResult<()> {
@@ -199,6 +244,17 @@ mod platform {
                 parent.recheck().map_err(|_| EvidenceError)?;
             }
             Ok(())
+        }
+
+        /// The bound member directory itself, once it exists; a scope whose
+        /// member is still absent has no sessions to read.
+        fn bound_member(&self) -> EvidenceResult<&Namespace> {
+            let slot = self.prefixes.get(3).ok_or(EvidenceError)?;
+            let bound = slot.bound.get().ok_or(EvidenceError)?;
+            if bound.path != self.expected_member {
+                return Err(EvidenceError);
+            }
+            Ok(bound)
         }
 
         fn exclude_private(&self, private: &Namespace) -> EvidenceResult<()> {
@@ -430,6 +486,8 @@ mod platform {
             member,
         ))
     }
+    pub(super) mod queue;
+    pub(super) mod sessions;
     #[cfg(test)]
     mod tests;
 }

@@ -46,13 +46,13 @@ struct Selector {
     clippy::struct_field_names,
     reason = "the max_* names are the Plan record's serde wire fields (deny_unknown_fields); renaming changes the wire"
 )]
-struct Budgets {
-    max_inventory_entries: u32,
-    max_selected_tickets: u32,
-    max_ticket_bytes: u64,
-    max_total_ticket_bytes: u64,
-    max_cut_bytes: u64,
-    max_artifact_bytes: u64,
+pub(super) struct Budgets {
+    pub(super) max_inventory_entries: u32,
+    pub(super) max_selected_tickets: u32,
+    pub(super) max_ticket_bytes: u64,
+    pub(super) max_total_ticket_bytes: u64,
+    pub(super) max_cut_bytes: u64,
+    pub(super) max_artifact_bytes: u64,
 }
 
 /// Raw canonical Plan-file SHA, distinct from internal context handles.
@@ -129,6 +129,13 @@ impl Plan {
     }
     pub(super) fn evidence_dir(&self) -> &Path {
         Path::new(&self.wire.evidence_dir)
+    }
+    pub(super) fn budgets(&self) -> &Budgets {
+        &self.wire.budgets
+    }
+    /// The closed reservation policy the selector names.
+    pub(super) fn reservation(&self) -> &str {
+        &self.wire.selector.reservation
     }
 }
 

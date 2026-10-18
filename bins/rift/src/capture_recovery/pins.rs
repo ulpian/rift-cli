@@ -6,6 +6,7 @@ mod platform {
     #[cfg(test)]
     use std::io::Seek as _;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
 
     use cap_std::fs::{File, Metadata, PermissionsExt as _};
     use sha2::{Digest as _, Sha256};
@@ -15,6 +16,7 @@ mod platform {
     use crate::capture_recovery::files::{
         self, clean_absolute, physical_identity, DirectoryIdentity, Namespace, PhysicalIdentity,
     };
+    use crate::capture_recovery::selection::{Expectation, Identity, RetainedOriginal, Scope};
     use crate::capture_recovery::{PinError, PinResult};
 
     #[derive(Clone)]
@@ -35,13 +37,24 @@ mod platform {
         decoded: Decoded,
     }
 
-    pub(crate) struct LivePin {
-        frozen: FrozenSelection,
+    /// The three namespaces every pin is checked against: the queue the
+    /// source is named in, the private directory the pin lives in and the
+    /// roots a private directory must not sit under. One pin opens its own;
+    /// an operation opens them once and shares them across its slots.
+    struct Scopes {
         source: Namespace,
         private: Namespace,
+        excluded: Vec<Namespace>,
+    }
+
+    /// The scopes of one operation, opened once; every slot's pin shares them.
+    pub(crate) struct SharedScope(Rc<Scopes>);
+
+    pub(crate) struct LivePin {
+        frozen: FrozenSelection,
+        scopes: Rc<Scopes>,
         original_fd: Option<File>,
         pin_fd: File,
-        excluded: Vec<Namespace>,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,11 +70,36 @@ mod platform {
         excluded: Vec<Namespace>,
     }
 
+    /// The queue directory the owner's family states for this member and the
+    /// roots a private directory must never sit under, resolved once.
+    struct Family {
+        queue: PathBuf,
+        excluded: [PathBuf; 3],
+    }
+
+    /// What one read proved about a regular file, whichever handle it came
+    /// through: the metadata taken with the bytes, and the bytes decoded.
+    struct Facts {
+        metadata: Metadata,
+        bytes: Vec<u8>,
+        decoded: Decoded,
+    }
+
     struct Sample {
         file: File,
         metadata: Metadata,
         bytes: Vec<u8>,
         decoded: Decoded,
+    }
+
+    /// Where a frozen selection sits: the owner and the two namespaces, with
+    /// the source and pin names under them.
+    struct Placement<'a> {
+        owner: &'a QueueLock,
+        source: &'a Namespace,
+        private: &'a Namespace,
+        name: &'a OsStr,
+        pin_name: &'a OsStr,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,6 +121,74 @@ mod platform {
         pub(crate) fn original_identity(&self) -> (u64, u64, u32) {
             let identity = self.frozen.identity;
             (identity.dev, identity.ino, identity.permission_bits)
+        }
+    }
+
+    impl Sample {
+        fn split(self) -> (File, Facts) {
+            let facts = Facts {
+                metadata: self.metadata,
+                bytes: self.bytes,
+                decoded: self.decoded,
+            };
+            (self.file, facts)
+        }
+    }
+
+    impl SharedScope {
+        /// Every slot rechecks the owner, both namespaces, the private mode
+        /// and the exclusions before trusting a name under them.
+        pub(crate) fn recheck(&self, owner: &QueueLock) -> PinResult<()> {
+            owner.check_current().map_err(|_| PinError)?;
+            self.0.source.recheck()?;
+            self.0.private.recheck()?;
+            check_private_mode(&self.0.private)?;
+            check_exclusions(&self.0.private, &self.0.excluded)
+        }
+
+        /// The scope the intent froze is this scope: same paths, same
+        /// directory identities, same ancestry on both sides.
+        pub(crate) fn matches_scope(&self, expected: &Scope) -> PinResult<()> {
+            let same_ancestry = |held: &[DirectoryIdentity], frozen: &[Identity]| {
+                held.len() == frozen.len()
+                    && held
+                        .iter()
+                        .zip(frozen)
+                        .all(|(h, f)| (h.dev, h.ino) == (f.dev, f.ino))
+            };
+            let same_identity = |held: DirectoryIdentity, frozen: Identity| {
+                (held.dev, held.ino) == (frozen.dev, frozen.ino)
+            };
+            if self.0.source.path.as_os_str() != OsStr::new(&expected.source_queue_dir)
+                || self.0.private.path.as_os_str() != OsStr::new(&expected.private_dir)
+                || !same_identity(self.0.source.identity()?, expected.source_dir_identity)
+                || !same_identity(self.0.private.identity()?, expected.private_dir_identity)
+                || !same_ancestry(&self.0.source.ancestry, &expected.source_ancestry)
+                || !same_ancestry(&self.0.private.ancestry, &expected.private_ancestry)
+            {
+                return Err(PinError);
+            }
+            Ok(())
+        }
+
+        /// Whether the queue names `name` right now, without following; the
+        /// link needs the name, the retained descriptor does not.
+        pub(crate) fn source_present(&self, name: &str) -> PinResult<bool> {
+            present(&self.0.source, name)
+        }
+
+        pub(crate) fn pin_present(&self, name: &str) -> PinResult<bool> {
+            present(&self.0.private, name)
+        }
+    }
+
+    fn present(namespace: &Namespace, name: &str) -> PinResult<bool> {
+        codec::basename(OsStr::new(name))?;
+        namespace.recheck()?;
+        match namespace.dir.symlink_metadata(name) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(PinError),
         }
     }
 
@@ -125,10 +231,21 @@ mod platform {
         })
     }
 
-    fn source_scope(owner: &QueueLock, source: &Path) -> PinResult<SourceScope> {
+    /// The retained descriptor read whole under the cap and decoded under the
+    /// source's name; the descriptor, never the path, is what is sampled.
+    fn facts_of_fd(file: &File, decode_name: &OsStr) -> PinResult<Facts> {
+        let bytes = read_fd(file)?;
+        let metadata = file.metadata().map_err(|_| PinError)?;
+        let decoded = codec::decode(decode_name, &bytes)?;
+        Ok(Facts {
+            metadata,
+            bytes,
+            decoded,
+        })
+    }
+
+    fn family_of(owner: &QueueLock) -> PinResult<Family> {
         owner.check_current().map_err(|_| PinError)?;
-        clean_absolute(source)?;
-        codec::basename(source.file_name().ok_or(PinError)?)?;
         let repo = rift_git::discover(owner.git_dir()).map_err(|_| PinError)?;
         if !owner.matches_git_dir(&repo.git_dir) {
             return Err(PinError);
@@ -144,18 +261,25 @@ mod platform {
         let family_dir = rift_store::projection_dir_under(&cache, &family.family_id);
         let work_tree = repo.work_tree.canonicalize().map_err(|_| PinError)?;
         let member = rift_shadow::hooks::run_state::member_dir(&family_dir, &work_tree);
-        let expected = rift_shadow::hooks::run_state::RunRoot::AgentQueue.under(&member);
-        let namespace = Namespace::open(source.parent().ok_or(PinError)?)?;
-        let actual = Namespace::open(&expected)?;
+        let queue = rift_shadow::hooks::run_state::RunRoot::AgentQueue.under(&member);
+        let run_root = member.parent().ok_or(PinError)?.to_owned();
+        Ok(Family {
+            queue,
+            excluded: [work_tree, run_root, owner.git_dir().to_owned()],
+        })
+    }
+
+    /// The namespace at `queue` is the family's agent queue, and the roots a
+    /// private directory must not sit under are opened beside it.
+    fn queue_scope(family: &Family, queue: &Path) -> PinResult<SourceScope> {
+        clean_absolute(queue)?;
+        let namespace = Namespace::open(queue)?;
+        let actual = Namespace::open(&family.queue)?;
         if namespace.identity()? != actual.identity()? {
             return Err(PinError);
         }
-        let mut excluded = Vec::new();
-        for path in [
-            &work_tree,
-            member.parent().ok_or(PinError)?,
-            owner.git_dir(),
-        ] {
+        let mut excluded = Vec::with_capacity(family.excluded.len());
+        for path in &family.excluded {
             excluded.push(Namespace::open(path)?);
         }
         Ok(SourceScope {
@@ -164,9 +288,43 @@ mod platform {
         })
     }
 
+    fn source_scope(owner: &QueueLock, source: &Path) -> PinResult<SourceScope> {
+        owner.check_current().map_err(|_| PinError)?;
+        clean_absolute(source)?;
+        codec::basename(source.file_name().ok_or(PinError)?)?;
+        let family = family_of(owner)?;
+        queue_scope(&family, source.parent().ok_or(PinError)?)
+    }
+
+    /// The operation's scopes, opened once: the queue at `queue_dir`, the
+    /// private directory at `private_dir` outside every excluded root and
+    /// distinct from the queue.
+    pub(crate) fn shared_scope(
+        owner: &QueueLock,
+        queue_dir: &Path,
+        private_dir: &Path,
+    ) -> PinResult<SharedScope> {
+        let family = family_of(owner)?;
+        let scope = queue_scope(&family, queue_dir)?;
+        let private = private_namespace(private_dir, &scope.excluded)?;
+        if scope.namespace.identity()? == private.identity()? {
+            return Err(PinError);
+        }
+        Ok(SharedScope(Rc::new(Scopes {
+            source: scope.namespace,
+            private,
+            excluded: scope.excluded,
+        })))
+    }
+
     fn private_namespace(path: &Path, excluded: &[Namespace]) -> PinResult<Namespace> {
         let namespace = Namespace::open(path)?;
         check_exclusions(&namespace, excluded)?;
+        check_private_mode(&namespace)?;
+        Ok(namespace)
+    }
+
+    fn check_private_mode(namespace: &Namespace) -> PinResult<()> {
         if namespace
             .dir
             .dir_metadata()
@@ -178,7 +336,7 @@ mod platform {
         {
             return Err(PinError);
         }
-        Ok(namespace)
+        Ok(())
     }
 
     fn check_exclusions(namespace: &Namespace, excluded: &[Namespace]) -> PinResult<()> {
@@ -199,23 +357,71 @@ mod platform {
         pin_name: &OsStr,
         sample: Sample,
     ) -> PinResult<(FrozenSelection, File)> {
-        let frozen = FrozenSelection {
-            owner_git_dir: owner.git_dir().to_owned(),
-            source_parent: source.path.clone(),
-            source_parent_identity: source.identity()?,
-            source_ancestry: source.ancestry.clone(),
-            private_parent: private.path.clone(),
-            private_parent_identity: private.identity()?,
-            private_ancestry: private.ancestry.clone(),
-            basename: name.to_owned(),
-            pin_basename: pin_name.to_owned(),
-            identity: physical_identity(&sample.metadata),
-            byte_len: sample.metadata.len(),
-            raw_sha256: Sha256::digest(&sample.bytes).into(),
-            raw_bytes: sample.bytes,
-            decoded: sample.decoded,
+        let (file, facts) = sample.split();
+        let place = Placement {
+            owner,
+            source,
+            private,
+            name,
+            pin_name,
         };
-        Ok((frozen, sample.file))
+        Ok((freeze_facts(&place, facts)?, file))
+    }
+
+    fn freeze_facts(place: &Placement<'_>, facts: Facts) -> PinResult<FrozenSelection> {
+        Ok(FrozenSelection {
+            owner_git_dir: place.owner.git_dir().to_owned(),
+            source_parent: place.source.path.clone(),
+            source_parent_identity: place.source.identity()?,
+            source_ancestry: place.source.ancestry.clone(),
+            private_parent: place.private.path.clone(),
+            private_parent_identity: place.private.identity()?,
+            private_ancestry: place.private.ancestry.clone(),
+            basename: place.name.to_owned(),
+            pin_basename: place.pin_name.to_owned(),
+            identity: physical_identity(&facts.metadata),
+            byte_len: facts.metadata.len(),
+            raw_sha256: Sha256::digest(&facts.bytes).into(),
+            raw_bytes: facts.bytes,
+            decoded: facts.decoded,
+        })
+    }
+
+    /// The facts a handle proved are exactly the expectation the intent
+    /// froze: identity, mode, length, raw digest, context digest, attempts.
+    fn meets(facts: &Facts, expectation: &Expectation) -> PinResult<()> {
+        let identity = physical_identity(&facts.metadata);
+        let length = u64::try_from(facts.bytes.len()).map_err(|_| PinError)?;
+        if !facts.metadata.is_file()
+            || (identity.dev, identity.ino, identity.permission_bits)
+                != (expectation.dev, expectation.ino, expectation.mode)
+            || facts.metadata.len() != expectation.raw_length
+            || length != expectation.raw_length
+            || format!("{:x}", Sha256::digest(&facts.bytes)) != expectation.ticket_sha256
+            || codec::context_sha256(&facts.decoded)? != expectation.context_sha256
+            || facts.decoded.attempts != expectation.attempts
+        {
+            return Err(PinError);
+        }
+        Ok(())
+    }
+
+    /// The frozen selection of an expectation under the shared scopes.
+    fn freeze_expected(
+        owner: &QueueLock,
+        scopes: &Scopes,
+        expectation: &Expectation,
+        facts: Facts,
+    ) -> PinResult<FrozenSelection> {
+        meets(&facts, expectation)?;
+        let place = Placement {
+            owner,
+            source: &scopes.source,
+            private: &scopes.private,
+            name: OsStr::new(&expectation.source_name),
+            pin_name: OsStr::new(&expectation.pin_name),
+        };
+        freeze_facts(&place, facts)
     }
 
     fn sample_matches(sample: &Sample, frozen: &FrozenSelection) -> bool {
@@ -224,6 +430,46 @@ mod platform {
             && sample.bytes == frozen.raw_bytes
             && <[u8; 32]>::from(Sha256::digest(&sample.bytes)) == frozen.raw_sha256
             && sample.decoded == frozen.decoded
+    }
+
+    /// Reread the RETAINED descriptor — never the path — and freeze it only if
+    /// it is still exactly the original the intent expects.
+    pub(crate) fn inspect_retained(
+        owner: &QueueLock,
+        scope: &SharedScope,
+        original: &RetainedOriginal,
+    ) -> PinResult<FrozenSelection> {
+        scope.recheck(owner)?;
+        let name = OsStr::new(&original.expectation.source_name);
+        codec::basename(name)?;
+        codec::basename(OsStr::new(&original.expectation.pin_name))?;
+        let facts = facts_of_fd(&original.file, name)?;
+        freeze_expected(owner, &scope.0, &original.expectation, facts)
+    }
+
+    /// Hard-link the inspected original into the private directory under its
+    /// expected pin name and run every post-link check; the original's
+    /// descriptor moves into the pin and is released with it.
+    pub(crate) fn preserve_selected(
+        owner: &QueueLock,
+        scope: &SharedScope,
+        original: RetainedOriginal,
+        frozen: FrozenSelection,
+    ) -> PinResult<LivePin> {
+        let expectation = &original.expectation;
+        if frozen.basename != OsStr::new(&expectation.source_name)
+            || frozen.pin_basename != OsStr::new(&expectation.pin_name)
+            || (
+                frozen.identity.dev,
+                frozen.identity.ino,
+                frozen.identity.permission_bits,
+            ) != (expectation.dev, expectation.ino, expectation.mode)
+            || frozen.source_parent != scope.0.source.path
+            || frozen.private_parent != scope.0.private.path
+        {
+            return Err(PinError);
+        }
+        link_and_validate(owner, &scope.0, frozen, original.file, &mut |_| {})
     }
 
     pub(crate) fn preserve(
@@ -252,18 +498,38 @@ mod platform {
         let sample = read_regular(&scope.namespace, name, name)?;
         let (frozen, original_fd) =
             freeze(owner, &scope.namespace, &private, name, pin_name, sample)?;
+        let scopes = Rc::new(Scopes {
+            source: scope.namespace,
+            private,
+            excluded: scope.excluded,
+        });
+        link_and_validate(owner, &scopes, frozen, original_fd, phase)
+    }
+
+    /// The link and everything after it: the pin, the current source and the
+    /// original descriptor must all still be the frozen sample, the original
+    /// and the private directory are synced, and the live pin verifies.
+    fn link_and_validate(
+        owner: &QueueLock,
+        scopes: &Rc<Scopes>,
+        frozen: FrozenSelection,
+        original_fd: File,
+        phase: &mut impl FnMut(Phase),
+    ) -> PinResult<LivePin> {
+        let name = frozen.basename.clone();
+        let pin_name = frozen.pin_basename.clone();
         phase(Phase::BeforeLink);
         owner.check_current().map_err(|_| PinError)?;
-        scope.namespace.recheck()?;
-        private.recheck()?;
-        scope
-            .namespace
+        scopes.source.recheck()?;
+        scopes.private.recheck()?;
+        scopes
+            .source
             .dir
-            .hard_link(name, &private.dir, pin_name)
+            .hard_link(&name, &scopes.private.dir, &pin_name)
             .map_err(|_| PinError)?;
         phase(Phase::AfterLink);
-        let pin = read_regular(&private, pin_name, name)?;
-        let current = read_regular(&scope.namespace, name, name)?;
+        let pin = read_regular(&scopes.private, &pin_name, &name)?;
+        let current = read_regular(&scopes.source, &name, &name)?;
         if !sample_matches(&pin, &frozen)
             || !sample_matches(&current, &frozen)
             || read_fd(&original_fd)? != frozen.raw_bytes
@@ -271,7 +537,8 @@ mod platform {
             return Err(PinError);
         }
         original_fd.sync_all().map_err(|_| PinError)?;
-        private
+        scopes
+            .private
             .dir
             .try_clone()
             .map_err(|_| PinError)?
@@ -280,14 +547,15 @@ mod platform {
             .map_err(|_| PinError)?;
         let live = LivePin {
             frozen,
-            source: scope.namespace,
-            private,
+            scopes: Rc::clone(scopes),
             original_fd: Some(original_fd),
             pin_fd: pin.file,
-            excluded: scope.excluded,
         };
         verify_pin(owner, &live)?;
-        if !sample_matches(&read_regular(&live.source, name, name)?, &live.frozen) {
+        if !sample_matches(
+            &read_regular(&live.scopes.source, &name, &name)?,
+            &live.frozen,
+        ) {
             return Err(PinError);
         }
         Ok(live)
@@ -319,47 +587,68 @@ mod platform {
         if !sample_matches(&pin, expected) {
             return Err(PinError);
         }
-        let frozen = expected.clone();
         let live = LivePin {
-            frozen,
-            source: scope.namespace,
-            private,
+            frozen: expected.clone(),
+            scopes: Rc::new(Scopes {
+                source: scope.namespace,
+                private,
+                excluded: scope.excluded,
+            }),
             original_fd: None,
             pin_fd: pin.file,
-            excluded: scope.excluded,
         };
         verify_pin(owner, &live)?;
         Ok(live)
     }
 
-    fn verify_pin(owner: &QueueLock, pin: &LivePin) -> PinResult<()> {
+    /// An existing pin, read through the private namespace by its expected
+    /// name: it must be the expectation on dev/ino/mode/length/digests/
+    /// attempts — the pin aliases the original inode, so dev/ino equality is
+    /// the physical witness — and its own bytes rebuild the frozen selection.
+    pub(crate) fn reopen_expected(
+        owner: &QueueLock,
+        scope: &SharedScope,
+        expectation: &Expectation,
+    ) -> PinResult<LivePin> {
+        scope.recheck(owner)?;
+        let name = OsStr::new(&expectation.source_name);
+        let pin_name = OsStr::new(&expectation.pin_name);
+        codec::basename(name)?;
+        codec::basename(pin_name)?;
+        let (file, facts) = read_regular(&scope.0.private, pin_name, name)?.split();
+        let frozen = freeze_expected(owner, &scope.0, expectation, facts)?;
+        let live = LivePin {
+            frozen,
+            scopes: Rc::clone(&scope.0),
+            original_fd: None,
+            pin_fd: file,
+        };
+        verify_pin(owner, &live)?;
+        Ok(live)
+    }
+
+    pub(crate) fn verify_pin(owner: &QueueLock, pin: &LivePin) -> PinResult<()> {
         owner.check_current().map_err(|_| PinError)?;
-        if pin.source.path != pin.frozen.source_parent
-            || pin.private.path != pin.frozen.private_parent
-            || pin.source.ancestry != pin.frozen.source_ancestry
-            || pin.private.ancestry != pin.frozen.private_ancestry
+        let scopes = &pin.scopes;
+        if scopes.source.path != pin.frozen.source_parent
+            || scopes.private.path != pin.frozen.private_parent
+            || scopes.source.ancestry != pin.frozen.source_ancestry
+            || scopes.private.ancestry != pin.frozen.private_ancestry
             || owner.git_dir() != pin.frozen.owner_git_dir
-            || pin.private.identity()? != pin.frozen.private_parent_identity
-            || pin.source.identity()? != pin.frozen.source_parent_identity
+            || scopes.private.identity()? != pin.frozen.private_parent_identity
+            || scopes.source.identity()? != pin.frozen.source_parent_identity
         {
             return Err(PinError);
         }
-        if pin
-            .private
-            .dir
-            .dir_metadata()
-            .map_err(|_| PinError)?
-            .permissions()
-            .mode()
-            & 0o7777
-            != 0o700
-        {
-            return Err(PinError);
-        }
-        pin.private.recheck()?;
-        pin.source.recheck()?;
-        check_exclusions(&pin.private, &pin.excluded)?;
-        let sample = read_regular(&pin.private, &pin.frozen.pin_basename, &pin.frozen.basename)?;
+        check_private_mode(&scopes.private)?;
+        scopes.private.recheck()?;
+        scopes.source.recheck()?;
+        check_exclusions(&scopes.private, &scopes.excluded)?;
+        let sample = read_regular(
+            &scopes.private,
+            &pin.frozen.pin_basename,
+            &pin.frozen.basename,
+        )?;
         if !sample_matches(&sample, &pin.frozen)
             || physical_identity(&pin.pin_fd.metadata().map_err(|_| PinError)?)
                 != pin.frozen.identity
@@ -398,7 +687,7 @@ mod platform {
     ) -> PinResult<DeliveryMatch> {
         verify_pin(owner, pin)?;
         let scope = source_scope(owner, source)?;
-        check_exclusions(&pin.private, &scope.excluded)?;
+        check_exclusions(&pin.scopes.private, &scope.excluded)?;
         if scope.namespace.path != pin.frozen.source_parent
             || scope.namespace.ancestry != pin.frozen.source_ancestry
             || scope.namespace.identity()? != pin.frozen.source_parent_identity
@@ -430,6 +719,8 @@ mod platform {
         Ok(outcome)
     }
 
+    #[cfg(test)]
+    mod selected_tests;
     #[cfg(test)]
     mod tests;
 }
@@ -478,3 +769,7 @@ mod platform {
     )
 )]
 pub(crate) use platform::{classify, preserve, DeliveryMatch, LivePin};
+#[cfg(unix)]
+pub(crate) use platform::{
+    inspect_retained, preserve_selected, reopen_expected, shared_scope, verify_pin, SharedScope,
+};
