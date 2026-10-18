@@ -471,7 +471,7 @@ fn publish(
     .map_err(|error| match error {
         RecordError::Unavailable => Owed::HoldUnavailable,
         RecordError::Conflict => Owed::IntentConflict,
-        RecordError::Failed => Owed::PublishFailed,
+        RecordError::Failed | RecordError::Absent => Owed::PublishFailed,
         RecordError::Resource => Owed::Resource,
     })?;
     if publication == Publication::Resumed {

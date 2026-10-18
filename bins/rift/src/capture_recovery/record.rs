@@ -36,6 +36,8 @@ pub(super) enum RecordError {
     Failed,
     /// The observer refused to continue.
     Resource,
+    /// Nothing is there under this name yet.
+    Absent,
 }
 
 /// Create the record no-clobber, 0600, write it whole, sync it and its
@@ -98,10 +100,13 @@ pub(super) fn read_private_record(
     cap: usize,
 ) -> Result<Vec<u8>, RecordError> {
     private.recheck().map_err(|_| RecordError::Unavailable)?;
-    let before = private
-        .dir
-        .symlink_metadata(name)
-        .map_err(|_| RecordError::Conflict)?;
+    let before = private.dir.symlink_metadata(name).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RecordError::Absent
+        } else {
+            RecordError::Conflict
+        }
+    })?;
     if !before.is_file() || before.len() > cap as u64 {
         return Err(RecordError::Conflict);
     }
