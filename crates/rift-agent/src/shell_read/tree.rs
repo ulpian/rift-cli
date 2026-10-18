@@ -25,19 +25,40 @@
 //! listing or a label piped anywhere is refused, so a question about names
 //! never flows into a decision about content (rule 3).
 //!
+//! A sequence also says which members are sure to run. A `;` runs what
+//! follows it whatever came before. An `&&` runs it only when the member
+//! before succeeded, and a search — the `grep` family, `rg`, anywhere in a
+//! pipeline — fails quietly when nothing matched, so every member after one
+//! in the same `&&` run may never have run. A `||` binds as tightly as `&&`,
+//! so `a || b && c` is `(a || b) && c`, and nothing after the first `||` of
+//! a run is sure either. Each of those reads is [`ShellSpan::MayNotRun`]:
+//! counted, so a caller weighing the line sees it, and never coverage.
+//!
 //! Only output that reaches the agent costs anything, so a stage inside a
 //! pipeline is never a unit of its own: the pipeline as a whole is.
 
 use super::filter::is_filter;
 use super::{
-    cd_dir, narrowing, recognise_simple, split_on, under, words, Member, Narrowing, ShellCall,
-    ShellListing, ShellRead, ShellSpan, MAX_CHAIN_READS, MAX_COMMAND_BYTES,
+    bare, cd_dir, command_name, narrowing, recognise_simple, split_on, under, words, Member,
+    Narrowing, ShellCall, ShellListing, ShellRead, ShellSpan, MAX_CHAIN_READS, MAX_COMMAND_BYTES,
 };
 
-/// A command line's body as the shell groups it: pipelines joined by `&&` or
-/// `;`, in the order they run.
+/// The commands that exit non-zero, with nothing gone wrong, when they found
+/// nothing — which stops an `&&` run as surely as an error does.
+const QUIET_FAILURES: &[&str] = &["grep", "egrep", "fgrep", "rg"];
+
+/// A command line's body as the shell groups it: pipelines joined by `&&`,
+/// `||` or `;`, in the order they run.
 struct Sequence<'a> {
-    pipelines: Vec<Pipeline<'a>>,
+    steps: Vec<Step<'a>>,
+    /// Whether any member was joined by `||`.
+    fallback: bool,
+}
+
+/// One member of a sequence, and whether the line is sure to reach it.
+struct Step<'a> {
+    pipeline: Pipeline<'a>,
+    sure: bool,
 }
 
 /// One pipeline: the text of each simple command a `|` joins.
@@ -58,19 +79,42 @@ impl<'a> Sequence<'a> {
     /// Parse a body into its pipelines. Never fails: a member the walk below
     /// cannot read is refused there, where its reason is known.
     fn parse(body: &'a str) -> Self {
-        let pipelines = split_on(body, &["&&", ";"], usize::MAX)
-            .into_iter()
-            .map(Pipeline::parse)
-            .collect();
-        Self { pipelines }
+        let mut steps = Vec::new();
+        let mut fallback = false;
+        for run in split_on(body, &[";"], usize::MAX) {
+            let mut sure = true;
+            for (at, alternative) in split_on(run, &["||"], usize::MAX).into_iter().enumerate() {
+                // Past a run's first `||`, a member runs or not by whether
+                // something before it failed, which no command line says.
+                fallback |= at > 0;
+                sure &= at == 0;
+                for member in split_on(alternative, &["&&"], usize::MAX) {
+                    let pipeline = Pipeline::parse(member);
+                    let quiet = pipeline.may_fail_quietly();
+                    steps.push(Step { pipeline, sure });
+                    sure &= !quiet;
+                }
+            }
+        }
+        Self { steps, fallback }
     }
 
     /// The call this sequence is, its relative paths under `dir`.
     fn compose(&self, dir: Option<&str>) -> Option<ShellCall> {
+        // A `cd` that failed leaves the shell where it was, and a `||` after
+        // it would then read a fallback the paths below misplace.
+        if dir.is_some() && self.fallback {
+            return None;
+        }
         let mut reads: Vec<ShellRead> = Vec::new();
-        for pipeline in &self.pipelines {
-            match pipeline.effect()? {
-                Member::Reads(found) => reads.extend(found),
+        for step in &self.steps {
+            match step.pipeline.effect()? {
+                Member::Reads(found) if step.sure => reads.extend(found),
+                Member::Reads(found) => reads.extend(found.into_iter().map(|read| ShellRead {
+                    span: ShellSpan::MayNotRun,
+                    narrowing: None,
+                    ..read
+                })),
                 // A label read no file, so it adds no request, and it is no
                 // reason to leave the rest of the line unaccounted for.
                 Member::Label => {}
@@ -78,7 +122,7 @@ impl<'a> Sequence<'a> {
                 // included, a shape nobody has measured — it would put a
                 // question about names inside a decision about content, which
                 // rule 3 exists to prevent.
-                Member::Listing(listing) if self.pipelines.len() == 1 => {
+                Member::Listing(listing) if self.steps.len() == 1 => {
                     return Some(ShellCall::Listing(ShellListing {
                         dir: under(dir, listing.dir),
                         pattern: listing.pattern,
@@ -112,6 +156,19 @@ impl<'a> Pipeline<'a> {
         Self {
             stages: split_on(member, &["|"], usize::MAX),
         }
+    }
+
+    /// Whether this pipeline can exit non-zero with nothing gone wrong. Any
+    /// stage counts, so the answer holds with or without `pipefail`.
+    fn may_fail_quietly(&self) -> bool {
+        self.stages.iter().any(|stage| {
+            words(stage).is_some_and(|words| {
+                words
+                    .first()
+                    .and_then(bare)
+                    .is_some_and(|head| QUIET_FAILURES.contains(&command_name(head)))
+            })
+        })
     }
 
     /// What this pipeline did, or [`None`] when a stage of it is outside the
@@ -205,13 +262,14 @@ fn cd_prefix(command: &str) -> (Option<String>, &str) {
 /// its reads composed over them (see the module documentation): a leading
 /// `cd <dir> &&` or `cd <dir>;` puts every relative path under its
 /// directory, members joined by `&&` or `;` contribute their reads in order
-/// and labels contribute none, and a pipeline's later stages narrow or filter
+/// and labels contribute none, a member the line may never reach is read as
+/// [`ShellSpan::MayNotRun`], and a pipeline's later stages narrow or filter
 /// what its first stage read.
 ///
 /// Everything else is what it always was — no redirection, no substitution,
 /// no variable, no glob outside a pattern argument, no environment
-/// assignment, no `sudo`, no `xargs`, no background `&`, no `||`, no second
-/// `cd`, no `cd` anywhere but the front, no listing mixed in among reads or
+/// assignment, no `sudo`, no `xargs`, no background `&`, no `||` after a
+/// `cd`, no second `cd`, no `cd` anywhere but the front, no listing mixed in among reads or
 /// piped onward — and every one of those is a character, a word or a member
 /// the walk never accepts.
 #[must_use]

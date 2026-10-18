@@ -109,7 +109,7 @@ fn the_refused_pipelines_this_slice_admits_are_each_counted() {
 /// **A filtered read supports no coverage and is no search** (rules 2, 3).
 #[test]
 fn a_filtered_read_records_nothing_and_answers_no_search() {
-    let call = recognise("cat src/lib.rs | grep needle && sed -n '1,9p' src/main.rs")
+    let call = recognise("cat src/lib.rs | grep needle; sed -n '1,9p' src/main.rs")
         .expect("both members are read");
     let spans: Vec<ReadSpan> = call.read_requests().into_iter().map(|r| r.span).collect();
     assert_eq!(spans.first(), Some(&ReadSpan::Unknown));

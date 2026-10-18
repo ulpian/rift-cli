@@ -138,7 +138,7 @@ fn an_escaped_quote_or_backslash_is_the_character_it_escapes() {
             )]),
         ),
         (
-            "grep -n \"a\\\"; cat x\" src/lib.rs && cat src/main.rs",
+            "grep -n \"a\\\"; cat x\" src/lib.rs; cat src/main.rs",
             ShellCall::Read(vec![
                 super::member(lib, ShellSpan::Matching),
                 super::member("src/main.rs", ShellSpan::WholeFile),
@@ -249,7 +249,7 @@ proptest::proptest! {
     /// chained after it — no more and no fewer.
     #[test]
     fn an_escaped_quote_never_moves_a_separator(pattern in resolvable_pattern()) {
-        let command = format!("grep -n {pattern} src/lib.rs && cat src/main.rs");
+        let command = format!("grep -n {pattern} src/lib.rs; cat src/main.rs");
         let expected = ShellCall::Read(vec![
             super::member("src/lib.rs", ShellSpan::Matching),
             super::member("src/main.rs", ShellSpan::WholeFile),
