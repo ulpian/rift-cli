@@ -41,13 +41,18 @@ struct ArchiveCtx<'a> {
     repo: &'a rift_git::RepoPaths,
     /// The member's object database, for the diff and the replay.
     reader: &'a rift_git::GixBlobReader,
-    /// The commit the checkpoint anchors to.
-    commit: &'a str,
+    /// The commit the checkpoint anchors to; `None` when HEAD is unborn, and
+    /// the archive then names no anchor (the id never read it).
+    commit: Option<&'a str>,
     /// The clock the decision and the archive read.
     now: i64,
 }
 
 /// Run one live archive. Capture never blocks the git op.
+///
+/// `commit` is the anchor the shard names, `None` on an unborn HEAD: a
+/// checkpoint never needs a commit to land (Q78/Q81), and an anchorless shard
+/// omits the member rather than writing a sentinel.
 ///
 /// There is one archive path: the native one, which writes the shard itself.
 /// This used to consult a per-capability route table read from
@@ -73,7 +78,7 @@ pub(super) fn archive_now(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
     work_tree: &Path,
-    commit: &str,
+    commit: Option<&str>,
     session: &str,
     agent: &str,
     decision: rift_shadow::hooks::strategy::ArchiveDecision,
@@ -98,7 +103,7 @@ pub(super) fn archive_in_git_hook(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
     work_tree: &Path,
-    commit: &str,
+    commit: Option<&str>,
     session: &str,
     agent: &str,
     decision: rift_shadow::hooks::strategy::ArchiveDecision,
@@ -368,7 +373,7 @@ pub(super) fn condense_queued(
         store: &store,
         repo: &repo,
         reader: &reader,
-        commit: &entry.commit,
+        commit: Some(&entry.commit),
         now: entry.queued_at_ms,
     };
 
@@ -713,7 +718,7 @@ pub(crate) fn attach_archive(
         store,
         repo,
         reader: &reader,
-        commit,
+        commit: Some(commit),
         now,
     };
     let checkpoint = run_archive(&ctx, &capture, session_id, agent, decision)?;
@@ -786,7 +791,7 @@ pub(crate) fn import_archive(
         &native,
         store,
         &repo.work_tree,
-        commit,
+        Some(commit),
         session_id,
         &raw_doc,
         decision,

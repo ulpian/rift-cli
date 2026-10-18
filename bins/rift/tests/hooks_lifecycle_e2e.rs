@@ -1,7 +1,8 @@
-//! End-to-end: the session lifecycle when the archive cannot run — a
-//! `SessionEnd` defers instead of closing, the sweep finishes what the hook
-//! could not, a crashed session is finalized beside its live neighbour, and
-//! doctor's deferral line names the true cause.
+//! End-to-end: the session lifecycle around the archive — a `SessionEnd`
+//! whose archive fails defers instead of closing, a condense never needs a
+//! commit (an unborn HEAD closes on an anchorless checkpoint), the sweep
+//! finishes what a hook could not, a crashed session is finalized beside its
+//! live neighbour, and doctor's deferral line names the true cause.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -75,58 +76,61 @@ fn doctor_finalizes_the_crashed_session_and_leaves_its_live_neighbour() {
     assert_eq!(s2["live"], serde_json::json!(["current-1"]));
 }
 
-/// Doctor's deferral line must name the reason the session actually deferred.
+/// `doctor --fix` on a repository with **no commit** finalizes the crashed
+/// session: the sweep archives with the anchor absent, so there is no
+/// deferral line at all (L-0A §1.1; Q78 — a condense never needs a commit).
 ///
-/// It used to branch: on a repository whose archive was routed through the
-/// capture backend it said "none is provisioned — run `rift setup`", and on a
-/// native one it said the truth. That was a real discrimination while two routes
-/// existed, and it sent operators to install something they did not need
-/// whenever it got the repository wrong. With the wrapper deleted (2026-08-11)
-/// there is one cause left and the line states it. The negative assertion below
-/// is kept deliberately as a resurrection guard: an absent binary is not a
-/// deferral cause any more, so nothing may ever tell a developer it is.
+/// This used to pin the opposite — `condense still owed … no commit to anchor
+/// to` — when an unborn HEAD was the one deferral cause left after the wrapper
+/// route was deleted (2026-08-11). The negative assertions are kept
+/// deliberately as resurrection guards: an absent binary is not a deferral
+/// cause, so nothing may ever tell a developer to install one.
 #[test]
-fn the_deferral_line_names_this_repos_true_cause() {
+fn the_doctor_fix_on_an_unborn_repo_finalizes_without_a_deferral_line() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    // A repository with NO commit: the archive has nothing to anchor to, which
-    // is the only deferral cause there is.
     git_in(&repo, &["init", "-q", "."]);
     seed_session(&repo, "crashed-1", 0);
 
     let cache = tmp.path().join("cache");
     let data = tmp.path().join("data");
-    // `--fix` because the sweep is doctor's repair arm: the deferral line is the sweep's own
-    // report, and the sweep is doctor's repair arm.
-    let (code, stdout) = run_rift_stdout(
-        &repo,
-        &["doctor", "--fix"],
-        &[
-            ("RIFT_CACHE_DIR", cache.to_str().unwrap()),
-            ("XDG_DATA_HOME", data.to_str().unwrap()),
-            ("LOCALAPPDATA", data.to_str().unwrap()),
-            ("RIFT_NO_KEYCHAIN", "1"),
-            ("RIFT_CAPTURE_SYNC", "1"),
-        ],
-    );
+    let env = sync_env_with_data(&cache, &data);
+    let (code, stdout) = run_rift_stdout(&repo, &["doctor", "--fix"], &env);
     assert_eq!(code, 0, "doctor reports, it never fails: {stdout}");
     assert!(
-        stdout.contains("condense still owed"),
-        "the session did defer, so there IS a cause line: {stdout}"
+        !stdout.contains("condense still owed"),
+        "an unborn HEAD is not a deferral cause: {stdout}"
     );
     assert!(
-        stdout.contains("no commit to anchor to"),
-        "the cause is this repo's, and it is the true one: {stdout}"
-    );
-    assert!(
-        !stdout.contains("queue lock") && !stdout.contains("archive itself failed"),
-        "and it is the only one named: {stdout}"
+        !stdout.contains("no commit to anchor"),
+        "the retired cause is never written: {stdout}"
     );
     assert!(
         !stdout.contains("rift setup") && !stdout.to_lowercase().contains("not provisioned"),
         "nothing may send a developer to install a capture backend: there is \
          none, and there is nothing to install: {stdout}"
+    );
+    let doc = doctor_fix_json(&repo, &env);
+    let sessions = sessions_leg(&doc);
+    assert_eq!(
+        sessions["condense_deferred"],
+        serde_json::json!([]),
+        "nothing deferred: {sessions}"
+    );
+    assert_eq!(session_phase(&repo, "crashed-1"), "ended");
+    assert!(
+        checkpoint_ref_exists(&repo),
+        "the finalize condensed to an anchorless checkpoint"
+    );
+    assert!(
+        !Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success(),
+        "the user's HEAD is still unborn: nothing moved it"
     );
 }
 
@@ -335,9 +339,9 @@ fn a_session_end_that_archived_still_closes_immediately() {
     );
 }
 
-/// The sweep when the condense **cannot** land — the case the crashed-session
-/// pass actually meets most often, and the one that carried a measured
-/// regression.
+/// The sweep when the condense **cannot** land because a worker holds the
+/// member's lock — the case the crashed-session pass meets while a worker is
+/// mid-drain, and the one that carried a measured regression.
 ///
 /// Two things are pinned here, and they are the same defect seen from two ends.
 /// (1) A deferred session must never become the repository's archive target:
@@ -349,11 +353,11 @@ fn a_session_end_that_archived_still_closes_immediately() {
 /// the sweep is the only retry there is. Without it, `ending` is a terminal
 /// state in practice: counted live forever, condensed by nothing.
 ///
-/// The condense is made deterministically unable to land — an **unborn HEAD**,
-/// so there is no commit to anchor a checkpoint to — rather than assumed unable.
-/// It used to be an absent capture backend on a wrapper-routed repository; that
-/// route and that backend were deleted on 2026-08-11, and this is the condition
-/// that remains.
+/// The condense is made deterministically unable to land by **holding the
+/// member's queue lock** from this test, rather than assumed unable. It used
+/// to be an unborn HEAD; a condense no longer needs a commit (L-0A §1.1), so
+/// the repository here stays unborn throughout and the retry lands an
+/// anchorless checkpoint — the new property, proven on the same fixture.
 #[test]
 fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
     let tmp = tempfile::tempdir().unwrap();
@@ -366,22 +370,25 @@ fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
     let data = tmp.path().join("data");
     let env = sync_env_with_data(&cache, &data);
 
+    let held = hold_owner_lock(&repo.join(".git"));
     let first_doc = doctor_fix_json(&repo, &env);
     let first = sessions_leg(&first_doc);
     assert_eq!(
         first["condense_deferred"],
         serde_json::json!(["crashed-1"]),
-        "nothing to anchor to: the session defers, it is not closed on a \
+        "a worker holds the lock: the session defers, it is not closed on a \
          condense that never happened: {first}"
     );
     assert_eq!(
         first["condense_deferred_causes"],
-        serde_json::json!({ "crashed-1": "no-commit-to-anchor" }),
+        serde_json::json!({ "crashed-1": "worker-holds-lock" }),
         "{first}"
     );
     assert_eq!(first["finalized"], serde_json::json!([]));
     assert_eq!(first["live"], serde_json::json!(["current-1"]));
-    assert_eq!(session_phase(&repo, "crashed-1"), "ending");
+    // A held lock defers before the machine is asked, so the dead session is
+    // neither timed out nor stamped: it reads as it was left.
+    assert_eq!(session_phase(&repo, "crashed-1"), "active");
 
     // THE REGRESSION: the deferred session is still live (it is `ending`), but
     // it must not be the one the next archive attributes against.
@@ -394,9 +401,9 @@ fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
         "the developer's live session stays the repo's archive target"
     );
 
-    // THE HOLE UNDERNEATH IT: give the repository the commit the archive needs,
-    // and the next sweep must finish the condense it owes — nothing else will.
-    git_in(&repo, &["commit", "-q", "-m", "seed"]);
+    // THE HOLE UNDERNEATH IT: release the lock, and the next sweep must finish
+    // the condense it owes — nothing else will — with HEAD still unborn.
+    drop(held);
     let second_doc = doctor_fix_json(&repo, &env);
     let second = sessions_leg(&second_doc);
     assert_eq!(
@@ -408,8 +415,27 @@ fn a_deferred_sweep_keeps_the_live_session_first_and_retries_later() {
     assert_eq!(session_phase(&repo, "crashed-1"), "ended");
     assert!(
         checkpoint_ref_exists(&repo),
-        "the retry condensed real work"
+        "the retry condensed real work, anchorless"
     );
+}
+
+/// A worker's capture-queue owner lock under `git_dir`, held until dropped:
+/// the open-file lock the drain and the sweep both take, so a sweep beside it
+/// defers to "the worker" exactly as it would beside a real one.
+fn hold_owner_lock(git_dir: &Path) -> std::fs::File {
+    let path = std::fs::canonicalize(git_dir)
+        .unwrap()
+        .join(".rift-capture-owner.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path).unwrap();
+    file.try_lock().unwrap();
+    file
 }
 
 /// An archive that ran against a real commit and minted no checkpoint defers

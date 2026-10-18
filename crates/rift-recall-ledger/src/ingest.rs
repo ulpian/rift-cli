@@ -1289,6 +1289,31 @@ mod tests {
         assert_eq!(count(&store, "n_checkpoint_commit"), 1);
     }
 
+    /// A header with **no** `commit` member — what a checkpoint minted on an
+    /// unborn HEAD carries — writes no containment row and raises no issue:
+    /// absence is the document's own answer, distinct from the malformed claim
+    /// the next test refuses and names.
+    #[test]
+    fn a_header_with_no_commit_member_writes_no_containment_row_and_no_issue() {
+        let meta = br#"{"strategy":"manual-commit","sessions":["s1"]}"#;
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_artifact("c1", "metadata.json", meta);
+        let store = recall_store();
+        let report = block(ingest(&store, &sub)).unwrap();
+        assert_eq!(count(&store, "n_checkpoint"), 1, "the checkpoint lands");
+        assert_eq!(
+            count(&store, "n_checkpoint_commit"),
+            0,
+            "no anchor row is invented"
+        );
+        assert!(
+            report.issues.is_empty(),
+            "an absent member is not an issue: {:?}",
+            report.issues
+        );
+    }
+
     /// A header this side will not believe writes no row. Absence is a value
     /// the predicate already carries (out of scope, reported); a half-trusted
     /// row in an append-only table is not.

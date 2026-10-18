@@ -568,6 +568,32 @@ mod tests {
             .any(|issue| issue.detail == "missing"));
     }
 
+    /// A shard whose metadata names no `commit` — minted on an unborn HEAD —
+    /// has no anchor and no anchor time, and its effective time is the one
+    /// every native shard records (`created_at`), with `Recorded` provenance;
+    /// the absence raises no catalogue issue.
+    #[test]
+    fn an_anchorless_shard_dates_by_its_recorded_time_with_no_issue() {
+        let id = "b".repeat(64);
+        let reader = MemorySubstrate::local()
+            .with_shard(shard(&id, 1))
+            .with_artifact(
+                &id,
+                "metadata.json",
+                br#"{"canon_version":3,"strategy":"native","sessions":["s1"],"created_at":"2026-10-17T12:00:00.000Z"}"#,
+            )
+            .with_chain(&[&id]);
+        let catalogue = build_checkpoint_catalogue(&reader).unwrap();
+        assert_eq!(catalogue.len(), 1);
+        let entry = &catalogue[0];
+        assert_eq!(entry.anchor_commit, None);
+        assert_eq!(entry.anchor_committed_ms, None);
+        assert!(entry.issues.is_empty(), "{:?}", entry.issues);
+        let (at, provenance) = entry.effective_timestamp(None);
+        assert_eq!(provenance, TimestampProvenance::Recorded);
+        assert_eq!(at, parse_rfc3339_ms("2026-10-17T12:00:00.000Z"));
+    }
+
     #[test]
     fn timestamp_precedence_never_exposes_unknown_sentinel() {
         let mut entry = CheckpointCatalogueEntry {

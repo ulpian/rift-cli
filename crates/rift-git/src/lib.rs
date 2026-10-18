@@ -64,7 +64,8 @@ pub use head::{head_state, HeadState};
 pub use identity::{GitConfigIdentity, ENV_DEVELOPER_OVERRIDE};
 pub use plumbing::{
     commit_tree, commit_tree_oid, hash_files_write, hash_object_write, mktree, path_in_commit,
-    path_object_oid, resolve_commit, update_ref_cas, update_ref_create, PlumbingGitWrite,
+    path_object_oid, resolve_commit, sweep_stale_graft_indexes, update_ref_cas, update_ref_create,
+    PlumbingGitWrite,
 };
 pub use write::{
     GitFileMode, GitIdent, MemoryGitWrite, NativeGitWrite, OrphanCommit, TreeWriteEntry,

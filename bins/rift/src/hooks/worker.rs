@@ -807,7 +807,7 @@ fn condense_agent_job(
             &rt,
             &store,
             &repo.work_tree,
-            &commit,
+            Some(&commit),
             session,
             agent,
             ArchiveDecision {
@@ -897,7 +897,7 @@ fn archive_if_still_owed(
             &rt,
             &store,
             &repo.work_tree,
-            &commit,
+            Some(&commit),
             &archive.session_id,
             &archive.agent,
             decision,
