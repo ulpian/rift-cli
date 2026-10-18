@@ -110,7 +110,6 @@ fn a_script_outside_the_print_runs_is_left_alone() {
         "sed -i -n '1,5p;9,12p' src/lib.rs",
         "sed -n -i '5p' src/lib.rs",
         "sed '1,5p;9,12p' src/lib.rs",
-        "sed -n '1,5p;9,12p' src/lib.rs | head -n 3",
         "sed -n '1,5p\n9,12p' src/lib.rs",
         &too_many,
     ] {

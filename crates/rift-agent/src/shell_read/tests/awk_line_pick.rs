@@ -84,7 +84,6 @@ fn an_awk_program_that_is_not_a_line_pick_is_left_alone() {
         "awk \"NR>=1 && NR<=$N\" a.rs",
         "gawk 'NR>=1 && NR<=5' a.rs",
         "/usr/local/bin/awk 'NR>=1 && NR<=5' a.rs",
-        "awk 'NR>=1 && NR<=5' a.rs | grep x",
     ] {
         assert!(recognise(command).is_none(), "{command:?}");
     }

@@ -489,8 +489,24 @@ proptest::proptest! {
             proptest::prop_assert_eq!(read.span, crate::shell_read::ShellSpan::Matching);
             proptest::prop_assert!(read.read_request().is_none());
         }
+        // One file narrowed is still that search; several narrowed are cut
+        // joined, so each is a filtered read of its file and still counted.
         let narrowed = format!("{line} | head -n 5");
-        proptest::prop_assert_eq!(recognise(&narrowed).is_some(), count == 1, "{}", narrowed);
+        let Some(ShellCall::Read(cut)) = recognise(&narrowed) else {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "{narrowed:?} is a narrowed search and was not recognised"
+            )));
+        };
+        proptest::prop_assert_eq!(cut.len(), count);
+        let expected = if count == 1 {
+            crate::shell_read::ShellSpan::Matching
+        } else {
+            crate::shell_read::ShellSpan::Filtered
+        };
+        for read in &cut {
+            proptest::prop_assert_eq!(read.span, expected);
+            proptest::prop_assert!(read.read_request().is_none());
+        }
     }
 
     /// ★ A recognised count is never signed.

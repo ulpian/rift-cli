@@ -111,8 +111,6 @@ fn a_piped_sed_that_is_not_one_line_pick_is_left_alone() {
         "cat a.rs | sed -n '1,5p' -",
         "cat a.rs | sed 's/a/b/'",
         "cat a.rs | /usr/bin/sed -n '1,5p'",
-        "cat a.rs | sed -n '1,5p' | head -n 2",
-        "cat a.rs b.rs | sed -n '1,5p'",
         "ls src | sed -n '1,5p'",
         "echo a.rs | sed -n '1,5p'",
     ] {
