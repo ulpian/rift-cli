@@ -127,6 +127,11 @@ pub(super) fn archive_in_git_hook(
         Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
         None => (None, None),
     };
+    if decision.reason == rift_shadow::hooks::strategy::ArchiveReason::TurnEnd {
+        if let Some(pair) = transcript.as_mut() {
+            super::turn_end::seal_turn_full(rt, store, &repo, session, &packs, pair);
+        }
+    }
     let sources = TaskSources {
         spool: Some(&spool),
         ..TaskSources::of(&repo.git_dir, session, &packs, &facts)
