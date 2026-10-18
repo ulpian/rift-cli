@@ -127,7 +127,8 @@ pub(super) fn archive_in_git_hook(
         Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
         None => (None, None),
     };
-    if decision.reason == rift_shadow::hooks::strategy::ArchiveReason::TurnEnd {
+    let turn_end = decision.reason == rift_shadow::hooks::strategy::ArchiveReason::TurnEnd;
+    if turn_end {
         if let Some(pair) = transcript.as_mut() {
             super::turn_end::seal_turn_full(rt, store, &repo, session, &packs, pair);
         }
@@ -143,7 +144,12 @@ pub(super) fn archive_in_git_hook(
         &native, store, work_tree, session, &raw, decision, commit, now, facts, &packs, transcript,
         tasks,
     ));
-    if let (Ok(Some(_)), Some(lines)) = (&archived, transcript_raw_lines) {
+    // A turn-end shard seals the whole transcript over the previous shard's
+    // segments, so it never reads the slice cursor and must not move it: the
+    // cursor is the commit road's. Moving it left the next commit's archive an
+    // empty slice, whose id then equalled the previous commit's shard, and the
+    // one-commit-per-checkpoint anchor dropped the new commit's binding.
+    if let (false, Ok(Some(_)), Some(lines)) = (turn_end, &archived, transcript_raw_lines) {
         record_transcript_progress(&repo.git_dir, session, lines, now);
     }
     // The shard is in git; its POSITION is not, until this runs — the same
