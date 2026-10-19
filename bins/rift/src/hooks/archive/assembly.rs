@@ -12,6 +12,7 @@ use rift_core::{Result, SecretBytes};
 use rift_shadow::backend::{ArchivedTask, ArchivedTranscript};
 use rift_shadow::redact::RulePackSet;
 
+use super::carry::{self, TurnCarry};
 use super::tasks::{self, TaskSources};
 use super::{originals, session_facts_for_archive, session_raw_capture, session_transcript};
 use crate::hooks::turn_end::frontier::SealRead;
@@ -88,7 +89,8 @@ fn assemble(
     // and sealed once per artifact. Best-effort like the capture itself: a
     // missing or unreadable file archives a transcript-less checkpoint, never
     // an error, because the agent owns that file and may have moved it.
-    let spool = originals::Spool::load(&repo.common_dir, session, &packs);
+    let carry = turn_end.then(|| turn_carry(rt, store, repo, session));
+    let spool = originals::Spool::load_carrying(&repo.common_dir, session, &packs, carry.as_ref());
     let inputs = TurnInputs {
         rt,
         store,
@@ -108,17 +110,25 @@ fn assemble(
         let read = (main.as_deref()?, main_raw.as_ref()?);
         session_transcript(&repo.git_dir, session, read, &packs, &spool, turn)
     });
-    let (mut transcript, transcript_raw_lines, turn_read) = match transcript {
+    let (mut transcript, transcript_raw_lines, mut turn_read) = match transcript {
         Some((pair, raw_lines, read)) => (Some(pair), Some(raw_lines), read),
         None => (None, None, None),
     };
     let sources = TaskSources {
         spool: Some(&spool),
         main_bytes: main_raw.as_ref().map(SecretBytes::as_slice),
+        carry: carry.as_ref(),
         ..TaskSources::of(&repo.git_dir, session, &packs, &facts)
     };
-    let mut tasks = t.phase("archive_tasks", || tasks::session_tasks(&sources));
+    let mut carried = Vec::new();
+    let mut tasks = t.phase("archive_tasks", || {
+        tasks::session_tasks_noting(&sources, &mut carried)
+    });
     spool.attach_orphans(transcript.as_mut(), &mut tasks);
+    if let Some(read) = turn_read.as_mut() {
+        carried.extend(carry::original_entries(&spool, transcript.as_ref(), &tasks));
+        read.carried = carried;
+    }
     Ok(SessionAssembly {
         raw,
         facts,
@@ -129,4 +139,23 @@ fn assemble(
         tasks,
         turn_read,
     })
+}
+
+/// The previous turn-end shard's subagent pairs and originals, read back by
+/// the oids the sidecar recorded for the session's newest checkpoint.
+fn turn_carry(
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    repo: &rift_git::RepoPaths,
+    session: &str,
+) -> TurnCarry {
+    let last = rt.block_on(crate::hooks::turn_end::last_checkpoint(store, session));
+    let (Some(last), Ok(walker)) = (
+        last,
+        rift_recall_substrate::ShardWalker::open(&repo.work_tree),
+    ) else {
+        return TurnCarry::default();
+    };
+    let read = |path: &str| walker.read_native_entry(&last, path).ok().flatten();
+    TurnCarry::after(&repo.git_dir, session, &last, &read)
 }

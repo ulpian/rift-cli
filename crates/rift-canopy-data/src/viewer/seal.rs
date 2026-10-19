@@ -120,6 +120,7 @@ mod tests {
             fallback: None,
             sealed_at_ms: 0,
             compact: Some(7),
+            carried: Vec::new(),
         }
     }
 

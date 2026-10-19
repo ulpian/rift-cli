@@ -31,6 +31,7 @@ use rift_shadow::backend::{
 use rift_shadow::redact::RulePackSet;
 
 use super::super::subagent_claims::{is_safe_id, read_claims};
+use super::carry::{self, TurnCarry};
 use super::originals::Spool;
 use super::spills;
 
@@ -53,6 +54,9 @@ pub(super) struct TaskSources<'a> {
     /// The session's spooled originals, sealed beside the subagent
     /// transcripts that record their calls; `None` seals none.
     pub(super) spool: Option<&'a Spool>,
+    /// The previous turn-end shard's subagent pairs, on a turn end only: an
+    /// unchanged file is written by its oids, never redacted again.
+    pub(super) carry: Option<&'a TurnCarry>,
 }
 
 /// One subagent file the archive will try to seal.
@@ -96,6 +100,7 @@ impl<'a> TaskSources<'a> {
             main: main_transcript_path(git_dir, session_id),
             main_bytes: None,
             spool: None,
+            carry: None,
         }
     }
 }
@@ -170,7 +175,17 @@ impl SpawnIndex {
 }
 
 /// Every subagent transcript of the session, sealed as tasks.
+#[cfg(test)]
 pub(super) fn session_tasks(src: &TaskSources<'_>) -> Vec<ArchivedTask> {
+    session_tasks_noting(src, &mut Vec::new())
+}
+
+/// Every subagent transcript of the session sealed as tasks, each pair sealed or carried on a turn end noted in
+/// `notes` for the frontier sidecar.
+pub(super) fn session_tasks_noting(
+    src: &TaskSources<'_>,
+    notes: &mut Vec<carry::CarriedEntry>,
+) -> Vec<ArchivedTask> {
     let main = src.main.as_deref();
     let candidates = candidates(src, main);
     if candidates.is_empty() {
@@ -192,7 +207,7 @@ pub(super) fn session_tasks(src: &TaskSources<'_>) -> Vec<ArchivedTask> {
     let mut named = BTreeSet::new();
     candidates
         .into_iter()
-        .filter_map(|c| seal_task(src, &index, c, &mut named))
+        .filter_map(|c| seal_task(src, &index, c, &mut named, notes))
         .collect()
 }
 
@@ -302,6 +317,7 @@ fn seal_task(
     index: &SpawnIndex,
     c: Candidate,
     named: &mut BTreeSet<String>,
+    notes: &mut Vec<carry::CarriedEntry>,
 ) -> Option<ArchivedTask> {
     let spawn = index
         .spawn_of(&c.agent_id)
@@ -318,8 +334,13 @@ fn seal_task(
     let (transcript, state, (started, ended)) = match c.read {
         Ok(bytes) => {
             let instants = time_span(&bytes);
-            match seal_through_gate(src, bytes, &c.path) {
-                Some(t) => (Some(t), TaskTranscriptState::Sealed, instants),
+            match seal_or_carry(src, &c.agent_id, bytes, &c.path) {
+                Some((t, raw_sha256)) => {
+                    let note =
+                        raw_sha256.and_then(|h| carry::subagent_entry(&c.agent_id, &name, h, &t));
+                    notes.extend(note);
+                    (Some(t), TaskTranscriptState::Sealed, instants)
+                }
                 None => (None, TaskTranscriptState::Unsealed, instants),
             }
         }
@@ -343,6 +364,26 @@ fn seal_task(
     })
 }
 
+/// On a turn end, the previous shard's pair when the file is unchanged, else
+/// the file sealed whole; with the raw file's hash on a turn end, for the
+/// sidecar.
+fn seal_or_carry(
+    src: &TaskSources<'_>,
+    agent_id: &str,
+    bytes: Vec<u8>,
+    path: &Path,
+) -> Option<(ArchivedTranscript, Option<String>)> {
+    let Some(carry) = src.carry else {
+        return Some((seal_through_gate(src, bytes, path)?, None));
+    };
+    let raw_sha256 = carry::raw_key(src.packs, &bytes);
+    let pair = match carry.subagent(agent_id, &raw_sha256) {
+        Some(carried) => attach_beside(src, carried.pair(), &bytes),
+        None => seal_through_gate(src, bytes, path)?,
+    };
+    Some((pair, Some(raw_sha256)))
+}
+
 /// The file through the same gate as the main transcript, whole: a task's
 /// pair is re-derived at every archive, so its compaction starts at line 0.
 /// A refusal would be said and recorded as `unsealed`, never dropped in
@@ -357,22 +398,29 @@ fn seal_through_gate(
     path: &Path,
 ) -> Option<ArchivedTranscript> {
     let raw = rift_core::SecretBytes::new(bytes);
+    carry::gate_ran();
     match rift_shadow::archived_transcript(&raw, 0, src.packs) {
-        Ok((mut pair, _)) => {
-            if let Some(main) = &src.main {
-                pair.spills =
-                    spills::of_transcript(main, src.session_id, src.packs, raw.as_slice());
-            }
-            if let Some(spool) = src.spool {
-                pair.originals = spool.claimed_by(raw.as_slice(), pair.full.as_slice());
-            }
-            Some(pair)
-        }
+        Ok((pair, _)) => Some(attach_beside(src, pair, raw.as_slice())),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "subagent transcript not sealed");
             None
         }
     }
+}
+
+/// `pair` with the spills and spooled originals its raw file `raw` names.
+fn attach_beside(
+    src: &TaskSources<'_>,
+    mut pair: ArchivedTranscript,
+    raw: &[u8],
+) -> ArchivedTranscript {
+    if let Some(main) = &src.main {
+        pair.spills = spills::of_transcript(main, src.session_id, src.packs, raw);
+    }
+    if let Some(spool) = src.spool {
+        pair.originals = spool.claimed_by(raw, pair.full.as_slice());
+    }
+    pair
 }
 
 /// The earliest and latest `timestamp` the file's records carry, epoch ms;

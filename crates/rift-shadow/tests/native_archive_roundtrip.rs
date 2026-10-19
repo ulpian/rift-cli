@@ -1164,7 +1164,7 @@ fn deleting_a_writer_emitted_empty_original_refuses_gap_binding_despite_unchange
         line: None,
         rewritten: None,
         state: OriginalState::Sealed,
-        body: Some(empty),
+        body: Some(empty.into()),
     });
     archive.transcript = Some(pair);
     archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();

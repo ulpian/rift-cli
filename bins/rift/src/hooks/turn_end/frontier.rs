@@ -14,7 +14,7 @@ use std::path::Path;
 
 #[cfg(test)]
 pub(crate) use rift_shadow::hooks::turn_frontier::LAG_BOUND_BYTES;
-pub(crate) use rift_shadow::hooks::turn_frontier::{write, SealFallback};
+pub(crate) use rift_shadow::hooks::turn_frontier::{write, CarriedEntry, SealFallback};
 use rift_shadow::turn_seal::{ChainBreak, CompactCarry, TurnSeal};
 
 /// The sidecar record as the writer knows it: with the compactor's carry.
@@ -30,6 +30,9 @@ pub(crate) struct SealRead {
     sealed_lines: Option<u64>,
     fallback: Option<SealFallback>,
     pub(super) compact: Option<CompactCarry>,
+    /// The subagent transcripts and originals the shard holds, for the next
+    /// turn end's carry.
+    pub(crate) carried: Vec<CarriedEntry>,
 }
 
 /// The fallback a broken chain names, by doctor's closed word.
@@ -55,6 +58,7 @@ impl SealRead {
             sealed_lines,
             fallback,
             compact: None,
+            carried: Vec::new(),
         }
     }
 }
@@ -70,6 +74,7 @@ pub(crate) fn record(git_dir: &Path, session: &str, checkpoint: &str, read: Seal
         fallback: read.fallback,
         sealed_at_ms: now,
         compact: read.compact,
+        carried: read.carried,
     };
     let sessions = crate::family::run_state::sessions_dir(git_dir);
     if let Err(e) = write(&sessions, &frontier) {

@@ -33,6 +33,10 @@ pub enum TranscriptBody {
     Whole(RedactedBytes),
     /// The parts of a transcript sealed turn by turn.
     Segments(Segments),
+    /// One blob an earlier turn-end shard holds for the same raw bytes,
+    /// written again by its oid alone (ruling "L-5 turn-end assembly must not
+    /// re-redact"): an unchanged subagent transcript or spooled original.
+    Carried(CarriedPart),
 }
 
 /// Line-aligned parts, each already through the redaction gate. The fields
@@ -256,6 +260,18 @@ impl TranscriptBody {
         match self {
             Self::Whole(whole) => whole.as_slice(),
             Self::Segments(segments) => &segments.joined,
+            Self::Carried(carried) => carried.as_slice(),
+        }
+    }
+
+    /// The git blob id this body is written as when it is one blob; `None`
+    /// for a segmented body, which is a tree.
+    #[must_use]
+    pub fn blob_oid(&self) -> Option<String> {
+        match self {
+            Self::Whole(whole) => Some(git_blob_oid(whole.as_slice())),
+            Self::Carried(carried) => Some(carried.oid().to_owned()),
+            Self::Segments(_) => None,
         }
     }
 }
@@ -330,8 +346,8 @@ pub(super) fn insert_body_artifacts(
     body: &TranscriptBody,
 ) {
     match body {
-        TranscriptBody::Whole(blob) => {
-            out.insert(format!("{dir}{whole}"), blob.as_slice().to_vec());
+        TranscriptBody::Whole(_) | TranscriptBody::Carried(_) => {
+            out.insert(format!("{dir}{whole}"), body.as_slice().to_vec());
         }
         TranscriptBody::Segments(segments) => {
             for (index, part) in segments.parts.iter().enumerate() {

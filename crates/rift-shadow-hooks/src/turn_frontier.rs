@@ -65,6 +65,42 @@ pub struct TurnFrontier<C = IgnoredAny> {
     /// its new lines; absent from a record an older binary wrote.
     #[serde(default = "none", skip_serializing_if = "Option::is_none")]
     pub compact: Option<C>,
+    /// The subagent transcripts and spooled originals this checkpoint holds,
+    /// so the next turn end writes an unchanged one by its oid instead of
+    /// redacting it again; absent from a record an older binary wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<CarriedEntry>,
+}
+
+/// One subagent transcript or spooled original a turn-end shard holds, with
+/// the raw bytes it was sealed from named by their hash: equal raw bytes at
+/// the next turn end mean the shard's blobs already stand for them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedEntry {
+    /// The subagent's agent id, or the spooled original's tool-use id.
+    pub id: String,
+    /// Whether `id` names a subagent transcript or a spooled original.
+    pub kind: CarriedKind,
+    /// SHA-256 over the rule packs' fingerprint and the raw file the blobs
+    /// were sealed from, so changed packs carry nothing.
+    pub raw_sha256: String,
+    /// Each blob's path inside the shard and its git blob id: the full then
+    /// the compact transcript for a subagent, the one body for an original.
+    pub blobs: Vec<(String, String)>,
+    /// A subagent pair's redaction fallback counts, `[lines, placeholders]`.
+    #[serde(default)]
+    pub fallback: [u32; 2],
+}
+
+/// What a [`CarriedEntry`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CarriedKind {
+    /// A subagent transcript pair under `tasks/<name>/`.
+    Subagent,
+    /// A spooled original under a `tool-originals/` tree.
+    Original,
 }
 
 /// One sidecar as a reader finds it.

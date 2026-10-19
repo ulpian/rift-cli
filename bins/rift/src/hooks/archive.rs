@@ -4,6 +4,7 @@
 //! honest. Separate because it is the one place a checkpoint is minted.
 
 mod assembly;
+mod carry;
 mod originals;
 mod outlines;
 mod spills;

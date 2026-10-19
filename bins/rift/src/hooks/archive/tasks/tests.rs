@@ -50,6 +50,7 @@ impl Session {
             main: Some(self.main.clone()),
             main_bytes: None,
             spool: None,
+            carry: None,
         })
     }
 }
@@ -112,6 +113,7 @@ fn the_archive_spawn_index_reads_the_handed_main_bytes_not_the_file_again() {
         main: Some(s.main.clone()),
         main_bytes: Some(handed.as_bytes()),
         spool: None,
+        carry: None,
     });
     let names: Vec<&str> = tasks.iter().map(|t| t.tool_use_id.as_str()).collect();
     assert_eq!(names, ["toolu_handed"]);

@@ -158,6 +158,15 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     fn body_entry(&self, whole: &str, body: &TranscriptBody) -> Result<TreeWriteEntry> {
         let segments = match body {
             TranscriptBody::Whole(blob) => return self.durable_entry(whole, blob),
+            // The earlier shard's blob: the tree names its oid, no bytes are
+            // written again.
+            TranscriptBody::Carried(carried) => {
+                return Ok(TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: whole.into(),
+                    oid: carried.oid().into(),
+                })
+            }
             TranscriptBody::Segments(segments) => segments,
         };
         let mut parts = Vec::with_capacity(segments.parts().len());
@@ -188,7 +197,7 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     ) -> Result<()> {
         let mut files = Vec::new();
         for (original, body) in transcript.sealed_originals() {
-            files.push(self.durable_entry(&original.file_name(), body)?);
+            files.push(self.body_entry(&original.file_name(), body)?);
         }
         if files.is_empty() {
             return Ok(());

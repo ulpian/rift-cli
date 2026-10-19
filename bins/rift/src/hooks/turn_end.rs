@@ -221,7 +221,10 @@ fn transcript_path(git_dir: &Path, session: &str) -> Option<String> {
 }
 
 /// The session's newest archived checkpoint.
-async fn last_checkpoint(store: &rift_store::SqliteStore, session: &str) -> Option<String> {
+pub(super) async fn last_checkpoint(
+    store: &rift_store::SqliteStore,
+    session: &str,
+) -> Option<String> {
     let rows = store
         .query(
             "SELECT checkpoint_id FROM archive_decision \

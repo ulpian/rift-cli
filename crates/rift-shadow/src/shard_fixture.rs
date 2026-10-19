@@ -142,7 +142,7 @@ fn fixture_original(
         line: present.then_some(4),
         rewritten: present.then_some(Rewritten::Delivered(RewriteForm::FoldedOutput)),
         state,
-        body: Some(crate::transcript::sealed_original(&record, packs)?),
+        body: Some(crate::transcript::sealed_original(&record, packs)?.into()),
     })
 }
 
