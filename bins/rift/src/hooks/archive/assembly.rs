@@ -14,6 +14,8 @@ use rift_shadow::redact::RulePackSet;
 
 use super::tasks::{self, TaskSources};
 use super::{originals, session_facts_for_archive, session_raw_capture, session_transcript};
+use crate::hooks::turn_end::frontier::SealRead;
+use crate::hooks::turn_end::TurnInputs;
 use crate::hooktime::HookTimer;
 
 /// Everything one checkpoint of one session is built from.
@@ -27,9 +29,13 @@ pub(crate) struct SessionAssembly {
     /// Non-empty raw transcript lines read, for the caller's progress record.
     pub(crate) transcript_raw_lines: Option<u64>,
     pub(crate) tasks: Vec<ArchivedTask>,
+    /// What a turn-end seal read, for the frontier record once the shard
+    /// lands; `None` on every other road.
+    pub(crate) turn_read: Option<SealRead>,
 }
 
-/// Assemble one session's checkpoint inputs.
+/// Assemble one session's checkpoint inputs, the main transcript sealed whole:
+/// the commit, session-end, sweep and recovery roads.
 pub(crate) fn assemble_session(
     t: &HookTimer,
     rt: &tokio::runtime::Runtime,
@@ -37,6 +43,35 @@ pub(crate) fn assemble_session(
     repo: &rift_git::RepoPaths,
     agent: &str,
     session: &str,
+) -> Result<SessionAssembly> {
+    assemble(t, rt, store, repo, agent, session, false)
+}
+
+/// Assemble a turn-end checkpoint's inputs. Everything is as
+/// [`assemble_session`] builds it except the main transcript, whose earlier
+/// lines are carried from the previous shard and never pass the gate again
+/// (ruling "L-5 turn-end assembly must not re-redact").
+pub(crate) fn assemble_turn_end(
+    t: &HookTimer,
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    repo: &rift_git::RepoPaths,
+    agent: &str,
+    session: &str,
+) -> Result<SessionAssembly> {
+    assemble(t, rt, store, repo, agent, session, true)
+}
+
+/// The one assembly both entries share; `turn_end` changes only how the main
+/// transcript is sealed.
+fn assemble(
+    t: &HookTimer,
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    repo: &rift_git::RepoPaths,
+    agent: &str,
+    session: &str,
+    turn_end: bool,
 ) -> Result<SessionAssembly> {
     let raw = t.phase("archive_raw_capture", || {
         session_raw_capture(&repo.work_tree)
@@ -54,12 +89,20 @@ pub(crate) fn assemble_session(
     // missing or unreadable file archives a transcript-less checkpoint, never
     // an error, because the agent owns that file and may have moved it.
     let spool = originals::Spool::load(&repo.common_dir, session, &packs);
+    let inputs = TurnInputs {
+        rt,
+        store,
+        repo,
+        session,
+        packs: &packs,
+    };
+    let turn = turn_end.then_some(&inputs);
     let transcript = t.phase("archive_transcript", || {
-        session_transcript(&repo.git_dir, session, &packs, &spool)
+        session_transcript(&repo.git_dir, session, &packs, &spool, turn)
     });
-    let (mut transcript, transcript_raw_lines) = match transcript {
-        Some((pair, raw_lines)) => (Some(pair), Some(raw_lines)),
-        None => (None, None),
+    let (mut transcript, transcript_raw_lines, turn_read) = match transcript {
+        Some((pair, raw_lines, read)) => (Some(pair), Some(raw_lines), read),
+        None => (None, None, None),
     };
     let sources = TaskSources {
         spool: Some(&spool),
@@ -75,5 +118,6 @@ pub(crate) fn assemble_session(
         transcript,
         transcript_raw_lines,
         tasks,
+        turn_read,
     })
 }

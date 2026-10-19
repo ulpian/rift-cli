@@ -2,7 +2,7 @@
 //! journals a [`SealTurn`] and the worker mints one checkpoint per turn end
 //! through the interval-archive road, under its own reason `turn-end`.
 //!
-//! The full transcript is sealed by [`seal_turn`] over the session's previous
+//! The full transcript is sealed by [`rift_shadow::turn_seal::seal_turn`] over the session's previous
 //! shard, read back from git with each part's blob oid, so only the turn's new
 //! lines pass the gate. The commit anchor is absent when HEAD is unborn or is
 //! the commit the previous checkpoint already anchors to (Q10). No turn end is
@@ -17,10 +17,10 @@ use rift_recall_substrate::parse::segments::{
     compact_segment_name, declared_layout, segment_name, Declared, COMPACT_SEGMENTS_KEY,
     SEGMENT_PACKS_KEY,
 };
-use rift_shadow::backend::ArchivedTranscript;
+use rift_shadow::backend::{ArchivedTranscript, RedactionFallback};
 use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
 use rift_shadow::turn_seal::{
-    seal_turn, seal_turn_compact, CompactCut, PriorChain, PriorPart, TurnSeal,
+    seal_turn_compact, seal_turn_through, CompactCut, PriorChain, PriorPart, TurnSeal,
 };
 use rift_store::CanonicalStore as _;
 
@@ -53,61 +53,124 @@ pub(super) fn turn_end_job(
     })
 }
 
-/// Replace `pair.full` with the turn's segmented seal — and, when the turn
-/// appended a part, `pair.compact` with the compact form cut at the same
-/// line — and say what it read, for [`frontier::record`] once the shard lands.
-/// Whatever cannot be read leaves the whole seal the archive already holds
-/// and says nothing; a refused chain keeps the whole compact form too.
-pub(super) fn seal_turn_full(
-    rt: &tokio::runtime::Runtime,
-    store: &rift_store::SqliteStore,
-    repo: &rift_git::RepoPaths,
-    session: &str,
-    packs: &rift_shadow::redact::RulePackSet,
-    pair: &mut ArchivedTranscript,
-) -> Option<SealRead> {
-    let raw = transcript_path(&repo.git_dir, session).and_then(|p| std::fs::read(p).ok())?;
-    let read = raw.len();
-    let raw = SecretBytes::new(raw);
-    let last = rt.block_on(last_checkpoint(store, session));
+/// What a turn-end seal reads from beyond the transcript bytes.
+pub(super) struct TurnInputs<'a> {
+    pub(super) rt: &'a tokio::runtime::Runtime,
+    pub(super) store: &'a rift_store::SqliteStore,
+    pub(super) repo: &'a rift_git::RepoPaths,
+    pub(super) session: &'a str,
+    pub(super) packs: &'a rift_shadow::redact::RulePackSet,
+}
+
+/// A turn-end archive's transcript pair, built from the turn's segmented seal
+/// alone: the main transcript's earlier lines are carried from the previous
+/// shard and never pass the gate again (ruling "L-5 turn-end assembly must not
+/// re-redact"). Returns the pair, the raw-line count and what the seal read,
+/// for [`frontier::record`] once the shard lands. `None` when the seal fails,
+/// and the caller then seals the whole file as every other road does.
+pub(super) fn seal_turn_pair(
+    inputs: &TurnInputs<'_>,
+    raw: &SecretBytes,
+    start_line: usize,
+) -> Option<(ArchivedTranscript, u64, SealRead)> {
+    let mut gate = |bytes: &SecretBytes, first_line: usize| {
+        rift_shadow::redact::redact_with_at(bytes, inputs.packs, first_line)
+    };
+    seal_turn_pair_through(inputs, raw, start_line, &mut gate)
+}
+
+/// [`seal_turn_pair`] over an injected gate for the main transcript's full
+/// form, so a test can count the bytes that enter it.
+fn seal_turn_pair_through(
+    inputs: &TurnInputs<'_>,
+    raw: &SecretBytes,
+    start_line: usize,
+    gate: &mut rift_shadow::turn_seal::Gate<'_>,
+) -> Option<(ArchivedTranscript, u64, SealRead)> {
+    let last = inputs
+        .rt
+        .block_on(last_checkpoint(inputs.store, inputs.session));
     let prior = last
         .as_deref()
-        .and_then(|id| prior_chain(&repo.work_tree, id));
+        .and_then(|id| prior_chain(&inputs.repo.work_tree, id));
     let before = prior.as_ref().map_or(0, |c| c.raw_lines.iter().sum());
-    let seal = seal_turn(&raw, prior, packs).ok()?;
-    let mut said = SealRead::of(read, &seal);
-    match seal {
+    let carried = prior
+        .as_ref()
+        .map(|c| summed(&c.fallbacks))
+        .unwrap_or_default();
+    let seal = seal_turn_through(raw, prior, inputs.packs, gate).ok()?;
+    let mut said = SealRead::of(raw.as_slice().len(), &seal);
+    let compacted = rift_shadow::transcript::compact_jsonl(raw, start_line);
+    let raw_lines = u64::try_from(compacted.raw_lines).unwrap_or(u64::MAX);
+    let (full, fallback, cut) = match seal {
         TurnSeal::Appended {
             body,
             document_lines,
-            ..
-        } => {
-            let cut = CompactCut {
-                before,
-                now: document_lines,
-            };
-            let earlier = last
-                .as_deref()
-                .and_then(|id| prior_compact(&repo.work_tree, id));
-            let carry = last
-                .as_deref()
-                .and_then(|id| frontier::carry_after(&repo.git_dir, session, id));
-            if let Ok(sealed) = seal_turn_compact(&raw, cut, earlier, carry.as_ref(), packs) {
-                let compact = sealed.body;
-                said.compact = Some(sealed.carry);
-                // The compact form now ends where the full parts do, so the
-                // slice start can be no later than its last record: rounding
-                // down keeps the slice's rule of erring toward inclusion.
-                let records = compact.as_slice().split_inclusive(|b| *b == b'\n').count();
-                pair.compact_start = pair.compact_start.min(records);
-                pair.compact = compact;
-            }
-            pair.full = body;
+            fallback,
+        } => (body, summed(&[carried, fallback]), Some(document_lines)),
+        TurnSeal::Whole { body, fallback, .. } => (body, fallback, None),
+        // Nothing new past the frontier: the whole file is sealed as before,
+        // and seal_turn put nothing through the gate.
+        TurnSeal::Unchanged => {
+            let (pair, _) = rift_shadow::archived_transcript(raw, start_line, inputs.packs).ok()?;
+            return Some((pair, raw_lines, said));
         }
-        TurnSeal::Whole { body, .. } => pair.full = body,
-        TurnSeal::Unchanged => {}
-    }
-    Some(said)
+    };
+    let segmented = cut.and_then(|now| {
+        let cut = CompactCut { before, now };
+        turn_compact(inputs, raw, cut, last.as_deref())
+    });
+    let mut compact_start = compacted.compact_transcript_start;
+    let (compact, redaction_fallback) = if let Some((compact, carry)) = segmented {
+        said.compact = Some(carry);
+        // The compact form now ends where the full parts do, so the
+        // slice start can be no later than its last record: rounding
+        // down keeps the slice's rule of erring toward inclusion.
+        let records = compact.as_slice().split_inclusive(|b| *b == b'\n').count();
+        compact_start = compact_start.min(records);
+        (compact, fallback)
+    } else {
+        let whole = rift_shadow::redact::redact_with(compacted.compact(), inputs.packs).ok()?;
+        let counts = summed(&[fallback, RedactionFallback::of(&[&whole.report])]);
+        (whole.redacted.into(), counts)
+    };
+    let pair = ArchivedTranscript {
+        full,
+        compact,
+        compact_start,
+        spills: Vec::new(),
+        originals: Vec::new(),
+        redaction_fallback,
+    };
+    Some((pair, raw_lines, said))
+}
+
+/// The compact form cut where the full parts end, the earlier compact parts
+/// carried by oid; `None` when the compact chain is refused.
+fn turn_compact(
+    inputs: &TurnInputs<'_>,
+    raw: &SecretBytes,
+    cut: CompactCut,
+    last: Option<&str>,
+) -> Option<(
+    rift_shadow::backend::TranscriptBody,
+    rift_shadow::turn_seal::CompactCarry,
+)> {
+    let earlier = last.and_then(|id| prior_compact(&inputs.repo.work_tree, id));
+    let carry = last.and_then(|id| frontier::carry_after(&inputs.repo.git_dir, inputs.session, id));
+    let sealed = seal_turn_compact(raw, cut, earlier, carry.as_ref(), inputs.packs).ok()?;
+    Some((sealed.body, sealed.carry))
+}
+
+/// Fallback counts added up. The carried parts' counts were recorded when
+/// they were sealed; a segmented compact form's new part reports none here.
+fn summed(counts: &[RedactionFallback]) -> RedactionFallback {
+    counts
+        .iter()
+        .fold(RedactionFallback::default(), |acc, c| RedactionFallback {
+            lines: acc.lines.saturating_add(c.lines),
+            placeholders: acc.placeholders.saturating_add(c.placeholders),
+        })
 }
 
 /// [`turn_end_job`]'s work: the anchor, then the archive the interval road runs.

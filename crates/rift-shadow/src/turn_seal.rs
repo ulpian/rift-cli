@@ -122,11 +122,16 @@ pub fn seal_turn(
     seal_turn_through(raw, prior, packs, &mut gate)
 }
 
-/// The gate as `seal_turn_through` calls it: bytes and their first line.
-type Gate<'a> = dyn FnMut(&SecretBytes, usize) -> Result<RedactionOutput> + 'a;
+/// The gate as [`seal_turn_through`] calls it: bytes and their first line.
+pub type Gate<'a> = dyn FnMut(&SecretBytes, usize) -> Result<RedactionOutput> + 'a;
 
-/// [`seal_turn`] over an injected gate, so a test can count what enters it.
-fn seal_turn_through(
+/// [`seal_turn`] over an injected gate, so a test — here or in a caller's
+/// crate — can count what enters it. Production passes the real gate through
+/// [`seal_turn`]; nothing else should call this.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the gate returns one.
+pub fn seal_turn_through(
     raw: &SecretBytes,
     prior: Option<PriorChain>,
     packs: &RulePackSet,
