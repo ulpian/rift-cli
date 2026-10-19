@@ -10,6 +10,7 @@
 //! `queues` the work each member still owes, `spool` the originals of
 //! rewritten results still spooled, `redaction` the checkpoints whose
 //! transcripts the redaction gate sealed by its per-line fallback,
+//! `turn_seals` the sessions whose last turn-end seal fell back or lags,
 //! `set_asides` the recall
 //! projections a rebuild set aside, `prices` the observed models the price
 //! catalog cannot price. This file assembles the report
@@ -27,6 +28,7 @@ mod set_asides;
 mod setup;
 mod spool;
 mod stores;
+mod turn_seals;
 mod worktrees;
 
 use std::path::Path;
@@ -51,6 +53,7 @@ use setup::{
 };
 use spool::doctor_original_spool;
 use stores::{doctor_basis_store, doctor_document_store, doctor_window_journals};
+use turn_seals::doctor_turn_seals;
 use worktrees::{
     doctor_orphan_projections, doctor_phantom_gitdirs, doctor_prunable_worktrees,
     doctor_worktree_wiring,
@@ -127,6 +130,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("basis_store", doctor_basis_store(root));
     report.leg("original_spool", doctor_original_spool(root));
     report.leg("redaction_fallback", doctor_redaction_fallback(root));
+    report.leg("turn_seals", doctor_turn_seals(root));
     report.leg("completeness", doctor_capture_completeness(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
