@@ -16,6 +16,8 @@ mod archive;
 mod carrier;
 mod codec;
 #[cfg(unix)]
+mod controller;
+#[cfg(unix)]
 mod cut;
 mod eligibility;
 #[cfg(unix)]
@@ -25,10 +27,16 @@ mod gap;
 pub(crate) mod hold;
 #[cfg(unix)]
 mod inventory;
+#[cfg(unix)]
+pub(crate) mod job;
+#[cfg(unix)]
+mod observation;
 pub(crate) mod pins;
 pub(crate) mod plan;
 #[cfg(unix)]
 mod record;
+#[cfg(unix)]
+pub(crate) mod runner;
 #[cfg(unix)]
 mod selection;
 

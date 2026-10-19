@@ -9,7 +9,7 @@ use super::{codec, EvidenceError, EvidenceResult, WireError, WireResult};
 use crate::capture_queue::QueueLock;
 
 pub(super) const MAX_HOLD_BYTES: usize = 4096;
-const HOLD_NAME: &str = ".rift-capture-recovery.hold";
+pub(crate) const HOLD_NAME: &str = ".rift-capture-recovery.hold";
 
 pub(crate) struct Hold {
     wire: HoldWire,
@@ -45,6 +45,20 @@ pub(crate) struct OwnHold<'a> {
 }
 
 impl Hold {
+    /// The one hold a recovery job writes: its bytes are the canonical
+    /// encoding the admission check compares against.
+    pub(super) fn new(operation: &str, member: MemberKey, plan_sha256: &str) -> WireResult<Self> {
+        let wire = HoldWire {
+            schema_version: 1,
+            operation_id: operation.to_owned(),
+            member_key: member.to_hex(),
+            plan_sha256: plan_sha256.to_owned(),
+        };
+        Self::decode(&codec::wire_encode(&wire, MAX_HOLD_BYTES)?)
+    }
+    pub(crate) fn operation(&self) -> &str {
+        &self.wire.operation_id
+    }
     pub(crate) fn decode(bytes: &[u8]) -> WireResult<Self> {
         let wire: HoldWire = codec::wire_decode(bytes, MAX_HOLD_BYTES)?;
         if wire.schema_version != 1 {

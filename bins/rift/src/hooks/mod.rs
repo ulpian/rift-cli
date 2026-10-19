@@ -64,7 +64,9 @@ pub(crate) use recovery::basis_snapshots_at;
 pub(crate) use sweep::{family_sweep_floor, sweep_stale_sessions, SessionSweep};
 #[cfg(feature = "search")]
 pub(crate) use worker::owe_search_index;
-pub(crate) use worker::{drain_capture_queue, drain_everything};
+pub(crate) use worker::{
+    drain_capture_queue, drain_everything, leave_to_recovery, Historical, Leave,
+};
 
 /// Detect the direct-link Unix hook entry before clap parses the native git-hook
 /// arguments as Rift's human command tree.
