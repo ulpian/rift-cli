@@ -144,6 +144,7 @@ pub(super) fn share_fixture(overall: Option<f64>) -> SavingsData {
             claimed_pulls: 0,
             claimed_avoided: 0,
             claimed_returned: 0,
+            tool_output: crate::col3::ToolOutputCounts::default(),
             families: vec![
                 FamilyShareRow {
                     family: "claude-code".to_owned(),

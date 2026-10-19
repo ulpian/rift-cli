@@ -112,8 +112,31 @@ pub struct ShareData {
     pub claimed_avoided: u64,
     /// What those pulls returned.
     pub claimed_returned: u64,
+    /// The tool-output classes, each split into what it would save and what
+    /// it saved; drawn beside the share and never added to it.
+    pub tool_output: ToolOutputCounts,
     /// The per-family rows the modal draws.
     pub families: Vec<FamilyShareRow>,
+}
+
+/// One tool-output class over the card's window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolOutputClassCounts {
+    /// Results the class would have acted on, which it only observed.
+    pub would_save: u64,
+    /// Results it acted on.
+    pub acted: u64,
+    /// What those avoided, already inside the share.
+    pub avoided: u64,
+}
+
+/// Both tool-output classes over the card's window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolOutputCounts {
+    /// Results held back from a repeat.
+    pub held: ToolOutputClassCounts,
+    /// Results folded to their shape.
+    pub folded: ToolOutputClassCounts,
 }
 
 /// Recall savings numbers.
@@ -289,6 +312,7 @@ pub fn savings_share_lines(share: &ShareData) -> Vec<String> {
         ),
     ];
     lines.extend(claimed_lines(share));
+    lines.extend(tool_output_lines(&share.tool_output));
     // The hole in the denominator, named. A read whose token count was never
     // frozen is a row in the denominator's set worth zero tokens, so the share
     // is over fewer measured reads than its `n` suggests. It is counted here
@@ -320,6 +344,26 @@ fn claimed_lines(share: &ShareData) -> Vec<String> {
         ),
         "                     (beside the share, not in it)".to_owned(),
     ]
+}
+
+/// The tool-output classes under the share, when the window holds any row:
+/// what a class would save is a counterfactual and says so, and what it saved
+/// is already in the share, so neither line adds to the figure above it.
+fn tool_output_lines(t: &ToolOutputCounts) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (label, c) in [("held", t.held), ("folded", t.folded)] {
+        if c.would_save == 0 && c.acted == 0 {
+            continue;
+        }
+        lines.push(format!(
+            "tool output {label:<8} would save on {}, acted on {} ({} tok, in the share)",
+            c.would_save, c.acted, c.avoided
+        ));
+    }
+    if !lines.is_empty() {
+        lines.push("                     (would save is beside the share, not in it)".to_owned());
+    }
+    lines
 }
 
 /// The per-family table: its header, then one row per family — share,
@@ -552,6 +596,30 @@ mod tests {
             body.contains("overall              10.0%\n")
                 && body.contains("claimed by pulls     4919280 tok on 19 pulls, 19603 returned")
                 && body.contains("(beside the share, not in it)"),
+            "{body}"
+        );
+    }
+
+    /// The tool-output classes are drawn beside the share, the counterfactual
+    /// named as one; a window with no tool-output row draws no line.
+    #[test]
+    fn the_modal_sets_the_tool_output_classes_beside_the_share() {
+        let mut sd = share_fixture(Some(10.0));
+        let quiet = usd_breakdown_lines(&sd).join("\n");
+        assert!(!quiet.contains("tool output"), "{quiet}");
+        sd.share.tool_output.held = ToolOutputClassCounts {
+            would_save: 7,
+            acted: 0,
+            avoided: 0,
+        };
+        let body = usd_breakdown_lines(&sd).join("\n");
+        assert!(
+            body.contains("overall              10.0%\n")
+                && body.contains(
+                    "tool output held     would save on 7, acted on 0 (0 tok, in the share)"
+                )
+                && body.contains("(would save is beside the share, not in it)")
+                && !body.contains("tool output folded"),
             "{body}"
         );
     }
