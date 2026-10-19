@@ -7,6 +7,7 @@ use rift_shadow::backend::ShadowBackend;
 use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
 use rift_shadow::hooks::AdapterRegistry;
 use rift_store::SqliteStore;
+use sha2::{Digest, Sha256};
 
 use super::archive::resume::resume_intent;
 use super::archive::retire::{retire, write_retire_intent};
@@ -19,6 +20,7 @@ use super::cut::{pin_all, resume_pins, CutOutcome, Pinned, MAX_CUT_BYTES};
 use super::gap::{publish_gap, GapOutcome};
 use super::hold::OwnHold;
 use super::inventory::enumerate;
+use super::observation::{attempt_observation, BoundaryCollector, ObservationOwed, Reservation};
 use super::record::{self, RecordError};
 use super::selection::intent::SelectionIntent;
 use super::selection::{select, Selected, INTENT_NAME};
@@ -151,6 +153,36 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
         }
     }
 
+    /// Collect the reserved boundary the durable selection intent names, as
+    /// the hold's last act; with no reservation only the completion is written.
+    fn observe(&mut self) -> Result<(), Refused> {
+        let bytes = self.read_private(INTENT_NAME)?;
+        let intent =
+            SelectionIntent::decode(&bytes).map_err(|_| Refused("selection-intent-invalid"))?;
+        let intent_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let reservation = intent
+            .reserved_observation
+            .as_ref()
+            .map(|observation| Reservation {
+                operation_id: &intent.operation_id,
+                plan_sha256: &intent.plan_sha256,
+                intent_sha256: &intent_sha256,
+                observation,
+            });
+        let cx = &self.cx;
+        let reader = rift_git::GixBlobReader::open(&cx.repo.work_tree)
+            .map_err(|_| Refused("observation-reader-unavailable"))?;
+        let mut collector = BoundaryCollector {
+            rt: cx.rt,
+            store: cx.store,
+            repo: cx.repo,
+            reader: &reader,
+        };
+        attempt_observation(self.hold, reservation, &mut collector)
+            .map(|_| ())
+            .map_err(|owed| Refused(observation_reason(owed)))
+    }
+
     fn selection_intent(&self) -> Result<SelectionIntent, Refused> {
         let bytes = self.read_private(INTENT_NAME)?;
         SelectionIntent::decode(&bytes).map_err(|_| Refused("selection-intent-invalid"))
@@ -191,6 +223,7 @@ impl<B: ShadowBackend, R: SubstrateReader> Stages for LiveStages<'_, B, R> {
             Stage::Retirement => retire(self.hold)
                 .map(|_| ())
                 .map_err(|_| Refused("retirement-owed")),
+            Stage::Observation => self.observe(),
         }
     }
 }
@@ -204,7 +237,7 @@ pub(crate) fn recover<B: ShadowBackend, R: SubstrateReader>(
     let mut stages = LiveStages::new(cx, hold);
     match drive(&mut HoldProgress { hold }, &mut stages) {
         Recovery::Complete => {
-            "capture recovery complete: the backlog is archived and its queue files retired"
+            "capture recovery complete: the backlog is archived, its queue files retired and the current boundary collected"
                 .to_owned()
         }
         Recovery::Owed {
@@ -212,6 +245,15 @@ pub(crate) fn recover<B: ShadowBackend, R: SubstrateReader>(
             ..
         } => "capture recovery: nothing to recover".to_owned(),
         owed => owed_words(owed),
+    }
+}
+
+fn observation_reason(owed: ObservationOwed) -> &'static str {
+    match owed {
+        ObservationOwed::HoldUnavailable => "hold-unavailable",
+        ObservationOwed::AttemptConflict => "observation-attempt-conflict",
+        ObservationOwed::PublishFailed => "observation-unwritten",
+        ObservationOwed::Spent(_) => "observation-spent",
     }
 }
 

@@ -95,7 +95,8 @@ fn capture_recovery_reserved_observation_is_collected_once_and_a_rerun_only_read
     assert_eq!(first, Ok(ObservationOutcome::Observed));
     let again = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
     assert_eq!(again, Ok(ObservationOutcome::Recognized));
-    assert_eq!((collector.collects, collector.read_backs), (1, 1));
+    // The completion names the checkpoint, so the rerun reads nothing back.
+    assert_eq!((collector.collects, collector.read_backs), (1, 0));
 }
 
 #[test]
@@ -145,4 +146,66 @@ fn capture_recovery_no_reservation_collects_nothing_and_writes_no_record() {
     );
     assert!(!rig.fixture.evidence.join(ATTEMPT_NAME).exists());
     assert_eq!((collector.collects, collector.read_backs), (0, 0));
+}
+
+#[test]
+fn capture_recovery_a_started_attempt_looks_its_boundary_up_before_collecting_again() {
+    let rig = Rig::new();
+    enqueue(&rig.fixture, "old-a", 1, Start);
+    let hold = rig.admit();
+    let observation = reserved();
+    let mut collector = counting(&rig, Collection::Missing);
+    let first = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(first, Err(ObservationOwed::Spent(Collection::Missing)));
+    assert!(!rig.fixture.evidence.join(COLLECTED_NAME).exists());
+    // The first collection did land after all: the lookup finds it.
+    collector.found = Collection::Observed;
+    let again = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(again, Ok(ObservationOutcome::Recognized));
+    assert_eq!((collector.collects, collector.read_backs), (1, 1));
+    let done: ObservationCollected =
+        serde_json::from_slice(&std::fs::read(rig.fixture.evidence.join(COLLECTED_NAME)).unwrap())
+            .unwrap();
+    assert_eq!(done.checkpoint_id, Some(checkpoint_id(&observation)));
+}
+
+/// One line per collection audit under the checkpoint: its own start time.
+fn audits(rig: &Rig, id: &str) -> Vec<i64> {
+    let sql = "SELECT collection_started_at FROM turn_boundary_observation WHERE snapshot_id = ?1";
+    let params = [rift_store::Value::text(id.to_owned())];
+    let rows = rig.rt.block_on(rift_store::CanonicalStore::query(
+        rig.store.inner(),
+        sql,
+        &params,
+    ));
+    rows.unwrap()
+        .iter()
+        .map(|row| row.get_i64(0).unwrap())
+        .collect()
+}
+
+#[test]
+fn capture_recovery_the_live_collector_leaves_one_fresh_checkpoint_and_a_rerun_adds_none() {
+    let rig = Rig::new();
+    enqueue(&rig.fixture, "old-a", 1, Start);
+    let hold = rig.admit();
+    let observation = reserved();
+    let repo = rift_git::discover(&rig.fixture.work_tree).unwrap();
+    let reader = rift_git::GixBlobReader::open(&rig.fixture.work_tree).unwrap();
+    let mut collector = BoundaryCollector {
+        rt: &rig.rt,
+        store: rig.store.inner(),
+        repo: &repo,
+        reader: &reader,
+    };
+    let first = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(first, Ok(ObservationOutcome::Observed));
+    let id = checkpoint_id(&observation);
+    let stamped = audits(&rig, &id);
+    // Stamped by the collection clock, never by the event's own instant.
+    assert_eq!(stamped.len(), 1);
+    assert!(stamped[0] > observation.expectation.known_boundary.captured_at);
+    let again = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(again, Ok(ObservationOutcome::Recognized));
+    assert_eq!(audits(&rig, &id), stamped);
 }

@@ -102,7 +102,7 @@ fn capture_recovery_controller_stops_at_a_refusal_and_runs_nothing_after_it() {
     );
     assert_eq!(
         status_words(&mut disk),
-        "capture recovery in progress: 3 of 6 stages durable, next archive"
+        "capture recovery in progress: 3 of 7 stages durable, next archive"
     );
 }
 
@@ -146,7 +146,7 @@ fn capture_recovery_doctor_words_read_the_hold_records_without_writing_any() {
     write_record(&rig.fixture.evidence.join(CUT_NAME), b"{}");
     assert_eq!(
         status_words(&mut progress),
-        "capture recovery in progress: 2 of 6 stages durable, next gap"
+        "capture recovery in progress: 2 of 7 stages durable, next gap"
     );
     std::os::unix::fs::symlink("elsewhere", rig.fixture.evidence.join(GAP_NAME)).unwrap();
     assert_eq!(

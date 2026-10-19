@@ -9,6 +9,7 @@ use crate::capture_recovery::archive::retire::{retirement_report, SlotState, RET
 use crate::capture_recovery::cut::{CUT_NAME, MAX_CUT_BYTES};
 use crate::capture_recovery::gap::GAP_NAME;
 use crate::capture_recovery::hold::OwnHold;
+use crate::capture_recovery::observation::COLLECTED_NAME;
 use crate::capture_recovery::record::{self, RecordError};
 use crate::capture_recovery::selection::INTENT_NAME;
 
@@ -21,15 +22,19 @@ pub(crate) enum Stage {
     Archive,
     RetireIntent,
     Retirement,
+    /// The reserved current boundary, collected last and inside the hold so
+    /// normal capture resumes from it.
+    Observation,
 }
 
-pub(crate) const ORDER: [Stage; 6] = [
+pub(crate) const ORDER: [Stage; 7] = [
     Stage::Selection,
     Stage::Cut,
     Stage::Gap,
     Stage::Archive,
     Stage::RetireIntent,
     Stage::Retirement,
+    Stage::Observation,
 ];
 
 /// A stage's record is there but cannot be read as one.
@@ -70,6 +75,7 @@ impl Stage {
             Stage::Archive => "archive",
             Stage::RetireIntent => "retire-intent",
             Stage::Retirement => "retirement",
+            Stage::Observation => "observation",
         }
     }
 
@@ -81,6 +87,7 @@ impl Stage {
             Stage::Archive => Some(RECEIPT_NAME),
             Stage::RetireIntent => Some(RETIRE_NAME),
             Stage::Retirement => None,
+            Stage::Observation => Some(COLLECTED_NAME),
         }
     }
 }

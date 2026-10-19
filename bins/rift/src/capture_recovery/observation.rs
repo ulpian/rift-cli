@@ -1,8 +1,10 @@
 //! The reserved observation: the one current boundary the selection set
-//! aside is collected at most once per operation. The attempt is made durable
-//! before the collector runs, so a crash after it can only read back what
-//! that collection left; it never collects the same boundary a second time
-//! and never relabels a later collection as the reserved one.
+//! aside is collected at most once per operation, as the last stage of the
+//! hold, so normal capture resumes from a truthful fresh baseline. The attempt
+//! is made durable before the collector runs and its completion, naming the
+//! checkpoint, after; a rerun that finds the completion does nothing, and one
+//! that finds only the attempt looks the checkpoint up by its boundary before
+//! it collects again, so the boundary is never collected twice.
 use serde::{Deserialize, Serialize};
 
 use crate::capture_recovery::files::Namespace;
@@ -10,7 +12,13 @@ use crate::capture_recovery::hold::OwnHold;
 use crate::capture_recovery::record::{self, Publication, RecordError};
 use crate::capture_recovery::selection::ReservedObservation;
 
+mod live;
+
+pub(crate) use live::BoundaryCollector;
+
 pub(crate) const ATTEMPT_NAME: &str = "observation-attempt.json";
+/// The attempt's completion: written once, after the collection is durable.
+pub(crate) const COLLECTED_NAME: &str = "observation-collected.json";
 /// Five digests and two short names; anything larger is not this record.
 const MAX_ATTEMPT_BYTES: usize = 4096;
 
@@ -68,6 +76,16 @@ pub(crate) struct ObservationAttempt {
     pub(crate) ticket_sha256: String,
 }
 
+/// The attempt completed: the checkpoint the reserved boundary became, or
+/// `None` where the selection reserved nothing. A separate no-clobber record
+/// rather than an edit, because the attempt itself is never rewritten.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObservationCollected {
+    pub(crate) schema_version: u32,
+    pub(crate) checkpoint_id: Option<String>,
+}
+
 /// The reserved boundary with the operation and the intent that set it
 /// aside, each borrowed from the published selection intent.
 #[derive(Clone, Copy, Debug)]
@@ -101,10 +119,6 @@ pub(crate) fn attempt_observation(
     reservation: Option<Reservation<'_>>,
     collector: &mut impl Collector,
 ) -> Result<ObservationOutcome, ObservationOwed> {
-    let Some(reservation) = reservation else {
-        return Ok(ObservationOutcome::NoReservation);
-    };
-    let observation = reservation.observation;
     hold.check_current()
         .map_err(|_| ObservationOwed::HoldUnavailable)?;
     let queue = hold
@@ -113,14 +127,55 @@ pub(crate) fn attempt_observation(
     let private = queue
         .private()
         .map_err(|_| ObservationOwed::HoldUnavailable)?;
+    let Some(reservation) = reservation else {
+        complete(private, None)?;
+        return Ok(ObservationOutcome::NoReservation);
+    };
+    let observation = reservation.observation;
     let attempt = ObservationAttempt::of(reservation);
-    match publish(private, &attempt)? {
-        Publication::Fresh => settle(collector.collect(observation), ObservationOutcome::Observed),
-        Publication::Resumed => settle(
-            collector.read_back(observation),
-            ObservationOutcome::Recognized,
-        ),
+    let outcome = match publish(private, ATTEMPT_NAME, &attempt)? {
+        Publication::Fresh => settle(collector.collect(observation), ObservationOutcome::Observed)?,
+        Publication::Resumed if completed(private)? => return Ok(ObservationOutcome::Recognized),
+        Publication::Resumed => resume(collector, observation)?,
+    };
+    complete(private, Some(checkpoint_id(observation)))?;
+    Ok(outcome)
+}
+
+/// A spent attempt without its completion: the boundary is looked up first,
+/// and collected only when nothing durable sits under it.
+fn resume(
+    collector: &mut impl Collector,
+    observation: &ReservedObservation,
+) -> Result<ObservationOutcome, ObservationOwed> {
+    match collector.read_back(observation) {
+        Collection::Missing => settle(collector.collect(observation), ObservationOutcome::Observed),
+        found => settle(found, ObservationOutcome::Recognized),
     }
+}
+
+/// The checkpoint the reserved boundary is stored under: the same id the
+/// normal boundary capture derives from the session, turn and edge.
+pub(crate) fn checkpoint_id(observation: &ReservedObservation) -> String {
+    let known = &observation.expectation.known_boundary;
+    let session_row = rift_shadow::ids::session_row_id(&known.agent, &known.native_session);
+    rift_shadow::ids::turn_boundary_snapshot_id(&session_row, known.turn_ordinal, &known.boundary)
+}
+
+fn completed(private: &Namespace) -> Result<bool, ObservationOwed> {
+    match record::read_private_record(private, COLLECTED_NAME, MAX_ATTEMPT_BYTES) {
+        Ok(_) => Ok(true),
+        Err(RecordError::Absent) => Ok(false),
+        Err(_) => Err(ObservationOwed::PublishFailed),
+    }
+}
+
+fn complete(private: &Namespace, checkpoint_id: Option<String>) -> Result<(), ObservationOwed> {
+    let done = ObservationCollected {
+        schema_version: 1,
+        checkpoint_id,
+    };
+    publish(private, COLLECTED_NAME, &done).map(|_| ())
 }
 
 fn settle(
@@ -135,23 +190,18 @@ fn settle(
 
 fn publish(
     private: &Namespace,
-    attempt: &ObservationAttempt,
+    name: &str,
+    value: &impl Serialize,
 ) -> Result<Publication, ObservationOwed> {
-    let bytes = serde_json::to_vec(attempt).map_err(|_| ObservationOwed::PublishFailed)?;
-    record::publish_private_record(
-        private,
-        ATTEMPT_NAME,
-        MAX_ATTEMPT_BYTES,
-        &bytes,
-        &mut |_| Ok(()),
-    )
-    .map_err(|error| match error {
-        RecordError::Unavailable => ObservationOwed::HoldUnavailable,
-        RecordError::Conflict => ObservationOwed::AttemptConflict,
-        RecordError::Failed | RecordError::Resource | RecordError::Absent => {
-            ObservationOwed::PublishFailed
-        }
-    })
+    let bytes = serde_json::to_vec(value).map_err(|_| ObservationOwed::PublishFailed)?;
+    record::publish_private_record(private, name, MAX_ATTEMPT_BYTES, &bytes, &mut |_| Ok(()))
+        .map_err(|error| match error {
+            RecordError::Unavailable => ObservationOwed::HoldUnavailable,
+            RecordError::Conflict => ObservationOwed::AttemptConflict,
+            RecordError::Failed | RecordError::Resource | RecordError::Absent => {
+                ObservationOwed::PublishFailed
+            }
+        })
 }
 
 #[cfg(test)]
