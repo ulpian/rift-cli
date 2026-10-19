@@ -773,14 +773,18 @@ mod tests {
         );
     }
 
-    /// The inherited-by-name lever ships at `observe`, reads `enforce` only
-    /// where written, and is never above the read lever it qualifies: a
+    /// The inherited-by-name lever ships at `enforce`, and is never above the read lever it qualifies: a
     /// family capped to `observe`, a repository at `off` and an unreadable
     /// file all hold it there or below.
     #[test]
     fn the_inherited_by_name_lever_is_never_above_the_read_lever() {
         let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
-        assert_eq!(shipped.inherit_by_name, Mode::Observe);
+        assert_eq!(shipped.inherit_by_name, Mode::Enforce);
+        assert_eq!(
+            resolve(&ServePolicy::default(), "codex", NO_CHANNEL).inherit_by_name,
+            Mode::Observe,
+            "the reason channel holds an unconfirmed family at observe"
+        );
         let (written, _d) = load_src("[interception]\ninherit_by_name = \"enforce\"\n");
         assert_eq!(
             resolve(&written.policy, "claude-code", FULL).inherit_by_name,
@@ -820,7 +824,7 @@ mod tests {
     #[test]
     fn a_per_lever_entry_enforces_one_lever_for_one_family_while_the_others_observe() {
         let (loaded, _d) = load_src(
-            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\ndecline_family_held = \"observe\"\n\n\
+            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\ndecline_family_held = \"observe\"\ninherit_by_name = \"observe\"\n\n\
              [interception.agents.claude-code]\nfirst_contact = \"enforce\"\n",
         );
         assert_eq!(loaded.source, ServePolicySource::Declared);
@@ -839,7 +843,7 @@ mod tests {
     #[test]
     fn a_per_lever_entry_overrides_the_family_wide_mode_for_that_lever_only() {
         let (loaded, _d) = load_src(
-            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\nnarrow = \"enforce\"\n\
+            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\ninherit_by_name = \"observe\"\nnarrow = \"enforce\"\n\
              decline_family_held = \"enforce\"\n\n\
              [interception.agents.antigravity]\nmode = \"enforce\"\nnarrow = \"off\"\n",
         );
@@ -907,7 +911,7 @@ mod tests {
                 Some(Mode::Off)
             );
             let (table, _d) = load_src(&format!(
-                "[interception]\nfirst_contact = \"observe\"\ndecline_family_held = \"observe\"\n\n\
+                "[interception]\nfirst_contact = \"observe\"\ndecline_family_held = \"observe\"\ninherit_by_name = \"observe\"\n\n\
                  [interception.agents.{family}]\nfirst_contact = \"enforce\"\n\
                  decline_family_held = \"enforce\"\ninherit_by_name = \"enforce\"\n\
                  narrow = \"enforce\"\n"

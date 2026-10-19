@@ -786,7 +786,7 @@ mod tests {
             Mode::Enforce,
             "a lever the line did not name is left as it was"
         );
-        assert_eq!(policy.interception.inherit_by_name, Mode::Observe);
+        assert_eq!(policy.interception.inherit_by_name, Mode::Enforce);
         assert_eq!(policy.interception.mode, Mode::Enforce);
         assert_eq!(policy.injection_turn_budget, 400);
         let text = std::fs::read_to_string(&written).unwrap();

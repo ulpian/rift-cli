@@ -202,7 +202,7 @@ The lever that declines a re-read of lines a context window already holds
 | `max_inline_hash_bytes` | `1048576` | Largest file hashed on the gate path. |
 | `recovery_budget` | `800` | Tokens a post-compaction recovery map may cost. |
 | `basis_ttl_days` | `30` | How long `rift clean` keeps a basis snapshot. |
-| `inherit_by_name` | `observe` | Decline on lines a subagent inherited because its prompt named the path. |
+| `inherit_by_name` | `enforce` | Decline on lines a subagent inherited because its prompt named the path. |
 | `first_contact` | `enforce` | Answer a window's first read of a large file once with its bound outline. |
 | `first_contact_min_lines` / `_min_bytes` | `400` / `16384` | "Large": either floor is enough. |
 | `narrow` | `observe` | Decline the held part of a read that overlaps lines this window holds, asking for the unheld range only. |
@@ -238,13 +238,13 @@ gives their reasons. The 1 MiB hash ceiling also bounds a basis snapshot: past i
 nothing is diffed, so keeping the bytes would buy no answer.
 
 `first_contact` answers the first read of a large file once with its bound
-outline ([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file))
-and `decline_family_held` declines once a read another live window holds,
+outline ([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)),
+`decline_family_held` declines once a read another live window holds,
 with a cheaper route ([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)),
-both by default, capped by the family's mode and channel as they cap `mode` itself.
-At `observe`, `inherit_by_name` records lines a subagent was *pointed at*
+and `inherit_by_name` declines on lines a subagent was *pointed at*
 ([07 §7.3](07-serving-and-injection.md#what-a-subagents-window-inherits)),
-`narrow` the held part of a partly held read it would have declined, and
+all by default, capped by the family's mode and channel as they cap `mode` itself.
+At `observe`, `narrow` records the held part of a partly held read it would have declined, and
 `recognise_by_output` the lines a shell result showed
 ([07 §7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)). No read is
 declined on any of them: each acts only where it is written `enforce`, and

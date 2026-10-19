@@ -165,9 +165,8 @@ or **Decline**, once, with a reason the model reads.
 `[interception.agents]` entry replaces that `mode` for its family, and the
 family's pinned reason channel still caps the result (the per-client caps are in
 [10 §10.7](10-agent-integrations.md#107-deterministic-context-delivery)).
-`first_contact` and `decline_family_held` default to `enforce`;
-`inherit_by_name` defaults to `observe`; each never exceeds the family's
-resolved mode. The table is in
+`first_contact`, `decline_family_held` and `inherit_by_name` default to
+`enforce`, and each never exceeds the family's resolved mode. The table is in
 [02 §2.6](02-configuration.md#the-read-gate-interception); `rift recall status`
 prints each lever's effective mode per family.
 

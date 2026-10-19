@@ -273,8 +273,9 @@ pub struct InterceptionPolicy {
     pub basis_ttl_days: u32,
     /// How far a decline may rest on lines a subagent's window inherited
     /// because its spawning prompt named the path. Never above the read lever
-    /// it qualifies, and `observe` until its own pool says otherwise: the
-    /// window was pointed at those bytes, not handed them.
+    /// it qualifies, and `enforce` by default: its observe pool passed its
+    /// flip gate (owner ruling 2026-10-19); the window was pointed at those
+    /// bytes, not handed them, so an unconfirmed channel still only observes.
     pub inherit_by_name: Mode,
     /// Answering the first read of a large file in a window with the file's
     /// bound outline, once. Never above the read lever, and `enforce` by
@@ -317,7 +318,7 @@ impl Default for InterceptionPolicy {
             max_inline_hash_bytes: DEFAULT_MAX_INLINE_HASH_BYTES,
             recovery_budget: DEFAULT_RECOVERY_BUDGET,
             basis_ttl_days: DEFAULT_BASIS_TTL_DAYS,
-            inherit_by_name: Mode::Observe,
+            inherit_by_name: Mode::Enforce,
             first_contact: Mode::Enforce,
             narrow: Mode::Observe,
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
