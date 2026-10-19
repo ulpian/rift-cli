@@ -38,7 +38,7 @@ use super::TableCount;
 
 /// The relations read back, in the order the report prints them: the two
 /// serve relations, then their companions.
-const RECALL_TABLES: [&str; 7] = [
+const RECALL_TABLES: [&str; 8] = [
     "memd_audit_event",
     "serve_call_event",
     "serve_session_event",
@@ -46,6 +46,7 @@ const RECALL_TABLES: [&str; 7] = [
     "serve_grant_event",
     "memd_audit_session",
     "memd_audit_pull_claim",
+    "memd_audit_would_save",
 ];
 
 /// The source's attribution rows, by the serve key each names.
@@ -188,8 +189,8 @@ async fn source_attributions(
         .collect()
 }
 
-/// Every decision row, oldest first, with its claim where the source holds
-/// one, through the appender.
+/// Every decision row, oldest first, with its claim and its would-save
+/// figure where the source holds them, through the appender.
 async fn replay_decisions(
     store: &impl CanonicalStore,
     source: &SqliteStore,
@@ -198,15 +199,28 @@ async fn replay_decisions(
 ) -> Result<()> {
     // A source set aside before claims were recorded has no claim relation;
     // its decisions read as claiming nothing, which is what they booked.
-    let claims = if present.contains("memd_audit_pull_claim") {
-        "c.stated_count, c.recorded_count, c.basis FROM memd_audit_event e \
-         LEFT JOIN memd_audit_pull_claim c ON c.audit_id = e.audit_id"
+    let (claims, claim_join) = if present.contains("memd_audit_pull_claim") {
+        (
+            "c.stated_count, c.recorded_count, c.basis",
+            "LEFT JOIN memd_audit_pull_claim c ON c.audit_id = e.audit_id",
+        )
     } else {
-        "NULL, NULL, NULL FROM memd_audit_event e"
+        ("NULL, NULL, NULL", "")
+    };
+    // Likewise a source older than the would-save relation: its decisions
+    // read as carrying no figure, so no would-save row is written for them.
+    let (would_save, would_save_join) = if present.contains("memd_audit_would_save") {
+        (
+            "w.would_save_bytes",
+            "LEFT JOIN memd_audit_would_save w ON w.audit_id = e.audit_id",
+        )
+    } else {
+        ("NULL", "")
     };
     let sql = format!(
         "SELECT e.audit_id, e.verb, e.handle, e.reason, e.tokens_returned, \
-         e.tokens_avoided, e.recorded_at, {claims} ORDER BY e.recorded_at, e.audit_id"
+         e.tokens_avoided, e.recorded_at, {claims}, {would_save} FROM memd_audit_event e \
+         {claim_join} {would_save_join} ORDER BY e.recorded_at, e.audit_id"
     );
     let rows = source.query(&sql, &[]).await?;
     for row in &rows {
@@ -220,8 +234,9 @@ async fn replay_decisions(
 
 /// The schema-1 envelope that books exactly this decision row: the appender
 /// writes `handle`, `reason` and the two estimates from the payload, the
-/// claim row from `pull_claim` spelled as the live envelope spells it, and
-/// the instant from the clock it is handed.
+/// claim row from `pull_claim` spelled as the live envelope spells it, the
+/// would-save row from `would_save_bytes`, and the instant from the clock it
+/// is handed.
 fn decision_envelope(audit_id: &str, row: &Row) -> Result<Vec<u8>> {
     let mut payload = serde_json::json!({
         "handle": row.get_opt_text(2)?,
@@ -236,6 +251,9 @@ fn decision_envelope(audit_id: &str, row: &Row) -> Result<Vec<u8>> {
             "basis": basis,
         });
         members.insert("pull_claim".to_owned(), claim);
+    }
+    if let (Some(bytes), Some(members)) = (row.get_opt_i64(10)?, payload.as_object_mut()) {
+        members.insert("would_save_bytes".to_owned(), bytes.into());
     }
     let envelope = serde_json::json!({
         "schema": 1,
@@ -404,7 +422,7 @@ mod tests {
 
     const AT: i64 = 1_790_856_000_000;
 
-    /// Every row of the seven relations, as text, sorted: two projections hold
+    /// Every row of the eight relations, as text, sorted: two projections hold
     /// the same rows exactly when these are equal.
     async fn every_row(store: &impl CanonicalStore) -> Vec<String> {
         let mut out = Vec::new();
@@ -452,6 +470,10 @@ mod tests {
             .await
             .unwrap();
         book(&store, &claimed_pull(), "call-pull", AT + 4, None).await;
+        let folded = MemdEvent::ToolOutputFolded {
+            would_save_bytes: 740,
+        };
+        book(&store, &folded, "call-fold", AT + 5, None).await;
     }
 
     /// A pull whose caller named four held revisions, one of them read here.
@@ -497,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_row_of_the_seven_relations_comes_back_and_a_second_run_inserts_none() {
+    async fn every_row_of_the_eight_relations_comes_back_and_a_second_run_inserts_none() {
         let tmp = tempfile::tempdir().unwrap();
         let source_path = tmp.path().join("recall.db.set-aside-20261001T120000Z");
         seed_source(&source_path).await;
@@ -538,13 +560,14 @@ mod tests {
         assert_eq!(
             read,
             [
-                ("memd_audit_event", 5, 0),
-                ("serve_call_event", 4, 0),
+                ("memd_audit_event", 6, 0),
+                ("serve_call_event", 5, 0),
                 ("serve_session_event", 1, 0),
                 ("memd_audit_citation", 1, 0),
                 ("serve_grant_event", 1, 0),
                 ("memd_audit_session", 2, 0),
                 ("memd_audit_pull_claim", 1, 0),
+                ("memd_audit_would_save", 1, 0),
             ]
         );
         assert_eq!(sha256_of(&source_path), record);
@@ -585,10 +608,40 @@ mod tests {
                 ("serve_grant_event", 0, 0),
                 ("memd_audit_session", 2, 2),
                 ("memd_audit_pull_claim", 0, 0),
+                ("memd_audit_would_save", 0, 0),
             ]
         );
         let again = import_recall_from(&target, &source_path).await.unwrap();
         assert!(again.iter().all(|t| t.inserted == 0), "{again:?}");
+    }
+
+    /// A projection set aside at v18, before would-save figures were kept,
+    /// imports its serves and its claim and reads no would-save row.
+    #[tokio::test]
+    async fn a_v18_source_imports_with_no_would_save_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("recall.db.set-aside-20261001T120000Z");
+        let source = open_migrated(&source_path, &recall_migrations()[..18]).unwrap();
+        book(&source, &claimed_pull(), "call-pull", AT, None).await;
+        assert!(source.count("memd_audit_would_save").await.is_err());
+        drop(source);
+        let target = recall_target(tmp.path());
+
+        let first = import_recall_from(&target, &source_path).await.unwrap();
+
+        let tail: Vec<(&str, usize, usize)> = first
+            .iter()
+            .skip(6)
+            .map(|t| (t.table, t.read, t.inserted))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                ("memd_audit_pull_claim", 1, 1),
+                ("memd_audit_would_save", 0, 0),
+            ]
+        );
+        assert_eq!(first.first().map(|t| t.inserted), Some(1));
     }
 
     #[tokio::test]
