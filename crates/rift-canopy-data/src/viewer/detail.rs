@@ -23,6 +23,7 @@ use super::catalogue::{
 };
 use super::diff::diff_items;
 use super::lifecycle::lifecycle_segment;
+use super::seal::turn_seal_segment;
 use super::text::{compact_utc, fact_line, list_or, short, warning_item};
 use super::transcript::transcript_segment;
 use super::{open_existing_read_only, query_count};
@@ -56,6 +57,7 @@ pub(super) fn build_detail(
         &substrate,
         entry.anchor_commit.as_deref(),
     ));
+    segments.extend(member_sessions(project).and_then(|dir| turn_seal_segment(&dir, entry)));
     segments.push(transcript_segment(&substrate, entry));
     segments.push(assembly_segment(
         project,
@@ -70,6 +72,16 @@ pub(super) fn build_detail(
         segments,
         notice: None,
     })
+}
+
+/// The sessions directory of the member `project` checks out; `None`
+/// outside a repository, where no turn seal can have been recorded.
+fn member_sessions(project: &Path) -> Option<std::path::PathBuf> {
+    let paths = rift_git::discover(project).ok()?;
+    Some(crate::session::member_sessions(
+        &paths.git_dir,
+        &paths.work_tree,
+    ))
 }
 
 fn checkpoint_summary_segment(

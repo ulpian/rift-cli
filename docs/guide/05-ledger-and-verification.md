@@ -426,6 +426,9 @@ native passes.
   rebuild derives the projection from git, so if git changed it agrees with the
   change. The message names the checkpoint. If only the projection drifted, deleting
   `projection.db` and running `rift rebuild` restores agreement safely.
+- **Doctor's `turn_seals`, "segment-mismatch" or "lagging":** not a verify finding.
+  A mismatch means the session end's whole seal already replaced the turn parts.
+  A lag means turn-end seals stopped landing, so look at the worker's parked jobs (`rift session retry`, [§3.10](03-capture.md#310-the-detached-worker)).
 
 ---
 

@@ -246,6 +246,7 @@ set up.
 the dashboard. Column 2 is the checkpoint catalogue; column 3 the selected checkpoint's
 expandable timeline: summary, durable Recall state, the redacted transcript slice
 and the assembly (files carried, with recorded hunks).
+A checkpoint whose sessions sealed turns adds a **Turn seal** card: per session, the last turn-end seal's frontier, the lag of the live transcript past it, and whether a newer turn-end checkpoint holds a fresher transcript ([§3.7](03-capture.md#37-from-session-to-checkpoint-the-condense)).
 
 | Key | Does |
 |---|---|

@@ -613,6 +613,35 @@ mod tests {
         assert!(item_text(&task).contains("nested result"));
     }
 
+    /// A turn-end seal stores its transcript as parts, one per turn, with no
+    /// anchor commit. The viewer reads both forms through the substrate's one
+    /// resolver, so the joined parts show as one transcript.
+    #[test]
+    fn a_segmented_turn_end_checkpoint_shows_its_joined_transcript() {
+        let mut checkpoint = entry("turn", &"a".repeat(40));
+        checkpoint.anchor_commit = None;
+        checkpoint.metadata.compact_transcript_start = Some(0);
+        let meta = br#"{"strategy":"turn-end","compact_transcript_start":0,"transcript_segments":2,"segment_raw_lines":[1,1],"transcript_compact_segments":2}"#;
+        let first = b"{\"type\":\"user\",\"content\":\"first turn\"}\n";
+        let second = b"{\"type\":\"assistant\",\"content\":\"second turn\"}\n";
+        let substrate = MemorySubstrate::local()
+            .with_artifact("turn", "metadata.json", meta)
+            .with_artifact("turn", "transcript.segments/000000", first)
+            .with_artifact("turn", "transcript.segments/000001", second)
+            .with_artifact("turn", "transcript.compact.segments/000000", first)
+            .with_artifact("turn", "transcript.compact.segments/000001", second);
+        assert_eq!(
+            transcript_excerpt(&substrate, "turn").as_deref(),
+            Some("second turn")
+        );
+        let segment = transcript_segment(&substrate, &checkpoint);
+        let texts: Vec<String> = segment.items.iter().map(item_text).collect();
+        assert!(texts.iter().any(|t| t.contains("first turn")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("second turn")), "{texts:?}");
+        let search = transcript_search_text(&substrate, &checkpoint).unwrap_or_default();
+        assert!(search.contains("first turn") && search.contains("second turn"));
+    }
+
     #[test]
     fn compact_boundary_uses_physical_lines_even_when_a_prior_record_is_corrupt() {
         let mut checkpoint = entry("checkpoint", &"a".repeat(40));

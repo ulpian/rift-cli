@@ -264,6 +264,14 @@ CREATE TABLE n_checkpoint_commit (
   PRIMARY KEY (node_id)
 ) STRICT
 
+-- table n_checkpoint_observed_head
+CREATE TABLE n_checkpoint_observed_head (
+  node_id TEXT NOT NULL,
+  observed_head TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
 -- table n_checkpoint_worktree
 CREATE TABLE n_checkpoint_worktree (
   node_id TEXT NOT NULL,
@@ -539,6 +547,12 @@ CREATE TRIGGER n_checkpoint_no_delete BEFORE DELETE ON n_checkpoint BEGIN SELECT
 
 -- trigger n_checkpoint_no_update
 CREATE TRIGGER n_checkpoint_no_update BEFORE UPDATE ON n_checkpoint BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint is append-only (UPDATE forbidden)'); END
+
+-- trigger n_checkpoint_observed_head_no_delete
+CREATE TRIGGER n_checkpoint_observed_head_no_delete BEFORE DELETE ON n_checkpoint_observed_head BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_observed_head is append-only (DELETE forbidden)'); END
+
+-- trigger n_checkpoint_observed_head_no_update
+CREATE TRIGGER n_checkpoint_observed_head_no_update BEFORE UPDATE ON n_checkpoint_observed_head BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_observed_head is append-only (UPDATE forbidden)'); END
 
 -- trigger n_checkpoint_worktree_no_delete
 CREATE TRIGGER n_checkpoint_worktree_no_delete BEFORE DELETE ON n_checkpoint_worktree BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_worktree is append-only (DELETE forbidden)'); END

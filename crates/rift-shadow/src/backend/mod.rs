@@ -43,7 +43,7 @@ use rift_git::{GitIdent, MemoryGitWrite, NativeGitWrite};
 pub use archive::{
     sessions_jsonl_bytes, tool_calls_jsonl_bytes, usage_jsonl_bytes, ArchivedEvent,
     ArchivedReadFact, ArchivedTask, ArchivedTranscript, ArchivedUsageFact, CheckpointArchive,
-    RedactionFallback, RedactionReportView, WorktreeLabel, SESSIONS_SCHEMA_VERSION,
+    Reconciliation, RedactionFallback, RedactionReportView, WorktreeLabel, SESSIONS_SCHEMA_VERSION,
     USAGE_SCHEMA_VERSION,
 };
 // The bridge's round-trip test pins `parse(format(ms)) == ms`; nothing else
@@ -57,7 +57,9 @@ pub use leaves::{
     ShardLeafBytes, SpillLeafBytes, TaskLeafBytes,
 };
 pub use originals::{ArchivedOriginal, OriginalState, ORIGINALS_DIR, ORIGINAL_SUFFIX};
-pub use segments::{CarriedPart, SegmentPart, Segments, TranscriptBody};
+pub use segments::{
+    segment_fallbacks, CarriedPart, SegmentPart, Segments, TranscriptBody, SEGMENT_FALLBACK_KEY,
+};
 pub use spills::{ArchivedSpill, SpillState, SPILLS_DIR, SPILL_SUFFIX};
 pub use spool::{parse_spool_record, SpoolHeader, SPOOL_RECORD_VERSION};
 pub use tasks::{TaskProvenance, TaskTranscriptState, TaskWorktree};

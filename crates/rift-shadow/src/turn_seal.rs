@@ -26,8 +26,15 @@ use rift_shadow_redact::{RedactionOutput, RulePackSet};
 
 use crate::backend::{CarriedPart, RedactionFallback, Segments, TranscriptBody};
 
+mod compact;
+pub use compact::{seal_turn_compact, CompactCarry, CompactCut, CompactSeal};
+
 /// The finding a refused chain records, naming the checkpoint it read back.
 pub const SEGMENT_CHAIN_BROKEN: &str = "segment-chain-broken";
+
+/// The finding a session end records when its whole seal differs from the
+/// turn-end parts, so the whole seal was written in their place.
+pub const SEGMENT_MISMATCH: &str = "segment-mismatch";
 
 /// What the previous checkpoint recorded of its full transcript, read back
 /// from its shard tree.
@@ -41,6 +48,9 @@ pub struct PriorChain {
     /// Its `segment_packs` member: the fingerprint of the packs its parts
     /// were sealed under, `None` where it records none.
     pub packs: Option<String>,
+    /// Its `segment_redaction_fallback` member, one entry per part; empty
+    /// where it records none.
+    pub fallbacks: Vec<RedactionFallback>,
 }
 
 /// One earlier part: the blob oid its tree entry names, and the bytes read
@@ -67,13 +77,23 @@ pub enum ChainBreak {
     /// The parts were sealed under another pack set, or name none: carrying
     /// them would keep bytes the current rules never produced.
     PacksChanged,
+    /// At a session end, the parts' concatenation differs from the whole file
+    /// sealed once (design §3.4): the whole seal supersedes them.
+    SegmentMismatch,
 }
 
 impl ChainBreak {
     /// The doctor finding's name; the reason is the variant, never bytes.
     #[must_use]
     pub fn finding(self) -> &'static str {
-        SEGMENT_CHAIN_BROKEN
+        match self {
+            Self::SegmentMismatch => SEGMENT_MISMATCH,
+            Self::LineCount
+            | Self::LeafMismatch
+            | Self::Truncated
+            | Self::OidMismatch
+            | Self::PacksChanged => SEGMENT_CHAIN_BROKEN,
+        }
     }
 }
 
@@ -116,35 +136,158 @@ pub fn seal_turn(
     seal_turn_through(raw, prior, packs, &mut gate)
 }
 
-/// The gate as `seal_turn_through` calls it: bytes and their first line.
-type Gate<'a> = dyn FnMut(&SecretBytes, usize) -> Result<RedactionOutput> + 'a;
+/// The gate as [`seal_turn_through`] calls it: bytes and their first line.
+pub type Gate<'a> = dyn FnMut(&SecretBytes, usize) -> Result<RedactionOutput> + 'a;
 
-/// [`seal_turn`] over an injected gate, so a test can count what enters it.
-fn seal_turn_through(
+/// [`seal_turn`] over an injected gate, so a test — here or in a caller's
+/// crate — can count what enters it. Production passes the real gate through
+/// [`seal_turn`]; nothing else should call this.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the gate returns one.
+pub fn seal_turn_through(
     raw: &SecretBytes,
     prior: Option<PriorChain>,
     packs: &RulePackSet,
     gate: &mut Gate<'_>,
 ) -> Result<TurnSeal> {
+    seal_through(raw, prior, packs, gate, Cut::Admitted)
+}
+
+/// Seal what a session's turn-end seals left, at its end: every complete
+/// line past the frontier, through the end of the file. A turn end holds its
+/// newest line back until a later line admits the cut; at the session's end
+/// no later line will come, so the tail is sealed whole. With nothing past
+/// the frontier the earlier parts alone are carried, so no turn-end
+/// checkpoint's content passes the gate again. A refused chain reseals the
+/// whole file, exactly as a turn end does.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the gate returns one.
+pub fn seal_session_end_through(
+    raw: &SecretBytes,
+    prior: Option<PriorChain>,
+    packs: &RulePackSet,
+    gate: &mut Gate<'_>,
+) -> Result<TurnSeal> {
+    seal_through(raw, prior, packs, gate, Cut::EndOfFile)
+}
+
+/// Check a session end's parts against the whole file sealed once through
+/// the gate (design §3.4), paid once per session. Equal bytes keep the parts;
+/// any difference returns the whole seal in their place, named
+/// [`ChainBreak::SegmentMismatch`], so the final checkpoint holds what the
+/// whole file seals to and the earlier checkpoints stay as written. A seal
+/// that wrote no parts, or already resealed whole, is returned as it came.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the gate returns one.
+pub fn reconcile_session_end(
+    raw: &SecretBytes,
+    seal: TurnSeal,
+    packs: &RulePackSet,
+) -> Result<TurnSeal> {
+    let TurnSeal::Appended { body, .. } = &seal else {
+        return Ok(seal);
+    };
+    let whole = rift_shadow_redact::redact_with(raw, packs)?;
+    if whole.redacted.as_slice() == body.as_slice() {
+        return Ok(seal);
+    }
+    Ok(TurnSeal::Whole {
+        fallback: RedactionFallback::of(&[&whole.report]),
+        body: TranscriptBody::Whole(whole.redacted),
+        broken: ChainBreak::SegmentMismatch,
+    })
+}
+
+/// Where the new part ends.
+#[derive(Clone, Copy)]
+enum Cut {
+    /// At the last cut R1 admits with a line after it: a turn end.
+    Admitted,
+    /// At the last complete line: a session end, after which nothing grows.
+    EndOfFile,
+}
+
+/// The seal both entries share; `rule` decides only where the new part ends.
+fn seal_through(
+    raw: &SecretBytes,
+    prior: Option<PriorChain>,
+    packs: &RulePackSet,
+    gate: &mut Gate<'_>,
+    rule: Cut,
+) -> Result<TurnSeal> {
     let lines = complete_lines(raw.as_slice());
     let fingerprint = packs.fingerprint();
+    let carried_counts = prior
+        .as_ref()
+        .map(|c| c.fallbacks.clone())
+        .unwrap_or_default();
     let earlier = match prior.map(|chain| read_back(chain, lines.len(), &fingerprint)) {
         None => Vec::new(),
         Some(Ok(parts)) => parts,
         Some(Err(broken)) => return whole_reseal(raw, broken, gate),
     };
     let frontier = covered(&earlier);
-    let Some(cut) = last_admitted_cut(&lines, frontier, packs) else {
-        return Ok(TurnSeal::Unchanged);
+    let cut = match rule {
+        Cut::Admitted => last_admitted_cut(&lines, frontier, packs),
+        Cut::EndOfFile => (lines.len() > frontier).then_some(lines.len()),
+    };
+    let Some(cut) = cut else {
+        return nothing_new(rule, earlier, carried_counts, frontier, fingerprint);
     };
     let delta: Vec<u8> = lines.get(frontier..cut).unwrap_or_default().concat();
     let out = gate(&SecretBytes::new(delta), frontier)?;
     let fallback = RedactionFallback::of(&[&out.report]);
+    let counts = per_part_counts(carried_counts, earlier.len(), fallback);
+    let segments =
+        Segments::carrying(earlier, out.redacted, fingerprint)?.with_fallbacks(counts)?;
     Ok(TurnSeal::Appended {
-        body: TranscriptBody::Segments(Segments::carrying(earlier, out.redacted, fingerprint)?),
+        body: TranscriptBody::Segments(segments),
         document_lines: u64::try_from(cut).unwrap_or(u64::MAX),
         fallback,
     })
+}
+
+/// No line past the frontier. A turn end records nothing new; a session end
+/// carries every earlier part as its final body, so it seals nothing again.
+fn nothing_new(
+    rule: Cut,
+    earlier: Vec<CarriedPart>,
+    carried_counts: Vec<RedactionFallback>,
+    frontier: usize,
+    fingerprint: String,
+) -> Result<TurnSeal> {
+    if matches!(rule, Cut::Admitted) || earlier.is_empty() {
+        return Ok(TurnSeal::Unchanged);
+    }
+    let counts = if carried_counts.len() == earlier.len() {
+        carried_counts
+    } else {
+        vec![RedactionFallback::default(); earlier.len()]
+    };
+    let segments = Segments::carried(earlier, fingerprint)?.with_fallbacks(counts)?;
+    Ok(TurnSeal::Appended {
+        body: TranscriptBody::Segments(segments),
+        document_lines: u64::try_from(frontier).unwrap_or(u64::MAX),
+        fallback: RedactionFallback::default(),
+    })
+}
+
+/// The earlier parts' recorded counts, then this turn's. A previous shard
+/// that recorded none, or not one per part, counts each carried part as zero:
+/// the parts are still sound, and the whole pair's own member keeps the total.
+fn per_part_counts(
+    mut carried: Vec<RedactionFallback>,
+    earlier: usize,
+    new: RedactionFallback,
+) -> Vec<RedactionFallback> {
+    if carried.len() != earlier {
+        carried = vec![RedactionFallback::default(); earlier];
+    }
+    carried.push(new);
+    carried
 }
 
 /// Check the earlier parts and admit each by its recorded blob oid.
