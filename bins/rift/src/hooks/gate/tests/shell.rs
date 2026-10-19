@@ -116,7 +116,7 @@ fn a_narrower_run_of_held_lines_is_declined_on_its_own_account() {
     );
     assert_eq!(
         shell.kinds("s-codex"),
-        vec!["read", "deny", "read", "deny"],
+        vec!["read", "deny", "call", "read", "deny", "call"],
         "the record the walk left behind"
     );
 }
@@ -135,7 +135,7 @@ fn a_whole_file_command_line_covers_the_file_and_is_declined_once() {
     assert_eq!(shell.deny_reason_for("s-cat", &command), None);
     assert!(shell.deny_reason_for("s-cat", &command).is_some());
     assert_eq!(shell.deny_reason_for("s-cat", &command), None);
-    assert_eq!(shell.kinds("s-cat"), vec!["read", "deny", "read"]);
+    assert_eq!(shell.kinds("s-cat"), vec!["read", "deny", "call", "read"]);
 }
 
 /// ★ **A command line that reads several files is one act, and is
@@ -334,7 +334,7 @@ fn repository_wide_enforce_reaches_codex_despite_retry_telemetry() {
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        vec!["read", "deny"],
+        vec!["read", "deny", "call"],
         "the repeat is declined once"
     );
 

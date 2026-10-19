@@ -13,6 +13,7 @@
 //! read an announcement made unnecessary ([`prevented`]).
 
 mod answer;
+mod calls;
 mod delivery;
 mod family;
 mod file;
@@ -39,6 +40,7 @@ use super::ingest::edit_record;
 
 pub(in crate::hooks) use self::answer::GateOutcome;
 pub(crate) use self::answer::AUDIT_IDS;
+pub(in crate::hooks) use self::calls::{record_emission, Decline};
 pub(crate) use self::file::payload_cwd;
 pub(in crate::hooks) use self::file::{gate_file, gate_rel_path};
 pub(in crate::hooks) use self::linehash_cache::{linehash_cache_dir, linehash_cache_name};
@@ -84,7 +86,7 @@ pub(in crate::hooks) fn window_journal_step(
     raw: &rift_shadow::hooks::RawHook,
     git_dir: &Path,
     work_tree: &Path,
-    decline: &mut Option<String>,
+    decline: &mut Decline,
     document: &mut Option<DocAnswer>,
     search: &mut Option<crate::search_gate::SearchAnswer>,
 ) -> (AdapterRegistry, bool, Option<serde_json::Value>) {
@@ -147,7 +149,10 @@ pub(in crate::hooks) fn window_journal_step(
     // Handed back the moment it is known, and before the ingest below can
     // fail: the decline is already a line of the window's journal, so the
     // answer the agent gets says the same thing whatever becomes of the rest.
-    *decline = outcome.deny_reason;
+    *decline = Decline {
+        reason: outcome.deny_reason,
+        receipt: outcome.receipt,
+    };
     (
         registry,
         outcome.journaled || documents.journaled || searches.journaled || prevented,
@@ -265,20 +270,16 @@ pub(in crate::hooks) fn read_gate(
         journal_eviction(&journal, reason, turn, at_ms);
         return quiet;
     }
-    // What the result says about its own delivery, read before the journal is
-    // consulted because it is three field lookups and it decides whether a
-    // result with no decline behind it is work at all. A statement either way
-    // is work: one that names less than the record claims takes lines back,
-    // and one that names the call answered in full is the only evidence a
-    // delivery too large for the size rule can ever have.
-    let stated = match step {
-        GateStep::CrossCheck => stated_delivery(&raw.agent, &raw.payload),
-        _ => None,
+    let window = calls::Window {
+        work_tree,
+        session: &raw.session,
+        child: facts.child_session.as_deref(),
+        turn,
+        at_ms,
     };
-    let held = journal.load().journal;
-    if cross_check_is_idle(&step, stated, &held) {
+    let Some((stated, held)) = cross_check_step(&step, raw, &window, &journal) else {
         return quiet;
-    }
+    };
     // Every read the call performs, not just its first. One shell command
     // line is routinely several — `cd <dir> && cat a && cat b` is one call
     // and three facts — and a member left out of this list is a read the
@@ -287,13 +288,12 @@ pub(in crate::hooks) fn read_gate(
     if requests.is_empty() {
         return quiet;
     }
-    let window_key = crate::window_journal::key(&raw.session, facts.child_session.as_deref());
     let pass = GatePass {
         step,
         git_dir,
         held: &held,
         journal: &journal,
-        window_key: &window_key,
+        window_key: &crate::window_journal::key(&raw.session, window.child),
         stated,
         limits: gate_limits(effective),
         turn,
@@ -304,10 +304,48 @@ pub(in crate::hooks) fn read_gate(
     let mut members =
         gate_decide_members(raw, work_tree, cwd.as_deref(), effective, &pass, &requests);
     let deny_reason = settle_whole_call(&mut members, requests.len());
+    let journaled = gate_record_members(git_dir, work_tree, raw, &members, &pass);
+    let receipt = deny_reason
+        .is_some()
+        .then(|| calls::plan_decline(&window, &journal, &raw.payload));
     GateOutcome {
-        journaled: gate_record_members(git_dir, work_tree, raw, &members, &pass),
+        journaled,
         deny_reason,
+        receipt,
     }
+}
+
+/// Read what a result states about its own delivery, load the journal, and
+/// record the call as applied; `None` when nothing is left for the gate to do.
+///
+/// A step of its own because it is the one place a tool *result* meets the
+/// journal before any member is decided. The statement is read first because
+/// it is three field lookups and it decides whether a result with no decline
+/// behind it is work at all. A statement either way is work: one that names
+/// less than the record claims takes lines back, and one that names the call
+/// answered in full is the only evidence a delivery too large for the size
+/// rule can ever have.
+fn cross_check_step(
+    step: &GateStep,
+    raw: &rift_shadow::hooks::RawHook,
+    window: &calls::Window<'_>,
+    journal: &crate::window_journal::WindowJournal,
+) -> Option<(
+    Option<rift_agent::window_journal::StatedDelivery>,
+    rift_agent::window_journal::Journal,
+)> {
+    let stated = match step {
+        GateStep::CrossCheck => stated_delivery(&raw.agent, &raw.payload),
+        _ => None,
+    };
+    let held = journal.load().journal;
+    if matches!(step, GateStep::CrossCheck) {
+        calls::record_applied(window, journal, &held, &raw.payload);
+    }
+    if cross_check_is_idle(step, stated, &held) {
+        return None;
+    }
+    Some((stated, held))
 }
 
 /// Write the line that says this window has stopped holding what it was given.
