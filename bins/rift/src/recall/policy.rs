@@ -61,7 +61,10 @@ pub(crate) fn family_capability(
                     forms.contains(&RewriteForm::DocumentSidecarPath);
                 capability.grep_head_limit_rewrite |= forms.contains(&RewriteForm::GrepHeadLimit);
             }
-            Channel::AdditionalContext { .. } | Channel::InjectSteps { .. } | Channel::Neutral => {}
+            Channel::AdditionalContext { .. }
+            | Channel::InjectSteps { .. }
+            | Channel::UpdatedToolOutput { .. }
+            | Channel::Neutral => {}
         }
     }
     capability.pinned_edit_echo = PINNED_EDIT_ECHO.iter().any(|(family, _)| family == agent);

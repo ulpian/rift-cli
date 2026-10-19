@@ -202,6 +202,9 @@ fn permitted_fields(agent: &AgentId, verb: &str) -> Vec<&'static str> {
                     reason_field,
                 ]);
             }
+            Channel::UpdatedToolOutput { .. } => {
+                fields.extend(["hookSpecificOutput", "hookEventName", "updatedToolOutput"]);
+            }
             Channel::UpdatedInput { .. } => {
                 fields.extend([
                     "hookSpecificOutput",

@@ -56,7 +56,8 @@ pub use format::{fmt_count, fmt_km};
 pub use recall::{recall_headline_rect, RecallView};
 pub use recall_period::{recall_window_buttons, RecallWindow, RecallWindowButton, WindowCut};
 pub use savings::{
-    savings_share_lines, usd_breakdown_lines, FamilyShareRow, SavingsData, ShareData, UsdRow,
+    savings_share_lines, usd_breakdown_lines, FamilyShareRow, SavingsData, ShareData,
+    ToolOutputClassCounts, ToolOutputCounts, UsdRow,
 };
 pub use system::{ActiveSessionsView, NicReading, NicView, PanelMetrics, SystemScope};
 pub use tokens::{token_total_rect, BreakdownData, BreakdownView, TokensData, TokensView};

@@ -25,6 +25,7 @@
 use rift_core::{AgentId, CanonicalEvent, EventKind, Sha256Id, Trust};
 
 pub mod conformance;
+pub mod fold;
 pub mod respond;
 pub mod settle;
 pub mod shell_read;

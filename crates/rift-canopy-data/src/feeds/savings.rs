@@ -5,7 +5,8 @@
 use std::path::Path;
 
 use rift_canopy::col3::{
-    FamilyShareRow, RecallView, RecallWindow, SavingsData, ShareData, UsdRow, WorktreeAxis,
+    FamilyShareRow, RecallView, RecallWindow, SavingsData, ShareData, ToolOutputClassCounts,
+    ToolOutputCounts, UsdRow, WorktreeAxis,
 };
 use rift_canopy::{FeedPayload, FeedUpdate};
 use rift_shadow_cost::{
@@ -158,6 +159,15 @@ fn read_savings_share(root: &Path, path: &str, card: &CardWindow) -> ShareData {
     )) else {
         return ShareData::default();
     };
+    // Beside the share: a projection that cannot say draws no line, which is
+    // what a window with no tool-output row draws too.
+    let tool_output = rt
+        .block_on(rift_recall_ledger::savings::tool_output_totals(
+            &recall,
+            card.cut_ms(),
+        ))
+        .map(|t| tool_output_counts(&t))
+        .unwrap_or_default();
     ShareData {
         window: card.label(),
         overall: savings.share(),
@@ -172,6 +182,7 @@ fn read_savings_share(root: &Path, path: &str, card: &CardWindow) -> ShareData {
         claimed_pulls: savings.claimed_by_pulls.decisions,
         claimed_avoided: savings.claimed_by_pulls.tokens_avoided,
         claimed_returned: savings.claimed_by_pulls.tokens_returned,
+        tool_output,
         families: savings
             .families
             .iter()
@@ -185,6 +196,19 @@ fn read_savings_share(root: &Path, path: &str, card: &CardWindow) -> ShareData {
             .collect(),
     }
 }
+/// The ledger's tool-output totals in the card's own counts.
+fn tool_output_counts(t: &rift_recall_ledger::savings::ToolOutputTotals) -> ToolOutputCounts {
+    let class = |c: &rift_recall_ledger::savings::ToolOutputClass| ToolOutputClassCounts {
+        would_save: c.observed,
+        acted: c.acted,
+        avoided: c.avoided,
+    };
+    ToolOutputCounts {
+        held: class(&t.held),
+        folded: class(&t.folded),
+    }
+}
+
 /// One model's share of the observed input-token mix, with its resolved
 /// uncached-input rate (micro-USD per MTok; `None` = no seeded price).
 struct MixShare {

@@ -332,6 +332,7 @@ fn declared(kind: &str) -> Option<&'static [(&'static str, Member)]> {
         "read_repeat_observed" => &[FILE, REASON],
         "read_prevented" => &[FILE, REASON, AVOIDED],
         "tool_output_held" => &[FILE, ("would_save_bytes", Member::Count)],
+        "tool_output_folded" => &[("would_save_bytes", Member::Count)],
         "search_answered" => &[REASON, RETURNED, AVOIDED],
         "grep_capped" => &[("handle", GrepHandle)],
         "doc_deferred" => &[FILE, REASON, RETURNED],

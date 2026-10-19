@@ -265,3 +265,26 @@ pub(super) fn absolute_shell_diagnostics(
         shell_spelling(document),
     )
 }
+
+/// The checkout with its family minted, as `rift init` leaves it: a rewrite
+/// spools its original only where the family is on record.
+pub(super) fn minted(tmp: tempfile::TempDir) -> tempfile::TempDir {
+    let paths = rift_git::discover(tmp.path()).unwrap();
+    let state = rift_git::resolve_family(&paths, rift_git::MintPolicy::Allow).unwrap();
+    assert!(matches!(state, rift_git::FamilyState::Minted(_)));
+    tmp
+}
+
+/// The spooled record of `call` in `session`: its header and its body.
+pub(super) fn spooled(
+    root: &std::path::Path,
+    session: &str,
+    call: &str,
+) -> (rift_shadow::backend::SpoolHeader, Vec<u8>) {
+    let common = rift_git::discover(root).unwrap().common_dir;
+    let path = crate::hooks::originals::session_spool_dir(&common, session)
+        .join(format!("{call}{}", crate::hooks::originals::SPOOL_SUFFIX));
+    let record = std::fs::read(path).unwrap();
+    let (header, body) = rift_shadow::backend::parse_spool_record(&record);
+    (header.unwrap(), body.to_vec())
+}

@@ -111,6 +111,10 @@ pub struct Effective {
     /// frame: the repository's `substitute_held_output`, or this family's
     /// own, never above `read_deny`.
     pub substitute_held_output: Mode,
+    /// How far the runs of alike lines in a terminal result may be folded:
+    /// the repository's `fold_command_output`, or this family's own, never
+    /// above `read_deny`.
+    pub fold_command_output: Mode,
 
     /// Adding a head limit to a content search that carries none.
     pub grep_cap: Mode,
@@ -227,6 +231,7 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         ),
         recognise_by_output: interception.recognise_by_output.min(read_deny),
         substitute_held_output: substitute_lever(own, interception, read_deny),
+        fold_command_output: fold_lever(own, interception, read_deny),
         grep_cap,
         grep_cap_off,
         search_answer,
@@ -265,6 +270,20 @@ fn substitute_lever(
     per_family(
         own.substitute_held_output,
         interception.substitute_held_output,
+        read_deny,
+    )
+}
+
+/// The command-output folding lever for one family: its own key over the
+/// repository's, never above the read lever.
+fn fold_lever(
+    own: crate::AgentLevers,
+    interception: &crate::InterceptionPolicy,
+    read_deny: Mode,
+) -> Mode {
+    per_family(
+        own.fold_command_output,
+        interception.fold_command_output,
         read_deny,
     )
 }
