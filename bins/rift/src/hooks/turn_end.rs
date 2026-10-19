@@ -100,8 +100,6 @@ fn seal_turn_pair_through(
         .unwrap_or_default();
     let seal = seal_turn_through(raw, prior, inputs.packs, gate).ok()?;
     let mut said = SealRead::of(raw.as_slice().len(), &seal);
-    let compacted = rift_shadow::transcript::compact_jsonl(raw, start_line);
-    let raw_lines = u64::try_from(compacted.raw_lines).unwrap_or(u64::MAX);
     let (full, fallback, cut) = match seal {
         TurnSeal::Appended {
             body,
@@ -112,28 +110,34 @@ fn seal_turn_pair_through(
         // Nothing new past the frontier: the whole file is sealed as before,
         // and seal_turn put nothing through the gate.
         TurnSeal::Unchanged => {
-            let (pair, _) = rift_shadow::archived_transcript(raw, start_line, inputs.packs).ok()?;
-            return Some((pair, raw_lines, said));
+            let (pair, lines) =
+                rift_shadow::archived_transcript(raw, start_line, inputs.packs).ok()?;
+            return Some((pair, u64::try_from(lines).unwrap_or(u64::MAX), said));
         }
     };
     let segmented = cut.and_then(|now| {
         let cut = CompactCut { before, now };
         turn_compact(inputs, raw, cut, last.as_deref())
     });
-    let mut compact_start = compacted.compact_transcript_start;
-    let (compact, redaction_fallback) = if let Some((compact, carry)) = segmented {
-        said.compact = Some(carry);
-        // The compact form now ends where the full parts do, so the
-        // slice start can be no later than its last record: rounding
-        // down keeps the slice's rule of erring toward inclusion.
-        let records = compact.as_slice().split_inclusive(|b| *b == b'\n').count();
-        compact_start = compact_start.min(records);
-        (compact, fallback)
-    } else {
-        let whole = rift_shadow::redact::redact_with(compacted.compact(), inputs.packs).ok()?;
-        let counts = summed(&[fallback, RedactionFallback::of(&[&whole.report])]);
-        (whole.redacted.into(), counts)
-    };
+    let (compact, compact_start, raw_lines, redaction_fallback) =
+        if let Some((compact, carry)) = segmented {
+            said.compact = Some(carry);
+            // The carried compactor already built the whole compact form, so
+            // the file is not compacted again here; only the slice past
+            // `start_line` is. The compact form ends where the full parts do,
+            // so the slice start can be no later than its last record:
+            // rounding down keeps the slice's rule of erring toward inclusion.
+            let records = compact.as_slice().split_inclusive(|b| *b == b'\n').count();
+            let (raw_lines, start) = rift_shadow::transcript::slice_start(raw, start_line, records);
+            (compact, start.min(records), raw_lines, fallback)
+        } else {
+            let compacted = rift_shadow::transcript::compact_jsonl(raw, start_line);
+            let whole = rift_shadow::redact::redact_with(compacted.compact(), inputs.packs).ok()?;
+            let counts = summed(&[fallback, RedactionFallback::of(&[&whole.report])]);
+            let start = compacted.compact_transcript_start;
+            (whole.redacted.into(), start, compacted.raw_lines, counts)
+        };
+    let raw_lines = u64::try_from(raw_lines).unwrap_or(u64::MAX);
     let pair = ArchivedTranscript {
         full,
         compact,

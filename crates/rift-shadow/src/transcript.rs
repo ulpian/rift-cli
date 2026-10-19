@@ -164,6 +164,25 @@ pub fn compact_jsonl(raw: &SecretBytes, start_line: usize) -> CompactTranscript 
     }
 }
 
+/// The raw-line count and the slice start [`compact_jsonl`] would report, for
+/// a caller that already knows how many `records` the whole compact form
+/// holds. A turn end has that count from its carried compactor, so only the
+/// lines from `start_line` on are compacted here: compacting the whole file
+/// again cost a 28 MB transcript most of its turn-end mint (L-5 slice 15).
+#[must_use]
+pub fn slice_start(raw: &SecretBytes, start_line: usize, records: usize) -> (usize, usize) {
+    let raw_lines = raw
+        .as_slice()
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    if start_line == 0 {
+        return (raw_lines, 0);
+    }
+    let delta = compact_lines(raw.as_slice(), start_line);
+    (raw_lines, records.saturating_sub(delta.lines.len()))
+}
+
 /// Compact and seal one session transcript for archiving — **the one writer of
 /// the raw→artifact flow**: the compactor runs on the
 /// RAW side, then each of the two artifacts passes the redaction gate once.
@@ -896,5 +915,26 @@ mod tests {
         assert!(!stdout.contains("123456789"));
         assert!(stderr.is_empty());
         assert!(interrupted);
+    }
+
+    /// A turn end already holds the whole compact form from its carried
+    /// compactor, so the slice start must come out the same as the whole
+    /// compactor's without compacting the prefix again.
+    #[test]
+    fn the_slice_start_from_a_known_record_count_matches_the_whole_compactor() {
+        let mut lines = fragments("m1", &["a", "b", "c"]);
+        lines.extend(fragments("m2", &["x"]));
+        lines.extend(fragments("m1", &["d"]));
+        lines.extend(fragments("m3", &["y", "z"]));
+        let raw = SecretBytes::new(format!("{}\n\n", lines.join("\n")).into_bytes());
+        let records = compact_jsonl(&raw, 0).lines;
+        for start_line in 0..=lines.len() + 1 {
+            let whole = compact_jsonl(&raw, start_line);
+            assert_eq!(
+                slice_start(&raw, start_line, records),
+                (whole.raw_lines, whole.compact_transcript_start),
+                "start_line {start_line}"
+            );
+        }
     }
 }
