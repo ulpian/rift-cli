@@ -10,10 +10,32 @@ use std::path::{Path, PathBuf};
 use rift_core::Result;
 use rift_shadow::hooks::{
     install_hooks_with, FamilySites, HookInstall, HookInstallPolicy, HookInstallReport, RecordedBy,
+    TransientReason,
 };
 
 use super::git::capture_sync_note;
 use super::{current_dir_or_dot, flag, projection_db_at, resolve_hooks_git_dir};
+
+/// The binary a command runs as, and the screen that decides whether a family
+/// may be moved to it.
+///
+/// The screen is a field so tests can name a binary in a temp dir as if it
+/// were a release install: every fixture lives under a temporary root, which
+/// the real screen refuses.
+pub(crate) struct RunningBinary {
+    pub(crate) path: PathBuf,
+    pub(crate) screen: fn(&Path, &FamilySites) -> Option<TransientReason>,
+}
+
+impl RunningBinary {
+    /// This process, under the real transient screen.
+    pub(crate) fn current() -> Result<Self> {
+        Ok(Self {
+            path: std::env::current_exe()?,
+            screen: rift_shadow::hooks::is_transient,
+        })
+    }
+}
 
 /// `rift hook install [--repoint] [--binary PATH] [--allow-transient]`: write
 /// the absolute-path entries into the directory git runs hooks from.
@@ -189,6 +211,83 @@ pub(crate) fn install_family_hooks(
         },
         policy,
     )
+}
+
+/// Move the family's git hooks and its binary of record to the running binary
+/// when the record names another one, and say what happened in one line.
+///
+/// `None` when there is nothing to move: no repository, no record yet (first
+/// contact is `init`'s install), the record already names this binary, or the
+/// command runs in a linked worktree — a member never moves the family's
+/// record, because its build lives in a checkout `git worktree remove` deletes.
+///
+/// Hooks and record move together. Moving the record alone was undone by the
+/// next `init`, which makes the record follow hooks that still work. A debug
+/// build or a throwaway build never becomes the binary of record (hooks never
+/// point at a debug binary); the line then says why the hooks were left alone.
+pub(crate) fn follow_running_binary(work_tree: &Path, running: &RunningBinary) -> Option<String> {
+    let paths = rift_git::discover(work_tree).ok()?;
+    if is_linked_member(&paths) {
+        return None;
+    }
+    let sites = family_sites(&paths.common_dir);
+    let record = rift_shadow::hooks::read_binary_of_record(&sites.dir)?;
+    let old = record.path();
+    if old == running.path {
+        return None;
+    }
+    if let Some(why) = never_of_record(running, &sites) {
+        return Some(format!(
+            "git hooks: left at {} because {} is {why}, which never becomes the binary of record",
+            old.display(),
+            running.path.display()
+        ));
+    }
+    // The screen above already ran, with the caller's screen, so the install
+    // is told not to run its own a second time.
+    let policy = HookInstallPolicy::Repoint {
+        allow_transient: true,
+    };
+    let moved = install_family_hooks(
+        &paths.common_dir,
+        work_tree,
+        None,
+        running.path.clone(),
+        policy,
+        RecordedBy::Repoint,
+    );
+    Some(match moved {
+        Ok(_) => format!(
+            "git hooks: moved from {} to {} with the binary of record",
+            old.display(),
+            running.path.display()
+        ),
+        Err(error) => format!("git hooks: not moved ({error})"),
+    })
+}
+
+/// Whether this checkout is a linked member rather than the main work tree:
+/// only a linked member has a git dir apart from the common dir.
+fn is_linked_member(paths: &rift_git::RepoPaths) -> bool {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical(&paths.git_dir) != canonical(&paths.common_dir)
+}
+
+/// Why `running` may not become the family's binary of record, as a clause.
+fn never_of_record(running: &RunningBinary, sites: &FamilySites) -> Option<&'static str> {
+    if is_debug_build(&running.path) {
+        return Some("a debug build");
+    }
+    (running.screen)(&running.path, sites).map(TransientReason::reason)
+}
+
+/// A binary cargo built in a debug profile (`target/debug/rift`, or
+/// `target/<triple>/debug/rift`). Its build dir is the one `cargo test`
+/// rewrites all day, so a family pointed at it breaks on the next edit.
+fn is_debug_build(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "debug")
 }
 
 /// The family's manifest directory and its **linked** members, for a common dir.

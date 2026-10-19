@@ -61,6 +61,19 @@ pub(crate) async fn enable(
     agent_token: &str,
     now_ms: i64,
 ) -> Result<Outcome> {
+    let running = crate::hooks::RunningBinary::current()?;
+    enable_from(store, root, agent_token, now_ms, &running).await
+}
+
+/// [`enable`] as `running`: the binary the checkout is wired with, and the one
+/// the family's hooks and record move to when it may be recorded.
+async fn enable_from(
+    store: &SqliteStore,
+    root: &std::path::Path,
+    agent_token: &str,
+    now_ms: i64,
+    running: &crate::hooks::RunningBinary,
+) -> Result<Outcome> {
     let agent = AgentId::new(agent_token);
     if !agent.is_well_formed() {
         return Ok(Outcome::coded(
@@ -73,7 +86,11 @@ pub(crate) async fn enable(
     let Some(adapter) = reg.get(&agent) else {
         return Ok(unknown_agent(&reg, agent_token));
     };
-    let rift_bin = std::env::current_exe()?;
+    let rift_bin = running.path.clone();
+    // The record first, then the manifests: the members below are wired from
+    // the record, so a record moved after them would leave them naming the
+    // binary this enable just replaced.
+    let git_hooks = crate::hooks::follow_running_binary(root, running);
     let changed_files = wire(root, &rift_bin, agent_token)?;
     let path = root
         .join(".rift")
@@ -97,7 +114,14 @@ pub(crate) async fn enable(
         members: &members,
         codex_trust: codex_trust.as_ref(),
     };
-    Ok(enabled_outcome(&enabled))
+    let mut outcome = enabled_outcome(&enabled);
+    if let Some(line) = git_hooks {
+        outcome.human.push_str(&format!("\n  {line}"));
+        if let Some(json) = outcome.json.as_object_mut() {
+            json.insert("git_hooks".to_owned(), line.into());
+        }
+    }
+    Ok(outcome)
 }
 
 /// Codex's trust in the hook file this enable just wrote, compared at the
@@ -462,6 +486,118 @@ mod tests {
             .block_on(enable(&store, &main, "claude-code", 1_800))
             .unwrap();
         assert_eq!(again.json["members"][0]["outcome"], "already wired");
+    }
+
+    /// A screen that passes every path, so a fixture binary under a temp dir
+    /// can stand in for a release install.
+    fn never_transient(
+        _: &std::path::Path,
+        _: &rift_shadow::hooks::FamilySites,
+    ) -> Option<rift_shadow::hooks::TransientReason> {
+        None
+    }
+
+    /// An executable stand-in for a built `rift` at `dir/rift`.
+    fn binary_at(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("rift");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    fn release(path: std::path::PathBuf) -> crate::hooks::RunningBinary {
+        crate::hooks::RunningBinary {
+            path,
+            screen: never_transient,
+        }
+    }
+
+    fn record_in(main: &std::path::Path) -> rift_shadow::hooks::BinaryOfRecord {
+        rift_shadow::hooks::read_binary_of_record(&main.join(".git/rift-family")).unwrap()
+    }
+
+    fn enable_as(main: &std::path::Path, running: &crate::hooks::RunningBinary) -> Outcome {
+        let store = projection(&main.join("../p.db"));
+        crate::runtime()
+            .unwrap()
+            .block_on(enable_from(&store, main, "claude-code", 1_700, running))
+            .unwrap()
+    }
+
+    /// Enabling from a release binary other than the record's moves the git
+    /// hooks and the record together, keeps the old binary in the history,
+    /// and wires the members with the new record, not the replaced one.
+    #[test]
+    fn enable_from_another_release_binary_moves_the_hooks_and_the_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, member) = family_with_member(tmp.path());
+        let bin = binary_at(&tmp.path().join("opt/release"));
+
+        let outcome = enable_as(&main, &release(bin.clone()));
+
+        let record = record_in(&main);
+        assert_eq!(record.path(), bin, "{}", outcome.human);
+        assert_eq!(record.recorded_by, rift_shadow::hooks::RecordedBy::Repoint);
+        let history: Vec<_> = record.history.iter().map(|r| r.rift_bin.as_str()).collect();
+        assert_eq!(history, vec!["/opt/rift/rift"]);
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(main.join(".git/hooks/post-commit")).unwrap(),
+            bin
+        );
+        assert!(outcome.human.contains("moved from /opt/rift/rift"));
+        let descriptor =
+            std::fs::read_to_string(member.join(".rift/agents/claude-code.json")).unwrap();
+        assert!(
+            !descriptor.contains("/opt/rift/rift"),
+            "members are wired after the record moved: {descriptor}"
+        );
+    }
+
+    /// A debug build and a throwaway build never become the binary of record:
+    /// the family is left exactly as found and one sentence says why.
+    #[test]
+    fn enable_from_a_debug_or_throwaway_build_leaves_the_family_as_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, _member) = family_with_member(tmp.path());
+        let debug = release(binary_at(&tmp.path().join("checkout/target/debug")));
+        let throwaway = crate::hooks::RunningBinary {
+            path: binary_at(&tmp.path().join("rig")),
+            screen: rift_shadow::hooks::is_transient,
+        };
+
+        for (running, why) in [(debug, "a debug build"), (throwaway, "a temporary root")] {
+            let outcome = enable_as(&main, &running);
+
+            let record = record_in(&main);
+            assert_eq!(record.rift_bin, "/opt/rift/rift");
+            assert!(record.history.is_empty());
+            assert!(
+                std::fs::symlink_metadata(main.join(".git/hooks/post-commit")).is_err(),
+                "no hook is written"
+            );
+            let line = outcome.json["git_hooks"].as_str().unwrap();
+            assert!(line.contains(why), "{line}");
+            assert!(line.contains("never becomes the binary of record"));
+        }
+    }
+
+    /// Enabling inside a linked worktree never moves the family's record.
+    #[test]
+    fn enable_in_a_linked_worktree_leaves_the_family_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, member) = family_with_member(tmp.path());
+        let bin = binary_at(&tmp.path().join("opt/release"));
+
+        let outcome = enable_as(&member, &release(bin));
+
+        assert_eq!(record_in(&main).rift_bin, "/opt/rift/rift");
+        assert!(outcome.json.get("git_hooks").is_none());
     }
 
     /// The symmetry that rule requires: `disable` from ANY member removes the
