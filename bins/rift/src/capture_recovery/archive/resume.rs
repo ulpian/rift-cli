@@ -7,7 +7,7 @@
 //! later retirement stage to decide. Nothing here retires the intent, writes
 //! progress or a marker, or consumes the carrier's ticket.
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 use rift_recall_substrate::{Dialect, SubstrateReader};
 use rift_shadow::backend::native_read::load_native_boundary_gaps;
@@ -25,7 +25,7 @@ use crate::capture_recovery::{plan, WireError, WireResult};
 
 pub(crate) const RECEIPT_NAME: &str = "publication-receipt.json";
 /// Digests, one gap id and a path: the intent's shape, never larger.
-const MAX_RECEIPT_BYTES: usize = 4096;
+pub(crate) const MAX_RECEIPT_BYTES: usize = 4096;
 
 /// Why the resume did not complete, as a static class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

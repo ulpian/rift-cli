@@ -27,7 +27,7 @@ use super::{plan, WireError, WireResult};
 
 pub(crate) const GAP_NAME: &str = "gap.json";
 /// One fixed-shape record of digests and two integers.
-const MAX_GAP_RECORD_BYTES: usize = 4096;
+pub(crate) const MAX_GAP_RECORD_BYTES: usize = 4096;
 
 /// Why no batch is published, as a static class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
