@@ -7,6 +7,7 @@
 //! authenticate the native tree instead of archiving again. Nothing here
 //! admits the carrier, assembles the session, settles usage, writes progress,
 //! a marker or a cache, or consumes the carrier's ticket.
+pub(crate) mod run;
 #[cfg(test)]
 mod tests;
 
@@ -129,6 +130,14 @@ impl Carrier {
         })
     }
 
+    pub(crate) fn agent(&self) -> &str {
+        &self.agent
+    }
+
+    pub(crate) fn native_session(&self) -> &str {
+        &self.native_session
+    }
+
     /// Exactly this one session, captured from this agent.
     fn carries(&self, archive: &CheckpointArchive) -> bool {
         archive.sessions == [self.native_session.as_str()]
@@ -210,6 +219,10 @@ impl<'a, B: ShadowBackend> RecoveryBackend<'a, B> {
     /// The bytes the assembly injects before the checkpoint id is derived.
     pub(crate) fn artifact(&self) -> &FrozenBoundaryGaps {
         &self.artifact
+    }
+
+    pub(crate) fn carrier(&self) -> &Carrier {
+        &self.carrier
     }
 
     /// What the last call did; `None` before any call.
