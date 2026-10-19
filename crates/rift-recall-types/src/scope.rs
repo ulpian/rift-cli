@@ -239,6 +239,26 @@ pub struct Scope {
     pub checkpoints: CheckpointWindow,
     /// Cross-scope grant (none by default).
     pub cross: CrossScopeGrant,
+    /// The caller's own member and the branch its `HEAD` names when that
+    /// branch has no commit yet. Read only when `head` is `None`: an unborn
+    /// caller is then served the checkpoints this member archived on this
+    /// branch, and nothing a sibling member or another branch wrote.
+    pub unborn: Option<SameMember>,
+}
+
+/// One member on one branch: the route an unborn caller is served through.
+///
+/// A turn-end checkpoint sealed before the first commit has no anchor, so the
+/// ancestry route can never admit it. The name `HEAD` points at still exists,
+/// and the member token says the checkpoint was written here, so the pair is
+/// enough to serve this member its own live record without widening to every
+/// anchorless row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SameMember {
+    /// The short branch name the symbolic `HEAD` points at.
+    pub branch: String,
+    /// The member's worktree token, as the archive recorded it.
+    pub token: String,
 }
 
 impl Scope {
@@ -261,6 +281,7 @@ impl Scope {
             developer: DeveloperScope::CurrentOnly,
             checkpoints: CheckpointWindow::LastN(last_n),
             cross: CrossScopeGrant::none(),
+            unborn: None,
         }
     }
 
@@ -309,7 +330,16 @@ impl Scope {
             developer: DeveloperScope::CurrentOnly,
             checkpoints: CheckpointWindow::All,
             cross: CrossScopeGrant::none(),
+            unborn: None,
         }
+    }
+
+    /// The same scope, naming the member and branch an unborn `HEAD` points
+    /// at. A born `HEAD` keeps the ancestry route, so the pair is ignored.
+    #[must_use]
+    pub fn with_unborn(mut self, member: SameMember) -> Self {
+        self.unborn = Some(member);
+        self
     }
 }
 
