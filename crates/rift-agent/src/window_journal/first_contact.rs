@@ -16,8 +16,8 @@ use crate::respond::Channel;
 /// The mode the first-contact lever ships at: the documented default, which
 /// the repository's `first_contact` policy key stands in for.
 ///
-/// Enforce: the observe period's pool passed the lever's flip gate (owner
-/// ruling 2026-10-19), so a first read the lever would answer is answered
+/// Enforce: enough live sessions carried candidate first reads, and one policy
+/// line turns it back to observe, so a first read the lever would answer is answered
 /// where the family's channel is confirmed. A repository that writes
 /// `observe` keeps the record without the answer; this constant caps nothing, and the
 /// mode [`decide_first_contact`] is handed is the mode it acts on, under the

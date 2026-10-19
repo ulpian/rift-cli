@@ -273,15 +273,16 @@ pub struct InterceptionPolicy {
     pub basis_ttl_days: u32,
     /// How far a decline may rest on lines a subagent's window inherited
     /// because its spawning prompt named the path. Never above the read lever
-    /// it qualifies, and `enforce` by default: its observe pool passed its
-    /// flip gate (owner ruling 2026-10-19); the window was pointed at those
-    /// bytes, not handed them, so an unconfirmed channel still only observes.
+    /// it qualifies, and `enforce` by default: enough live sessions carried
+    /// candidate reads, and one policy line turns it back to observe; the
+    /// window was pointed at those bytes, not handed them, so an unconfirmed
+    /// channel still only observes.
     pub inherit_by_name: Mode,
     /// Answering the first read of a large file in a window with the file's
     /// bound outline, once. Never above the read lever, and `enforce` by
-    /// default: its observe pool passed its flip gate (owner ruling
-    /// 2026-10-19), and a family whose channel no run confirmed still only
-    /// observes.
+    /// default: enough live sessions carried candidate reads, and one policy
+    /// line turns it back to observe; a family whose channel no run confirmed
+    /// still only observes.
     pub first_contact: Mode,
     /// Declining the held part of a read that overlaps lines this window
     /// holds, asking for the unheld range only. Never above the read lever,
@@ -296,9 +297,10 @@ pub struct InterceptionPolicy {
     pub first_contact_min_bytes: u64,
     /// Declining once a read of bytes another live window of the repository
     /// holds, with a cheaper route to them. Never above the read lever, and
-    /// `enforce` by default: its observe pool passed its flip gate (owner
-    /// ruling 2026-10-19); the decline rests on a window other than the one
-    /// being declined, so an unconfirmed channel still only observes it.
+    /// `enforce` by default: enough live sessions carried candidate reads, and
+    /// one policy line turns it back to observe; the decline rests on a window
+    /// other than the one being declined, so an unconfirmed channel still only
+    /// observes it.
     pub decline_family_held: Mode,
     /// Recording the lines of a file a terminal result was found to carry,
     /// matched against the file's bytes, whatever the command line was.
