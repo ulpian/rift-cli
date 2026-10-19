@@ -47,6 +47,9 @@ pub(super) struct TaskSources<'a> {
     /// The session transcript's address, as the session cache remembers it:
     /// the root its subagents' files and every spill are found under.
     pub(super) main: Option<PathBuf>,
+    /// The main transcript's bytes when the caller already read them, so
+    /// the spawn index never reads the file a second time; `None` reads it.
+    pub(super) main_bytes: Option<&'a [u8]>,
     /// The session's spooled originals, sealed beside the subagent
     /// transcripts that record their calls; `None` seals none.
     pub(super) spool: Option<&'a Spool>,
@@ -91,6 +94,7 @@ impl<'a> TaskSources<'a> {
             packs,
             observations: &facts.worktree_observations,
             main: main_transcript_path(git_dir, session_id),
+            main_bytes: None,
             spool: None,
         }
     }
@@ -173,8 +177,12 @@ pub(super) fn session_tasks(src: &TaskSources<'_>) -> Vec<ArchivedTask> {
         return Vec::new();
     }
     let mut index = SpawnIndex::default();
-    if let Some(bytes) = main.and_then(|m| std::fs::read(m).ok()) {
-        index.scan(&bytes);
+    let read = match src.main_bytes {
+        Some(_) => None,
+        None => main.and_then(|m| std::fs::read(m).ok()),
+    };
+    if let Some(bytes) = src.main_bytes.or(read.as_deref()) {
+        index.scan(bytes);
     }
     for c in &candidates {
         if let Ok(bytes) = &c.read {
@@ -189,7 +197,7 @@ pub(super) fn session_tasks(src: &TaskSources<'_>) -> Vec<ArchivedTask> {
 }
 
 /// The session transcript's address, as the session cache remembers it.
-fn main_transcript_path(git_dir: &Path, session_id: &str) -> Option<PathBuf> {
+pub(super) fn main_transcript_path(git_dir: &Path, session_id: &str) -> Option<PathBuf> {
     rift_shadow::hooks::read_cache(&crate::family::run_state::sessions_dir(git_dir), session_id)
         .ok()
         .flatten()?

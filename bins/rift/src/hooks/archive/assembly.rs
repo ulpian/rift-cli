@@ -97,8 +97,16 @@ fn assemble(
         packs: &packs,
     };
     let turn = turn_end.then_some(&inputs);
+    // The main transcript is read once here; the seal and the subagents'
+    // spawn index both take these bytes.
+    let main = tasks::main_transcript_path(&repo.git_dir, session);
+    let main_raw = main
+        .as_deref()
+        .and_then(|p| std::fs::read(p).ok())
+        .map(SecretBytes::new);
     let transcript = t.phase("archive_transcript", || {
-        session_transcript(&repo.git_dir, session, &packs, &spool, turn)
+        let read = (main.as_deref()?, main_raw.as_ref()?);
+        session_transcript(&repo.git_dir, session, read, &packs, &spool, turn)
     });
     let (mut transcript, transcript_raw_lines, turn_read) = match transcript {
         Some((pair, raw_lines, read)) => (Some(pair), Some(raw_lines), read),
@@ -106,6 +114,7 @@ fn assemble(
     };
     let sources = TaskSources {
         spool: Some(&spool),
+        main_bytes: main_raw.as_ref().map(SecretBytes::as_slice),
         ..TaskSources::of(&repo.git_dir, session, &packs, &facts)
     };
     let mut tasks = t.phase("archive_tasks", || tasks::session_tasks(&sources));

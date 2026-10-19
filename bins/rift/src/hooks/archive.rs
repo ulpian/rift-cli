@@ -1098,24 +1098,18 @@ type SealedTranscript = (
 /// worker's transcript-progress sidecar; a missing or unreadable sidecar reads
 /// as 0, which re-covers the whole session (self-contained shards make that a
 /// correctness no-op — only the recorded boundary widens).
+///
+/// The caller reads the file once and hands its bytes here and to the task
+/// collector, so one archive never reads the main transcript twice.
 fn session_transcript(
     git_dir: &Path,
     session_id: &str,
+    main: (&Path, &rift_core::SecretBytes),
     packs: &rift_shadow::redact::RulePackSet,
     spool: &originals::Spool,
     turn: Option<&super::turn_end::TurnInputs<'_>>,
 ) -> Option<SealedTranscript> {
-    let path = PathBuf::from(
-        rift_shadow::hooks::read_cache(
-            &crate::family::run_state::sessions_dir(git_dir),
-            session_id,
-        )
-        .ok()
-        .flatten()?
-        .transcript_path?,
-    );
-    let bytes = std::fs::read(&path).ok()?;
-    let raw = rift_core::SecretBytes::new(bytes);
+    let (path, raw) = main;
     let start_line = rift_shadow::hooks::read_transcript_progress(
         &crate::family::run_state::sessions_dir(git_dir),
         session_id,
@@ -1126,15 +1120,15 @@ fn session_transcript(
     // A turn end seals only the lines past the previous shard's parts; it
     // falls to the whole seal below only when that seal cannot be made.
     let turn_sealed =
-        turn.and_then(|inputs| super::turn_end::seal_turn_pair(inputs, &raw, start_line));
+        turn.and_then(|inputs| super::turn_end::seal_turn_pair(inputs, raw, start_line));
     let sealed = match turn_sealed {
         Some((pair, raw_lines, read)) => Ok((pair, raw_lines, Some(read))),
-        None => rift_shadow::archived_transcript(&raw, start_line, packs)
+        None => rift_shadow::archived_transcript(raw, start_line, packs)
             .map(|(pair, lines)| (pair, u64::try_from(lines).unwrap_or(u64::MAX), None)),
     };
     match sealed {
         Ok((mut pair, raw_lines, read)) => {
-            pair.spills = spills::of_transcript(&path, session_id, packs, raw.as_slice());
+            pair.spills = spills::of_transcript(path, session_id, packs, raw.as_slice());
             pair.originals = spool.claimed_by(raw.as_slice(), pair.full.as_slice());
             Some((pair, raw_lines, read))
         }

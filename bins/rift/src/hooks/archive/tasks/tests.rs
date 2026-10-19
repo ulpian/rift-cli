@@ -48,6 +48,7 @@ impl Session {
             packs: &RulePackSet::builtin(),
             observations,
             main: Some(self.main.clone()),
+            main_bytes: None,
             spool: None,
         })
     }
@@ -94,6 +95,26 @@ fn a_subagent_with_no_spawn_is_sealed_under_its_agent_id_as_unmatched() {
         tasks[0].transcript.is_some(),
         "an unmatched file is still sealed"
     );
+}
+
+#[test]
+fn the_archive_spawn_index_reads_the_handed_main_bytes_not_the_file_again() {
+    // The file on disk names no spawn; only the bytes the caller already read
+    // do, so a task named by that spawn proves the file was not read twice.
+    let s = Session::new(&line("2026-10-11T10:00:00Z", "no spawn here"));
+    s.subagent("a1", &line("2026-10-11T10:00:01Z", "work"));
+    let handed = launched("toolu_handed", "a1");
+    let tasks = session_tasks(&TaskSources {
+        git_dir: &s.git_dir,
+        session_id: SESSION,
+        packs: &RulePackSet::builtin(),
+        observations: &[],
+        main: Some(s.main.clone()),
+        main_bytes: Some(handed.as_bytes()),
+        spool: None,
+    });
+    let names: Vec<&str> = tasks.iter().map(|t| t.tool_use_id.as_str()).collect();
+    assert_eq!(names, ["toolu_handed"]);
 }
 
 #[test]
