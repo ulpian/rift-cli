@@ -163,6 +163,8 @@ pub struct AgentLevers {
     pub narrow: Option<Mode>,
     /// Replaces `[interception] substitute_held_output` for this family.
     pub substitute_held_output: Option<Mode>,
+    /// Replaces `[interception] fold_command_output` for this family.
+    pub fold_command_output: Option<Mode>,
 }
 
 /// What a family's line under `[interception.agents]` may say: the one mode it
@@ -191,6 +193,7 @@ impl AgentEntry {
                 inherit_by_name: None,
                 narrow: None,
                 substitute_held_output: None,
+                fold_command_output: None,
             },
             Self::Levers(levers) => levers,
         }
@@ -316,6 +319,12 @@ pub struct InterceptionPolicy {
     /// are recorded and the result is handed over untouched, until a corpus
     /// shows no substitution ever claimed lines the original did not carry.
     pub substitute_held_output: Mode,
+    /// Folding the runs of alike lines in a terminal result into one line
+    /// each with a count. Never above the read lever, and `observe` by
+    /// default: what folding would spare is recorded and the result is
+    /// handed over whole, until the fold is shown never to hide a line the
+    /// model acts on.
+    pub fold_command_output: Mode,
     /// `[interception.agents]`.
     pub agents: AgentModes,
 }
@@ -337,6 +346,7 @@ impl Default for InterceptionPolicy {
             decline_family_held: Mode::Enforce,
             recognise_by_output: Mode::Observe,
             substitute_held_output: Mode::Observe,
+            fold_command_output: Mode::Observe,
             agents: AgentModes::default(),
         }
     }

@@ -14,6 +14,7 @@ mod documents;
 mod evictions;
 mod family;
 mod fixtures;
+mod fold_output;
 mod narrows;
 mod outlines;
 mod output_match;
