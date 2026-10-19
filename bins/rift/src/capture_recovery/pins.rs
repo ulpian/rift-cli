@@ -1,4 +1,5 @@
-//! Live physical preservation and read-only matching; no unlink authority.
+//! Live physical preservation and read-only matching. The one removal, of a
+//! pinned original under a durable retirement intent, lives in `discharge`.
 
 #[cfg(unix)]
 mod platform {
@@ -699,15 +700,7 @@ mod platform {
         let outcome = match scope.namespace.dir.symlink_metadata(&pin.frozen.basename) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => DeliveryMatch::Missing,
             Err(_) => return Err(PinError),
-            Ok(_) => {
-                let sample =
-                    read_regular(&scope.namespace, &pin.frozen.basename, &pin.frozen.basename)?;
-                if sample_matches(&sample, &pin.frozen) {
-                    DeliveryMatch::OriginalPresent
-                } else {
-                    DeliveryMatch::Different
-                }
-            }
+            Ok(metadata) => present_match(&scope.namespace, &metadata, &pin.frozen)?,
         };
         scope.namespace.recheck()?;
         if outcome == DeliveryMatch::Missing
@@ -719,6 +712,36 @@ mod platform {
         Ok(outcome)
     }
 
+    /// What sits under the original's name. The original was a regular,
+    /// capped, decodable ticket, so anything that is not one is certainly a
+    /// different file, not an unreadable queue; only a failed read of a
+    /// candidate stays unavailable.
+    fn present_match(
+        namespace: &Namespace,
+        metadata: &Metadata,
+        frozen: &FrozenSelection,
+    ) -> PinResult<DeliveryMatch> {
+        if !metadata.is_file() || metadata.len() != frozen.byte_len {
+            return Ok(DeliveryMatch::Different);
+        }
+        let raw = files::read_regular(namespace, &frozen.basename, MAX_BYTES)?;
+        let Ok(decoded) = codec::decode(&frozen.basename, &raw.bytes) else {
+            return Ok(DeliveryMatch::Different);
+        };
+        let sample = Sample {
+            file: raw.file,
+            metadata: raw.metadata,
+            bytes: raw.bytes,
+            decoded,
+        };
+        Ok(if sample_matches(&sample, frozen) {
+            DeliveryMatch::OriginalPresent
+        } else {
+            DeliveryMatch::Different
+        })
+    }
+
+    pub(crate) mod discharge;
     #[cfg(test)]
     mod selected_tests;
     #[cfg(test)]
@@ -761,6 +784,8 @@ mod platform {
 
 // Only the physical-redelivery regression tests import these until the
 // controller lands.
+#[cfg(unix)]
+pub(crate) use platform::discharge::discharge_original;
 #[cfg_attr(
     not(test),
     expect(
