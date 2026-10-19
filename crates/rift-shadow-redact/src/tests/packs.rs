@@ -215,3 +215,27 @@ fn an_oscillating_rule_is_bounded_and_seals_a_placeholder() {
     assert_eq!(ok.redacted.as_slice(), b"start plain end");
     assert_eq!(ok.report.redaction_flat_fallback, 0);
 }
+
+#[test]
+fn a_pack_set_fingerprint_moves_with_every_rule_and_only_with_one() {
+    let builtin = RulePackSet::builtin().fingerprint();
+    assert_eq!(builtin, RulePackSet::builtin().fingerprint());
+    assert_eq!(builtin.len(), 64);
+    let vendor = RulePackSet::builtin()
+        .with_vendor_pattern("acme", r"acme_[a-z0-9]{8}", "acme@1")
+        .unwrap()
+        .fingerprint();
+    let other_regex = RulePackSet::builtin()
+        .with_vendor_pattern("acme", r"acme_[a-z0-9]{9}", "acme@1")
+        .unwrap()
+        .fingerprint();
+    let allowed = RulePackSet::builtin()
+        .with_allowlisted_value("AKIAIOSFODNN7EXAMPLE")
+        .fingerprint();
+    assert_ne!(builtin, vendor);
+    assert_ne!(
+        vendor, other_regex,
+        "the version string alone must not stand for the rule"
+    );
+    assert_ne!(builtin, allowed);
+}

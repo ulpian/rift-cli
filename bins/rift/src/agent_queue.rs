@@ -68,6 +68,9 @@ pub(crate) enum JobKind {
     /// and change no lifecycle. Journaled because the redaction alone outlasts
     /// a client's hook timeout on a multi-megabyte transcript.
     Archive(IntervalArchive),
+    /// The checkpoint one turn end owes (L-5 SealTurn ruling): seal the turn's
+    /// new transcript lines onto the earlier segments and archive.
+    SealTurn(SealTurn),
     /// The BPE token count of one read, recorded as a late `file_read_tokens`
     /// row at the read's own `tool_call` id (insert-or-ignore: idempotent).
     ReadTokens {
@@ -251,6 +254,22 @@ pub(crate) struct IntervalArchive {
     pub interval_start_ms: Option<i64>,
 }
 
+/// One turn end a `Stop` hook closed and the worker owes a checkpoint for.
+///
+/// Its identity is (session, frontier), round 28's interval-identity rule
+/// applied to turns: a redelivered `Stop` names the same frontier and
+/// coalesces, and the next turn's end names a later one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SealTurn {
+    /// The agent-supplied session id.
+    pub session_id: String,
+    /// The session's *owner* agent, not the hook's.
+    pub agent: String,
+    /// The transcript's length in bytes when the hook ran: the end of the
+    /// last record the agent had written (a stat, never a read).
+    pub frontier: u64,
+}
+
 /// Why an agent hook archives a live session between its commits: the two
 /// reasons a decision with no git event can carry, spelled as the audit row
 /// spells them.
@@ -299,7 +318,10 @@ impl IntervalReason {
         match reason {
             ArchiveReason::Schedule => Some(Self::Schedule),
             ArchiveReason::SensitivePath => Some(Self::SensitivePath),
-            ArchiveReason::Commit | ArchiveReason::Pr | ArchiveReason::SessionEnd => None,
+            ArchiveReason::Commit
+            | ArchiveReason::Pr
+            | ArchiveReason::SessionEnd
+            | ArchiveReason::TurnEnd => None,
         }
     }
 }
@@ -503,6 +525,7 @@ impl JobKind {
                 Some(session_id)
             }
             Self::Archive(archive) => Some(&archive.session_id),
+            Self::SealTurn(seal) => Some(&seal.session_id),
             Self::BoundarySnapshot(snapshot) => Some(&snapshot.session_id),
             Self::ReadTokens { .. }
             | Self::ServeAudit(_)
@@ -527,6 +550,11 @@ impl JobKind {
             // one due interval asks for the same checkpoint, and the note a
             // failure leaves is one note per session.
             Self::Archive(archive) => Some(format!("archive-{}", session_key(&archive.session_id))),
+            Self::SealTurn(seal) => Some(format!(
+                "turn-end-{}-{}",
+                session_key(&seal.session_id),
+                seal.frontier
+            )),
             Self::ReadTokens { tool_call_id, .. } => {
                 is_lower_hex(tool_call_id, 64).then(|| format!("tokens-{tool_call_id}"))
             }
@@ -601,7 +629,7 @@ impl JobKind {
     fn coalesces_while_pending(&self) -> bool {
         matches!(
             self,
-            Self::SearchIndex | Self::MoveRunState | Self::Archive(_)
+            Self::SearchIndex | Self::MoveRunState | Self::Archive(_) | Self::SealTurn { .. }
         )
     }
 
@@ -624,7 +652,7 @@ impl JobKind {
             | Self::DocSweep
             | Self::BoundarySnapshot(_)
             | Self::MoveRunState => 0,
-            Self::Condense { .. } | Self::Archive(_) => 1,
+            Self::Condense { .. } | Self::Archive(_) | Self::SealTurn(_) => 1,
             Self::SweepIdle { .. } => 2,
         }
     }

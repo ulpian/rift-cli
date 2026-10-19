@@ -16,7 +16,9 @@
 //! A checked part is carried forward by that oid, never passed through the
 //! gate again (L-5 ruling, 2026-10-18): re-redacting the prefix each turn
 //! would make a turn's cost O(transcript), which per-turn segments exist to
-//! remove. A carried part is not [`rift_core::RedactedBytes`] — the gate stays
+//! remove. The chain also records the pack set's fingerprint, and a turn
+//! under a different one reseals whole rather than carry bytes other rules
+//! produced. A carried part is not [`rift_core::RedactedBytes`] — the gate stays
 //! the one constructor — and no blob is written for it.
 
 use rift_core::{Result, SecretBytes, Sha256Id};
@@ -36,6 +38,9 @@ pub struct PriorChain {
     pub raw_lines: Vec<u64>,
     /// Its recorded full-transcript leaf (`leaf_hash` over the concatenation).
     pub leaf: Sha256Id,
+    /// Its `segment_packs` member: the fingerprint of the packs its parts
+    /// were sealed under, `None` where it records none.
+    pub packs: Option<String>,
 }
 
 /// One earlier part: the blob oid its tree entry names, and the bytes read
@@ -59,6 +64,9 @@ pub enum ChainBreak {
     Truncated,
     /// A part's bytes are not the blob its tree entry names.
     OidMismatch,
+    /// The parts were sealed under another pack set, or name none: carrying
+    /// them would keep bytes the current rules never produced.
+    PacksChanged,
 }
 
 impl ChainBreak {
@@ -119,7 +127,8 @@ fn seal_turn_through(
     gate: &mut Gate<'_>,
 ) -> Result<TurnSeal> {
     let lines = complete_lines(raw.as_slice());
-    let earlier = match prior.map(|chain| read_back(chain, lines.len())) {
+    let fingerprint = packs.fingerprint();
+    let earlier = match prior.map(|chain| read_back(chain, lines.len(), &fingerprint)) {
         None => Vec::new(),
         Some(Ok(parts)) => parts,
         Some(Err(broken)) => return whole_reseal(raw, broken, gate),
@@ -132,7 +141,7 @@ fn seal_turn_through(
     let out = gate(&SecretBytes::new(delta), frontier)?;
     let fallback = RedactionFallback::of(&[&out.report]);
     Ok(TurnSeal::Appended {
-        body: TranscriptBody::Segments(Segments::carrying(earlier, out.redacted)?),
+        body: TranscriptBody::Segments(Segments::carrying(earlier, out.redacted, fingerprint)?),
         document_lines: u64::try_from(cut).unwrap_or(u64::MAX),
         fallback,
     })
@@ -142,7 +151,13 @@ fn seal_turn_through(
 fn read_back(
     chain: PriorChain,
     available: usize,
+    fingerprint: &str,
 ) -> std::result::Result<Vec<CarriedPart>, ChainBreak> {
+    // First, because no other check can make a part sealed under other rules
+    // safe to carry (00-decisions L-5 follow-up, 2026-10-18).
+    if chain.packs.as_deref() != Some(fingerprint) {
+        return Err(ChainBreak::PacksChanged);
+    }
     check_layout(&chain, available)?;
     chain
         .parts

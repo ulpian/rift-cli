@@ -235,6 +235,40 @@ impl RulePackSet {
         Ok(self)
     }
 
+    /// SHA-256 (hex) over everything that decides what this set emits: each
+    /// version, each extra detector's id and pattern, and each allowlisted
+    /// value's hash. A per-turn seal records it so a later turn carries an
+    /// earlier segment only when the same rules sealed it; the version strings
+    /// alone are not enough, because a pack can change its pattern without
+    /// moving its version.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        for version in &self.versions {
+            h.update(b"v\0");
+            h.update(version.as_bytes());
+            h.update(b"\0");
+        }
+        for detector in &self.extra {
+            h.update(b"d\0");
+            h.update(detector.id.as_bytes());
+            h.update(b"\0");
+            h.update(detector.re.as_str().as_bytes());
+            h.update(b"\0");
+        }
+        for allowed in &self.allow {
+            h.update(b"a\0");
+            h.update(allowed.to_hex().as_bytes());
+        }
+        h.finalize()
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, b| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{b:02x}");
+                hex
+            })
+    }
+
     fn version_set(&self) -> Vec<String> {
         self.versions.clone()
     }
