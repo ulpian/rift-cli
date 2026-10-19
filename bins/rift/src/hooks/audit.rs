@@ -327,6 +327,8 @@ fn serve_audit_step(kind: crate::agent_queue::ServeAuditKind) -> &'static str {
         // what each lever is worth, and a figure folded into another lever's
         // step is a figure nobody can separate again.
         K::ReadPrevented | K::ReadPreventedObserved => "prevented",
+        K::ToolOutputHeld | K::ToolOutputSubstituted => "output-held",
+        K::ToolOutputFolded | K::ToolOutputFoldApplied => "output-fold",
         K::RecoveryInjected => "recovery-map",
         K::SearchAnswered | K::GrepCapped => "search-gate",
         K::DocRewritten | K::DocDeferred => "doc-gate",
@@ -347,7 +349,13 @@ fn serve_audit_default_tag(kind: crate::agent_queue::ServeAuditKind) -> &'static
         K::ReadPreventedObserved => TAG_PREVENTED_OBSERVED,
         K::DocRewritten => TAG_DECLARED_BASELINE,
         K::DocDeferred => TAG_CONVERT_DEADLINE,
-        K::RecoveryInjected | K::SearchAnswered | K::GrepCapped => "",
+        K::ToolOutputSubstituted => "output_substituted",
+        K::ToolOutputFoldApplied => "output_folded",
+        K::RecoveryInjected
+        | K::SearchAnswered
+        | K::GrepCapped
+        | K::ToolOutputHeld
+        | K::ToolOutputFolded => "",
     }
 }
 
@@ -369,7 +377,14 @@ fn serve_audit_figures(
     // it can defend rather than with a figure it declines to publish: the row
     // still names the file and the lines, so the class can be sized before
     // anything is claimed for it.
-    if audit.decision == crate::agent_queue::ServeAuditKind::ReadPreventedObserved {
+    if matches!(
+        audit.decision,
+        crate::agent_queue::ServeAuditKind::ReadPreventedObserved
+            | crate::agent_queue::ServeAuditKind::ToolOutputHeld
+            | crate::agent_queue::ServeAuditKind::ToolOutputSubstituted
+            | crate::agent_queue::ServeAuditKind::ToolOutputFolded
+            | crate::agent_queue::ServeAuditKind::ToolOutputFoldApplied
+    ) {
         return (0, 0, None);
     }
     let counts_something = !audit.frame.is_empty() || audit.basis.is_some();
@@ -581,6 +596,13 @@ pub(super) fn serve_audit_event(
             handle,
             reason,
             estimated_tokens_avoided,
+        },
+        K::ToolOutputHeld | K::ToolOutputSubstituted => MemdEvent::ToolOutputHeld {
+            handle,
+            would_save_bytes: audit.total.unwrap_or_default(),
+        },
+        K::ToolOutputFolded | K::ToolOutputFoldApplied => MemdEvent::ToolOutputFolded {
+            would_save_bytes: audit.total.unwrap_or_default(),
         },
         K::RecoveryInjected => MemdEvent::RecoveryInjected {
             estimated_tokens_returned,
@@ -981,6 +1003,34 @@ mod serve_audit_tests {
         assert_eq!(audit_rows[0].2, rift_recall_serve::TAG_DECLARED_BASELINE);
         assert_eq!(audit_rows[0].4, 4_200);
         assert_eq!(call_rows[0].1, "claude-code:doc-gate");
+    }
+
+    /// Held output observed is its own verb on its own step: the bytes a
+    /// frame would spare ride in the row, and no token figure is claimed.
+    #[test]
+    fn audit_books_held_output_as_its_own_verb_with_the_bytes_it_would_spare_and_no_tokens() {
+        let (tmp, basis, _) = checkout(20);
+        let mut held = decision(ServeAuditKind::ToolOutputHeld, Some(basis), "");
+        held.total = Some(740);
+        let event = serve_audit_event(tmp.path(), &held);
+        assert!(
+            matches!(
+                &event,
+                rift_recall_serve::MemdEvent::ToolOutputHeld {
+                    would_save_bytes: 740,
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+        let (rows, calls) = book(tmp.path(), &held);
+        assert_eq!(rows[0].0, "memd.tool_output_held");
+        assert_eq!(
+            (rows[0].3, rows[0].4),
+            (0, 0),
+            "an observed lever claims nothing"
+        );
+        assert!(calls[0].1.ends_with(":output-held"), "{calls:?}");
     }
 
     /// A declared figure is a note on the number, not on the decision: when

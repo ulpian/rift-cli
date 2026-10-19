@@ -130,3 +130,122 @@ fn the_report_without_a_retire_intent_is_owed() {
     assert_eq!(retirement_report(&hold), Err(RetireOwed::NoIntent));
     assert!(!intent_path(&rig).exists());
 }
+
+fn report_of(hold: &OwnHold<'_>) -> Vec<SlotState> {
+    retirement_report(hold)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.state)
+        .collect()
+}
+
+#[test]
+fn a_file_under_the_name_that_is_not_a_ticket_reports_the_name_reused() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    published(&rig, &hold);
+    let intent = written(&hold);
+    let second = &intent.slots[1];
+    std::fs::remove_file(source(&hold, &second.source_name)).unwrap();
+    std::fs::write(source(&hold, &second.source_name), b"not a ticket").unwrap();
+    assert_eq!(report_of(&hold)[1], SlotState::Kept(Kept::NameReused));
+}
+
+#[test]
+fn retirement_unlinks_every_pinned_original_keeps_the_pins_and_reports_each_slot_retired() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    published(&rig, &hold);
+    let intent = written(&hold);
+    let report = retire(&hold).unwrap();
+    assert!(report.iter().all(|row| row.state == SlotState::Retired));
+    for slot in &intent.slots {
+        assert!(!source(&hold, &slot.source_name).exists());
+        assert!(rig.fixture.evidence.join(&slot.pin_name).exists());
+        assert!(!rig.fixture.evidence.join(parked(&slot.pin_name)).exists());
+    }
+    // A second run acts on nothing and says the same.
+    assert_eq!(retire(&hold).unwrap(), report);
+    assert!(intent_path(&rig).exists());
+}
+
+#[test]
+fn retirement_never_removes_a_different_file_under_an_original_name() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    published(&rig, &hold);
+    let intent = written(&hold);
+    let second = &intent.slots[1];
+    std::fs::remove_file(source(&hold, &second.source_name)).unwrap();
+    std::fs::write(source(&hold, &second.source_name), b"a later delivery").unwrap();
+    let report: Vec<_> = retire(&hold)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.state)
+        .collect();
+    assert_eq!(
+        report,
+        [SlotState::Retired, SlotState::Kept(Kept::NameReused)]
+    );
+    assert_eq!(
+        std::fs::read(source(&hold, &second.source_name)).unwrap(),
+        b"a later delivery"
+    );
+}
+
+#[test]
+fn a_retirement_interrupted_after_parking_the_original_resumes_and_retires_the_rest() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    published(&rig, &hold);
+    let intent = written(&hold);
+    let first = &intent.slots[0];
+    // The crash point: the original moved beside its pin, not yet unlinked.
+    std::fs::rename(
+        source(&hold, &first.source_name),
+        rig.fixture.evidence.join(parked(&first.pin_name)),
+    )
+    .unwrap();
+    assert_eq!(report_of(&hold)[0], SlotState::Kept(Kept::Interrupted));
+    let report = retire(&hold).unwrap();
+    assert!(report.iter().all(|row| row.state == SlotState::Retired));
+    assert!(!rig.fixture.evidence.join(parked(&first.pin_name)).exists());
+}
+
+#[test]
+fn a_parked_file_that_is_not_the_original_goes_back_under_its_name() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    published(&rig, &hold);
+    let intent = written(&hold);
+    let second = &intent.slots[1];
+    // A crash after a later delivery under the name was parked by a race.
+    std::fs::remove_file(source(&hold, &second.source_name)).unwrap();
+    std::fs::write(
+        rig.fixture.evidence.join(parked(&second.pin_name)),
+        b"later",
+    )
+    .unwrap();
+    let report: Vec<_> = retire(&hold)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.state)
+        .collect();
+    assert_eq!(
+        report,
+        [SlotState::Retired, SlotState::Kept(Kept::NameReused)]
+    );
+    assert_eq!(
+        std::fs::read(source(&hold, &second.source_name)).unwrap(),
+        b"later"
+    );
+    assert!(!rig.fixture.evidence.join(parked(&second.pin_name)).exists());
+}
+
+#[test]
+fn retirement_without_a_retire_intent_is_owed_and_touches_nothing() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    published(&rig, &hold);
+    assert_eq!(retire(&hold), Err(RetireOwed::NoIntent));
+}

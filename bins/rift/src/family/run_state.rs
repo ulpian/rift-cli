@@ -380,6 +380,17 @@ pub(crate) fn agent_queue_dir(git_dir: &Path) -> PathBuf {
     root_dir(git_dir, RunRoot::AgentQueue)
 }
 
+/// The agent-hook journals a read may look in without recording metadata or
+/// move work: the legacy root under the git dir, and the member's root once
+/// its family is minted.
+pub(crate) fn agent_queue_read_dirs(git_dir: &Path) -> Vec<PathBuf> {
+    let legacy = RunRoot::AgentQueue.legacy_under(git_dir);
+    match minted_member(git_dir) {
+        Some(member) => vec![legacy, RunRoot::AgentQueue.under(&member)],
+        None => vec![legacy],
+    }
+}
+
 /// Queue roots for an advisory read without recording metadata or move work.
 /// An unavailable/unminted family leaves only its known legacy root visible.
 pub(crate) fn capture_queue_read_dirs(git_dir: &Path) -> Vec<PathBuf> {

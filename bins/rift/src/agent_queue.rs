@@ -428,6 +428,21 @@ pub(crate) enum ServeAuditKind {
     ReadPrevented,
     /// The same decision, recorded and not acted on.
     ReadPreventedObserved,
+    /// A terminal result carried lines the window provably holds, and the
+    /// lever that would stand a frame in for them was only observing. The
+    /// bytes the frame would have spared ride in `total`.
+    ToolOutputHeld,
+    /// The same held stretch, stood in for by its frame in the result the
+    /// model read because the lever enforces. Booked apart from the observed
+    /// row so an acted figure and a would-be figure never mix.
+    ToolOutputSubstituted,
+    /// A terminal result carried runs of alike lines a fold line could stand
+    /// in for, and the lever that would fold them was only observing. The
+    /// bytes the folds would have spared ride in `total`.
+    ToolOutputFolded,
+    /// The same runs, folded in the result the model read because the lever
+    /// enforces. Booked apart so an acted figure and a would-be one never mix.
+    ToolOutputFoldApplied,
     /// A compacted context was handed the map of what it stopped holding.
     RecoveryInjected,
     /// A listing-shaped search was answered instead of run.

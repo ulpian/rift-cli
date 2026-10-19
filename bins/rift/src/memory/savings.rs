@@ -24,6 +24,7 @@ use super::journals::{
 };
 use super::panes::{family_enforce_split, WindowPane};
 use super::render::{fmt_share, pad};
+use super::tool_output::{family_tool_output, render_tool_output, with_tool_output};
 
 /// The savings figure plus the window it was measured over.
 pub(crate) struct SavingsReport {
@@ -516,6 +517,11 @@ pub(crate) fn savings(root: &Path, args: &SavingsArgs) -> Result<Outcome> {
         let family_held = family_held(&report);
         human.push_str(&render_family_held(family_held.as_ref()));
         json = with_family_held(json, family_held.as_ref());
+        // Its two halves kept apart: what the class would save stands beside
+        // the share, and what it saved is already inside it.
+        let tool_output = family_tool_output(&report);
+        human.push_str(&render_tool_output(tool_output.as_ref()));
+        json = with_tool_output(json, tool_output.as_ref());
     }
     Ok(Outcome::ok(human.trim_end().to_owned(), json))
 }

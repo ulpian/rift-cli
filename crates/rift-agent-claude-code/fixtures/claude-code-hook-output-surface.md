@@ -102,13 +102,22 @@ Hook output strings, including `additionalContext`, `systemMessage`, and plain s
 When several hooks return `additionalContext` for the same event, Claude receives all of the values. If a value exceeds 10,000 characters, Claude Code writes the full text to a file in the session directory and passes Claude the file path with a short preview instead.
 ```
 
-### `PostToolUse` context, and the result rewrite Rift does not take (upstream lines 1965-1970)
+### `PostToolUse` context, and the one result rewrite Rift takes (upstream lines 1965-1970)
 
-Only the `additionalContext` row is claimed below. `updatedToolOutput` is
-quoted because pinning half a table is how a later reader mistakes a deliberate
-abstention for an oversight: replacing a tool result would put bytes Rift did
-not render into the model's context, which the serving rules forbid, so no row
-claims it.
+Two rows are claimed below. `updatedToolOutput` is taken in two closed forms,
+for a `Bash` result only and never both on one result. `folded_output`: each
+run of alike lines keeps its first line and the rest become one fold line,
+every other line kept as the tool wrote it, under the `fold_command_output`
+lever, which observes by default. `held_output_substitution`: a stretch of the result
+that is a file's own lines byte for byte, which this window provably already
+holds at that revision, is replaced by the one renderer's frame, and every
+other byte of the result is kept as the tool wrote it. The value is the tool's
+own `{stdout, stderr, interrupted, isImage}` object, because the run of
+2026-10-11 (Claude Code 2.1.186) showed a string ignored with "does not match
+Bash's output shape; using original output", and an accepted object becoming
+the only text the transcript keeps. Nothing replaces a result unless the
+`substitute_held_output` lever enforces for this family; it observes by default.
+Either form goes out only after the original is spooled under it.
 
 ```markdown
 | `decision`             | `"block"` adds the `reason` next to the tool result. Claude still sees the original output; to replace it, use `updatedToolOutput`                                                                                                                                                              |
@@ -349,6 +358,7 @@ above it exists, and for no other reason; a row without one carries `false`.
 verb=PreToolUse channel=DenyWithReason reason_field=permissionDecisionReason confirmed=true
 verb=PreToolUse channel=UpdatedInput forms=document_sidecar_path,grep_head_limit
 verb=PostToolUse channel=AdditionalContext limit_field=none
+verb=PostToolUse channel=UpdatedToolOutput forms=held_output_substitution,folded_output
 verb=UserPromptSubmit channel=AdditionalContext limit_field=none
 verb=SessionStart channel=AdditionalContext limit_field=none
 verb=SubagentStart channel=AdditionalContext limit_field=none

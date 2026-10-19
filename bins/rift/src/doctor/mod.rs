@@ -23,6 +23,7 @@ mod git_hooks;
 pub(crate) mod health;
 mod prices;
 mod queues;
+mod recovery;
 mod redaction;
 mod set_asides;
 mod setup;
@@ -46,6 +47,7 @@ use git_hooks::{doctor_binary_of_record, doctor_hooks_target};
 use health::doctor_integration_health;
 use prices::doctor_unpriced_models;
 use queues::{doctor_capture_queue, doctor_push_queue, doctor_session_sweep};
+use recovery::doctor_capture_recovery;
 use redaction::doctor_redaction_fallback;
 use set_asides::doctor_recall_set_asides;
 use setup::{
@@ -101,6 +103,11 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
         human: String::from("rift doctor"),
         json: serde_json::Map::new(),
     };
+    // Recovery runs before any leg that drains a queue, and the tickets it
+    // classified historical stay out of every repair drain after it, so the
+    // backlog is never replayed one ticket at a time (CFX-4 ruling).
+    let (recovery, _left_to_recovery) = doctor_capture_recovery(root, repair);
+    report.leg("capture_recovery", recovery);
     report.leg("memory_chain", doctor_memory_chain(root, strict_read_only));
     report.leg("sessions", doctor_session_sweep(root, fix));
     report.leg("capture_queue", doctor_capture_queue(root, fix));

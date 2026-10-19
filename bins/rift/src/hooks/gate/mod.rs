@@ -17,11 +17,14 @@ mod delivery;
 mod family;
 mod file;
 mod first_contact;
+mod fold_output;
+mod held_output;
 mod linehash_cache;
 mod members;
 mod outline_cache;
 mod output_match;
 mod prevented;
+mod rewrite_spool;
 
 use std::path::Path;
 
@@ -29,7 +32,7 @@ use rift_shadow::hooks::AdapterRegistry;
 
 use self::delivery::stated_delivery;
 use self::members::{gate_decide_members, gate_record_members, settle_whole_call, GatePass};
-use self::output_match::output_match_record;
+use self::output_match::output_match_step;
 use self::prevented::prevented_record;
 use super::doc_gate::{doc_gate, DocAnswer};
 use super::ingest::edit_record;
@@ -84,7 +87,7 @@ pub(in crate::hooks) fn window_journal_step(
     decline: &mut Option<String>,
     document: &mut Option<DocAnswer>,
     search: &mut Option<crate::search_gate::SearchAnswer>,
-) -> (AdapterRegistry, bool) {
+) -> (AdapterRegistry, bool, Option<serde_json::Value>) {
     let registry = AdapterRegistry::with_builtin();
     // What the operator permitted, read once for the whole step: every half
     // writes against one policy file, and a lever that is off writes nothing.
@@ -127,12 +130,9 @@ pub(in crate::hooks) fn window_journal_step(
     let prevented = guarded_phase(t, "prevented_record", || {
         prevented_record(&registry, raw, git_dir, work_tree, &effective)
     });
-    // WHAT A TERMINAL RESULT SHOWED the window, whatever its command line
-    // was: the lines of the named files found in the delivered output. It
-    // records and decides nothing, so it never touches the answer above.
-    guarded_phase(t, "output_match", || {
-        output_match_record(&registry, raw, git_dir, work_tree, &effective)
-    });
+    // WHAT A TERMINAL RESULT SHOWED the window, and what folding it would spare:
+    // two phases sized apart, deciding nothing, so neither touches the answer.
+    let held_output = terminal_output_phases(t, &registry, raw, git_dir, work_tree, &effective);
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.
     guarded_phase(t, "spawn_record", || {
@@ -151,7 +151,37 @@ pub(in crate::hooks) fn window_journal_step(
     (
         registry,
         outcome.journaled || documents.journaled || searches.journaled || prevented,
+        held_output,
     )
+}
+
+/// What a terminal result showed the window, then what folding it would spare:
+/// two phases timed apart, the held substitution first.
+///
+/// A result gets at most one form, because its sealed original names one: the
+/// fold stands down when a held substitution already rewrote the result.
+fn terminal_output_phases(
+    t: &crate::hooktime::HookTimer,
+    registry: &AdapterRegistry,
+    raw: &rift_shadow::hooks::RawHook,
+    git_dir: &Path,
+    work_tree: &Path,
+    effective: &rift_recall_policy::Effective,
+) -> Option<serde_json::Value> {
+    let (_, held) = guarded_phase(t, "output_match", || {
+        output_match_step(registry, raw, git_dir, work_tree, effective)
+    });
+    let (_, folded) = guarded_phase(t, "fold_output", || {
+        let call = fold_output::FoldCall {
+            registry,
+            raw,
+            git_dir,
+            work_tree,
+            held_applied: held.is_some(),
+        };
+        fold_output::fold_output_step(&call, effective)
+    });
+    held.or(folded)
 }
 
 /// One phase of the step, timed and behind its own panic guard.

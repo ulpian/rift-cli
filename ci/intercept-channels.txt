@@ -23,6 +23,7 @@ family=antigravity verb=PreInvocation channel=InjectSteps kind=user_message
 family=antigravity verb=PreToolUse channel=DenyWithReason reason_field=reason confirmed=true
 family=antigravity verb=Stop channel=Neutral
 family=claude-code verb=PostToolUse channel=AdditionalContext limit_field=none
+family=claude-code verb=PostToolUse channel=UpdatedToolOutput forms=held_output_substitution,folded_output
 family=claude-code verb=PreCompact channel=Neutral
 family=claude-code verb=PreToolUse channel=DenyWithReason reason_field=permissionDecisionReason confirmed=true
 family=claude-code verb=PreToolUse channel=UpdatedInput forms=document_sidecar_path,grep_head_limit

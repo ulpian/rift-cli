@@ -36,6 +36,7 @@ mod line;
 mod matched;
 mod narrowing;
 pub mod output_match;
+mod substitute;
 
 use rift_core::Sha256Id;
 
@@ -59,6 +60,9 @@ pub use self::intervals::{Interval, IntervalSet};
 pub use self::line::{EvictReason, Line};
 pub use self::matched::{matched_lines, MATCHED_MODE, MAX_MATCHED_RUNS, OUTPUT_MATCHED};
 pub use self::narrowing::{narrowing, Narrowing};
+pub use self::substitute::{
+    held_output, substitute_held_lines, Delivered, HeldOutputDecision, HeldRun, SUBSTITUTE_MODE,
+};
 
 /// The schema version every line this module writes carries, and the only one
 /// it reads. A later shape gets a later number rather than a tolerant reader.

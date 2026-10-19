@@ -131,7 +131,10 @@ pub use rift_recall_validity::trust::{
 /// tree where pushed text comes into existence. `bins/rift` reaches it here
 /// because this dispatcher is already the validity crate's caller — no crate
 /// edge is added, and no second renderer is created.
-pub use rift_recall_validity::trust::{render_delta_frame, render_deny_frame, render_narrow_frame};
+pub use rift_recall_validity::trust::{
+    render_delta_frame, render_deny_frame, render_fold_frame, render_held_output_frame,
+    render_narrow_frame,
+};
 
 /// The first-contact frame, re-exported by the same route and for the same
 /// reason as [`render_deny_frame`]: the binary supplies the outline it read

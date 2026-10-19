@@ -526,6 +526,38 @@ pub fn render_deny_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: Option<
     out
 }
 
+/// The one line that stands in a terminal result for lines `lo`-`hi` of
+/// `path` at `hash`, which the window was handed in turn `turn` and still
+/// holds unchanged.
+///
+/// A fact the model can check against its own context, nothing more: the
+/// lines, the file, the revision and the turn. Every line the window does not
+/// hold stays in the result verbatim around it, so the line never has to say
+/// what else the command printed.
+#[must_use]
+pub fn render_held_output_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: u32) -> String {
+    let shown = path_display(path);
+    let at_hash = hex_prefix(hash, 12).map_or_else(String::new, |h| format!(" at sha256:{h}"));
+    // Spelled inline, as the fold line is: the bracketed shape is the one the
+    // originals checker recognises as a held frame, so a delivered result
+    // matches its sealed original line for line, and declaring it as a frame
+    // opener would make that checker's reading of it a second writer.
+    format!("[rift held: lines {lo}-{hi} of {shown}{at_hash}, unchanged since turn {turn}]")
+}
+
+/// The one line that stands in a terminal result for `n` lines that differ
+/// from the kept line above only in their digits.
+///
+/// The count comes first and the bracket closes the line because that is the
+/// shape the originals spool checks, so verify can count what a fold replaced.
+#[must_use]
+pub fn render_fold_frame(n: u32) -> String {
+    // The spool's own opener, spelled here rather than declared as a frame
+    // opener: rift-shadow and verify read it, and a declared opener would make
+    // every one of those readers a second writer.
+    format!("[rift fold: {n} more lines like the line above, differing only in digits]")
+}
+
 /// The reason frame for a read of a file the session holds at an older hash,
 /// whose changes Rift can name exactly.
 ///

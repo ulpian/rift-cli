@@ -71,7 +71,8 @@ pub use col3::{
     CallsData, ChannelCallSeries, Col3, DayBar, DispatchData, DispatchView, FamilyShareRow,
     FileTouch, NicReading, NicView, OffStrip, PanelMetrics, RecallView, RecallWindow,
     RecallWindowButton, RecapData, RecapSavings, RecapView, SavingsData, ShareData, SystemScope,
-    TokensData, TokensView, UsdRow, WindowCut, WorktreeAxis, WorktreeSlice,
+    TokensData, TokensView, ToolOutputClassCounts, ToolOutputCounts, UsdRow, WindowCut,
+    WorktreeAxis, WorktreeSlice,
 };
 pub use colour_picker::{ColourPickerState, PickerStage, RESET_ROW};
 pub use command::{

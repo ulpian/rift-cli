@@ -107,6 +107,14 @@ pub struct Effective {
     /// to a file as carrying: the repository's `recognise_by_output`, never
     /// above `read_deny`.
     pub recognise_by_output: Mode,
+    /// How far a terminal result's held stretches may be replaced by a
+    /// frame: the repository's `substitute_held_output`, or this family's
+    /// own, never above `read_deny`.
+    pub substitute_held_output: Mode,
+    /// How far the runs of alike lines in a terminal result may be folded:
+    /// the repository's `fold_command_output`, or this family's own, never
+    /// above `read_deny`.
+    pub fold_command_output: Mode,
 
     /// Adding a head limit to a content search that carries none.
     pub grep_cap: Mode,
@@ -222,6 +230,8 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
             read_deny,
         ),
         recognise_by_output: interception.recognise_by_output.min(read_deny),
+        substitute_held_output: substitute_lever(own, interception, read_deny),
+        fold_command_output: fold_lever(own, interception, read_deny),
         grep_cap,
         grep_cap_off,
         search_answer,
@@ -248,6 +258,34 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
 /// qualifies — which rule 2 has already capped by the reason channel.
 fn per_family(own: Option<Mode>, repository: Mode, read_deny: Mode) -> Mode {
     own.unwrap_or(repository).min(read_deny)
+}
+
+/// The held-output substitution lever for one family: its own key over the
+/// repository's, never above the read lever.
+fn substitute_lever(
+    own: crate::AgentLevers,
+    interception: &crate::InterceptionPolicy,
+    read_deny: Mode,
+) -> Mode {
+    per_family(
+        own.substitute_held_output,
+        interception.substitute_held_output,
+        read_deny,
+    )
+}
+
+/// The command-output folding lever for one family: its own key over the
+/// repository's, never above the read lever.
+fn fold_lever(
+    own: crate::AgentLevers,
+    interception: &crate::InterceptionPolicy,
+    read_deny: Mode,
+) -> Mode {
+    per_family(
+        own.fold_command_output,
+        interception.fold_command_output,
+        read_deny,
+    )
 }
 
 /// Rules 1 and 2 for one lever that declines a call.
@@ -734,6 +772,29 @@ mod tests {
         let (unknown, _d) = load_src("[interception]\ndecline_family_held = \"always\"\n");
         assert_eq!(
             resolve(&unknown.policy, "claude-code", FULL).decline_family_held,
+            Mode::Off
+        );
+    }
+
+    /// The held-output substitution lever ships at `observe`, takes a
+    /// family's own key over the repository's, and is never above the read
+    /// lever, however either is written.
+    #[test]
+    fn the_substitute_held_output_lever_ships_observing_per_family_and_capped() {
+        let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
+        assert_eq!(shipped.substitute_held_output, Mode::Observe);
+        let (written, _d) = load_src(
+            "[interception]\nsubstitute_held_output = \"enforce\"\n\n\
+             [interception.agents.codex]\nsubstitute_held_output = \"off\"\n",
+        );
+        let claude = resolve(&written.policy, "claude-code", FULL);
+        assert_eq!(claude.substitute_held_output, Mode::Enforce);
+        let codex = resolve(&written.policy, "codex", NO_CHANNEL);
+        assert_eq!(codex.substitute_held_output, Mode::Off);
+        let (shut, _d) =
+            load_src("[interception]\nmode = \"off\"\nsubstitute_held_output = \"enforce\"\n");
+        assert_eq!(
+            resolve(&shut.policy, "claude-code", FULL).substitute_held_output,
             Mode::Off
         );
     }

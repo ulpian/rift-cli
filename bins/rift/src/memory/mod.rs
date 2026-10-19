@@ -23,6 +23,7 @@ mod panes;
 mod render;
 mod reread;
 mod savings;
+mod tool_output;
 mod verbs;
 
 use std::path::Path;

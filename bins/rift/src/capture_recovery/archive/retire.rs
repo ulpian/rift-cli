@@ -7,14 +7,15 @@
 //! The slots come from the Cut the published gap was derived from, bound
 //! through the gap record to the receipt's one gap id; nothing is inferred
 //! from what the queue holds now. The report only reads: it reopens each pin
-//! and classifies the original under its name. Nothing here unlinks, moves or
-//! releases anything.
+//! and classifies the original under its name. Retirement acts slot by slot
+//! from the same intent and removes a queued original only while its inode
+//! and bytes are still the pinned ones; queue files are all it removes.
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -98,6 +99,9 @@ pub(crate) enum Kept {
     PinMissing,
     /// The pin is present but no longer verifies against the Cut.
     PinUnverified,
+    /// A retirement stopped with the original parked beside its pin; a rerun
+    /// finishes it.
+    Interrupted,
     /// The queue could not be read cleanly.
     Unavailable,
 }
@@ -215,6 +219,43 @@ pub(crate) fn write_retire_intent(hold: &OwnHold<'_>) -> Result<RetireOutcome, R
 /// Each slot of the durable intent, read-only: retired when its original is
 /// gone and its pin still verifies, otherwise kept with the typed reason.
 pub(crate) fn retirement_report(hold: &OwnHold<'_>) -> Result<Vec<SlotReport>, RetireOwed> {
+    let opened = open_intent(hold)?;
+    let report = opened.cut.entries.iter().map(|entry| SlotReport {
+        pin_slot: entry.pin_slot,
+        state: slot_state(hold, &opened.scope, &opened.queue_dir, entry),
+    });
+    Ok(report.collect())
+}
+
+/// Retire every slot the durable intent names, then report each. A slot
+/// that cannot be acted on is left as it is; the report says why, and a
+/// rerun from the same intent finishes only what is still owed.
+pub(crate) fn retire(hold: &OwnHold<'_>) -> Result<Vec<SlotReport>, RetireOwed> {
+    let opened = open_intent(hold)?;
+    for entry in &opened.cut.entries {
+        let Ok(live) = pins::reopen_expected(hold.owner(), &opened.scope, &entry.as_expectation())
+        else {
+            continue;
+        };
+        // A failed slot is not a failed retirement: the report names its state.
+        let _ = pins::discharge_original(hold.owner(), &live, &parked(&entry.pin_name));
+    }
+    retirement_report(hold)
+}
+
+/// Where a retirement parks an original beside its pin before unlinking it.
+pub(crate) fn parked(pin_name: &str) -> String {
+    format!("retiring-{pin_name}")
+}
+
+struct OpenedIntent {
+    cut: CutManifest,
+    queue_dir: PathBuf,
+    scope: SharedScope,
+}
+
+/// The durable intent, bound to this plan and to the Cut it names.
+fn open_intent(hold: &OwnHold<'_>) -> Result<OpenedIntent, RetireOwed> {
     hold.check_current()
         .map_err(|_| RetireOwed::HoldUnavailable)?;
     let queue = hold
@@ -239,14 +280,14 @@ pub(crate) fn retirement_report(hold: &OwnHold<'_>) -> Result<Vec<SlotReport>, R
     {
         return Err(RetireOwed::IntentInvalid);
     }
-    let queue_dir = &queue.queue().path;
-    let scope = pins::shared_scope(hold.owner(), queue_dir, &private.path)
+    let queue_dir = queue.queue().path.clone();
+    let scope = pins::shared_scope(hold.owner(), &queue_dir, &private.path)
         .map_err(|_| RetireOwed::ScopeUnavailable)?;
-    let report = cut.entries.iter().map(|entry| SlotReport {
-        pin_slot: entry.pin_slot,
-        state: slot_state(hold, &scope, queue_dir, entry),
-    });
-    Ok(report.collect())
+    Ok(OpenedIntent {
+        cut,
+        queue_dir,
+        scope,
+    })
 }
 
 fn slot_state(
@@ -258,6 +299,11 @@ fn slot_state(
     match scope.pin_present(&entry.pin_name) {
         Ok(true) => {}
         Ok(false) => return SlotState::Kept(Kept::PinMissing),
+        Err(_) => return SlotState::Kept(Kept::Unavailable),
+    }
+    match scope.pin_present(&parked(&entry.pin_name)) {
+        Ok(false) => {}
+        Ok(true) => return SlotState::Kept(Kept::Interrupted),
         Err(_) => return SlotState::Kept(Kept::Unavailable),
     }
     let Ok(live) = pins::reopen_expected(hold.owner(), scope, &entry.as_expectation()) else {
