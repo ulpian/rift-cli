@@ -4,10 +4,20 @@
 //! is the one place that answers that name for a segmented shard, so no reader
 //! grows a second rule.
 //!
-//! The answer is the concatenation of the parts, or absence. It is never a
+//! The compact form is segmented the same way, under
+//! `transcript.compact.segments/NNNNNN`, and answers `transcript.compact.jsonl`.
+//! Its parts are joined rather than concatenated: a message whose fragments
+//! straddle a turn end is re-emitted, merged, by the later part, so the later
+//! occurrence of an `id` replaces the earlier one at the earlier position.
+//! That keeps a turn's compact seal proportional to its own lines while the
+//! join still equals compacting the whole file.
+//!
+//! The answer is the concatenation (or join) of the parts, or absence. It is never a
 //! partial transcript: a missing part, a malformed declaration, or a whole
 //! blob beside declared parts (two layouts, so neither is the record) all
 //! read as absent, which every leaf and id check then refuses by name.
+
+use std::collections::HashMap;
 
 use rift_core::Result;
 use serde_json::Value;
@@ -26,8 +36,17 @@ pub const SEGMENT_RAW_LINES_KEY: &str = "segment_raw_lines";
 /// the same one.
 pub const SEGMENT_PACKS_KEY: &str = "segment_packs";
 
-/// The artifact name the resolver answers for.
+/// The tree a segmented compact transcript's parts live in.
+pub const COMPACT_SEGMENTS_DIR: &str = "transcript.compact.segments";
+
+/// The metadata member counting the compact transcript's parts. No line
+/// counts beside it: a re-emitted record makes a compact part's lines
+/// overlap the previous part's, so per-part counts would not sum.
+pub const COMPACT_SEGMENTS_KEY: &str = "transcript_compact_segments";
+
+/// The artifact names the resolver answers for.
 const TRANSCRIPT_NAME: &str = "transcript.jsonl";
+const COMPACT_NAME: &str = "transcript.compact.jsonl";
 
 /// What one metadata document declares about its transcript's layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +65,12 @@ pub enum Declared {
 #[must_use]
 pub fn segment_name(index: usize) -> String {
     format!("{TRANSCRIPT_SEGMENTS_DIR}/{index:06}")
+}
+
+/// A compact part's name, numbered as [`segment_name`] numbers full parts.
+#[must_use]
+pub fn compact_segment_name(index: usize) -> String {
+    format!("{COMPACT_SEGMENTS_DIR}/{index:06}")
 }
 
 /// Read the layout a metadata document declares. A document that is not an
@@ -83,37 +108,102 @@ pub fn resolve_transcript(
     rel: &str,
     read: impl Fn(&str) -> Result<Option<Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>> {
-    let Some(dir) = rel.strip_suffix(TRANSCRIPT_NAME) else {
-        return read(rel);
-    };
-    if !(dir.is_empty() || dir.ends_with('/')) {
-        return read(rel);
+    if let Some(dir) = artifact_dir(rel, TRANSCRIPT_NAME) {
+        let declared = read_metadata(dir, &read)?.map_or(Declared::Whole, |d| declared_layout(&d));
+        let whole = read(rel)?;
+        return match (declared, whole) {
+            (Declared::Whole, whole) => Ok(whole),
+            (Declared::Segments(lines), None) => {
+                Ok(read_parts(dir, lines.len(), segment_name, &read)?.map(|p| p.concat()))
+            }
+            (Declared::Segments(_) | Declared::Malformed, _) => Ok(None),
+        };
     }
-    let whole = read(rel)?;
-    let declared = read(&format!("{dir}metadata.json"))?
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .map_or(Declared::Whole, |doc| declared_layout(&doc));
-    match (declared, whole) {
-        (Declared::Whole, whole) => Ok(whole),
-        (Declared::Segments(lines), None) => concatenate(dir, lines.len(), &read),
-        (Declared::Segments(_) | Declared::Malformed, _) => Ok(None),
+    if let Some(dir) = artifact_dir(rel, COMPACT_NAME) {
+        let declared = read_metadata(dir, &read)?.map_or(Ok(None), |d| declared_compact(&d));
+        let whole = read(rel)?;
+        return match (declared, whole) {
+            (Ok(None), whole) => Ok(whole),
+            (Ok(Some(count)), None) => Ok(read_parts(dir, count, compact_segment_name, &read)?
+                .map(|parts| join_compact_segments(&parts))),
+            (Ok(Some(_)) | Err(()), _) => Ok(None),
+        };
+    }
+    read(rel)
+}
+
+/// Join compact parts: concatenate, then for every record `id` seen more
+/// than once keep the last occurrence's bytes at the first occurrence's
+/// position. Compacting a whole file never emits an `id` twice, so this is
+/// the one rule that makes the parts equal the whole.
+#[must_use]
+pub fn join_compact_segments(parts: &[Vec<u8>]) -> Vec<u8> {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut first_at: HashMap<String, usize> = HashMap::new();
+    for line in parts
+        .iter()
+        .flat_map(|p| p.split_inclusive(|b| *b == b'\n'))
+    {
+        let Some(id) = record_id(line) else {
+            lines.push(line);
+            continue;
+        };
+        if let Some(slot) = first_at.get(&id).and_then(|at| lines.get_mut(*at)) {
+            *slot = line;
+            continue;
+        }
+        first_at.insert(id, lines.len());
+        lines.push(line);
+    }
+    lines.concat()
+}
+
+/// The directory `rel` names `name` in: the parent's (`""`) or a task's.
+fn artifact_dir<'a>(rel: &'a str, name: &str) -> Option<&'a str> {
+    rel.strip_suffix(name)
+        .filter(|dir| dir.is_empty() || dir.ends_with('/'))
+}
+
+fn read_metadata(
+    dir: &str,
+    read: &impl Fn(&str) -> Result<Option<Vec<u8>>>,
+) -> Result<Option<Value>> {
+    Ok(read(&format!("{dir}metadata.json"))?.and_then(|b| serde_json::from_slice(&b).ok()))
+}
+
+/// The compact part count a metadata document declares: `Ok(None)` for a
+/// whole compact, `Err` for a member that is not a positive count.
+fn declared_compact(metadata: &Value) -> std::result::Result<Option<usize>, ()> {
+    let Some(count) = metadata.get(COMPACT_SEGMENTS_KEY) else {
+        return Ok(None);
+    };
+    match count.as_u64().map(usize::try_from) {
+        Some(Ok(n)) if n > 0 => Ok(Some(n)),
+        _ => Err(()),
     }
 }
 
+/// A compact line's top-level `id`, the key the compactor merges by.
+fn record_id(line: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(line.trim_ascii_end()).ok()?;
+    value.get("id")?.as_str().map(str::to_owned)
+}
+
 /// The parts in order, or absence the moment one is missing.
-fn concatenate(
+fn read_parts(
     dir: &str,
     count: usize,
+    name: fn(usize) -> String,
     read: &impl Fn(&str) -> Result<Option<Vec<u8>>>,
-) -> Result<Option<Vec<u8>>> {
-    let mut joined = Vec::new();
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let mut parts = Vec::with_capacity(count);
     for index in 0..count {
-        let Some(part) = read(&format!("{dir}{}", segment_name(index)))? else {
+        let Some(part) = read(&format!("{dir}{}", name(index)))? else {
             return Ok(None);
         };
-        joined.extend_from_slice(&part);
+        parts.push(part);
     }
-    Ok(Some(joined))
+    Ok(Some(parts))
 }
 
 #[cfg(test)]

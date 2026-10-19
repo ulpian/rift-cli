@@ -765,10 +765,14 @@ pub(crate) struct SessionCleanup {
     pub(crate) transcript_sidecar: bool,
     /// `<sessions>/<session>.usage`, the usage-progress sidecar.
     pub(crate) usage_sidecar: bool,
+    /// `<sessions>/<session>.turn-seal`, the turn-end frontier: once the
+    /// session's last archive sealed the whole file there is no next turn
+    /// to read it, and a stale frontier would make doctor report lag.
+    pub(crate) turn_seal_sidecar: bool,
 }
 
 /// Remove what a session leaves behind once its **final** archive landed
-/// (L-0A §4.3): the claim markers, the originals spool and the two sidecars.
+/// (L-0A §4.3): the claim markers, the originals spool and the three sidecars.
 /// The `condensed-<key>` marker and the session cache stay — the first is the
 /// completion proof the next drain reads, the second is retained as `ended`
 /// by its own rule — and no content-addressed cache (linehash, outline) or
@@ -794,6 +798,7 @@ pub(crate) fn cleanup_session(
         spool: remove_tree(&family_state_dir.join("spool").join(session)),
         transcript_sidecar: remove_one(&sidecar("transcript")),
         usage_sidecar: remove_one(&sidecar("usage")),
+        turn_seal_sidecar: remove_one(&sidecar("turn-seal")),
     }
 }
 
