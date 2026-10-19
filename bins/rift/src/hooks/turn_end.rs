@@ -20,7 +20,8 @@ use rift_recall_substrate::parse::segments::{
 use rift_shadow::backend::{ArchivedTranscript, RedactionFallback};
 use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
 use rift_shadow::turn_seal::{
-    seal_turn_compact, seal_turn_through, CompactCut, PriorChain, PriorPart, TurnSeal,
+    seal_session_end_through, seal_turn_compact, seal_turn_through, CompactCut, PriorChain,
+    PriorPart, TurnSeal,
 };
 use rift_store::CanonicalStore as _;
 
@@ -60,6 +61,19 @@ pub(super) struct TurnInputs<'a> {
     pub(super) repo: &'a rift_git::RepoPaths,
     pub(super) session: &'a str,
     pub(super) packs: &'a rift_shadow::redact::RulePackSet,
+    /// Whether a turn or the whole session ended.
+    pub(super) end: SealEnd,
+}
+
+/// What ended, which decides where the main transcript's new part stops.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SealEnd {
+    /// A turn: the newest line waits for a later line to admit the cut.
+    Turn,
+    /// The session: its final archive seals the tail past the last turn-end
+    /// part and carries every earlier part, so no turn-end content is sealed
+    /// twice. With no turn-end part on record it seals whole, as before L-5.
+    Session,
 }
 
 /// A turn-end archive's transcript pair, built from the turn's segmented seal
@@ -98,7 +112,18 @@ fn seal_turn_pair_through(
         .as_ref()
         .map(|c| summed(&c.fallbacks))
         .unwrap_or_default();
-    let seal = seal_turn_through(raw, prior, inputs.packs, gate).ok()?;
+    let seal = match inputs.end {
+        SealEnd::Turn => seal_turn_through(raw, prior, inputs.packs, gate).ok()?,
+        SealEnd::Session => {
+            // A session that never sealed a turn, or whose file ends inside a
+            // record the parts cannot hold, is sealed whole by the caller.
+            let ends_on_line = raw.as_slice().last().is_none_or(|b| *b == b'\n');
+            let (Some(prior), true) = (prior, ends_on_line) else {
+                return None;
+            };
+            seal_session_end_through(raw, Some(prior), inputs.packs, gate).ok()?
+        }
+    };
     let mut said = SealRead::of(raw.as_slice().len(), &seal);
     let (full, fallback, cut) = match seal {
         TurnSeal::Appended {

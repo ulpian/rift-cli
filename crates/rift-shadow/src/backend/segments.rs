@@ -151,6 +151,19 @@ impl Segments {
         })
     }
 
+    /// The earlier parts carried by oid and nothing new: a session end whose
+    /// turn-end seals already covered every line.
+    ///
+    /// # Errors
+    /// As [`Segments::new`].
+    pub fn carried(earlier: Vec<CarriedPart>, packs: String) -> Result<Self> {
+        let parts = earlier.into_iter().map(SegmentPart::Carried).collect();
+        Ok(Self {
+            packs: Some(packs),
+            ..Self::of(parts)?
+        })
+    }
+
     /// The compact transcript's parts: the earlier ones carried by oid, then
     /// this turn's sealed part when the turn changed any record. The body
     /// reads as their join, which is what every leaf is computed over.

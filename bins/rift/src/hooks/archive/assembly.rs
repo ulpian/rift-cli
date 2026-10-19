@@ -16,7 +16,7 @@ use super::carry::{self, TurnCarry};
 use super::tasks::{self, TaskSources};
 use super::{originals, session_facts_for_archive, session_raw_capture, session_transcript};
 use crate::hooks::turn_end::frontier::SealRead;
-use crate::hooks::turn_end::TurnInputs;
+use crate::hooks::turn_end::{SealEnd, TurnInputs};
 use crate::hooktime::HookTimer;
 
 /// Everything one checkpoint of one session is built from.
@@ -45,7 +45,7 @@ pub(crate) fn assemble_session(
     agent: &str,
     session: &str,
 ) -> Result<SessionAssembly> {
-    assemble(t, rt, store, repo, agent, session, false)
+    assemble(t, rt, store, repo, agent, session, None)
 }
 
 /// Assemble a turn-end checkpoint's inputs. Everything is as
@@ -60,11 +60,28 @@ pub(crate) fn assemble_turn_end(
     agent: &str,
     session: &str,
 ) -> Result<SessionAssembly> {
-    assemble(t, rt, store, repo, agent, session, true)
+    assemble(t, rt, store, repo, agent, session, Some(SealEnd::Turn))
 }
 
-/// The one assembly both entries share; `turn_end` changes only how the main
-/// transcript is sealed.
+/// Assemble a session-end checkpoint's inputs. When the session's turn ends
+/// left segmented parts, the main transcript's final body carries them by oid
+/// and seals only the tail past them; a refused chain (a truncated file, a
+/// moved part, changed packs) reseals the whole file and the frontier record
+/// names the break for doctor. A session that never sealed a turn is
+/// assembled exactly as [`assemble_session`] does it.
+pub(crate) fn assemble_session_end(
+    t: &HookTimer,
+    rt: &tokio::runtime::Runtime,
+    store: &rift_store::SqliteStore,
+    repo: &rift_git::RepoPaths,
+    agent: &str,
+    session: &str,
+) -> Result<SessionAssembly> {
+    assemble(t, rt, store, repo, agent, session, Some(SealEnd::Session))
+}
+
+/// The one assembly every entry shares; `end` changes only how the main
+/// transcript is sealed, `None` sealing it whole.
 fn assemble(
     t: &HookTimer,
     rt: &tokio::runtime::Runtime,
@@ -72,7 +89,7 @@ fn assemble(
     repo: &rift_git::RepoPaths,
     agent: &str,
     session: &str,
-    turn_end: bool,
+    end: Option<SealEnd>,
 ) -> Result<SessionAssembly> {
     let raw = t.phase("archive_raw_capture", || {
         session_raw_capture(&repo.work_tree)
@@ -89,16 +106,17 @@ fn assemble(
     // and sealed once per artifact. Best-effort like the capture itself: a
     // missing or unreadable file archives a transcript-less checkpoint, never
     // an error, because the agent owns that file and may have moved it.
-    let carry = turn_end.then(|| turn_carry(rt, store, repo, session));
+    let carry = end.map(|_| turn_carry(rt, store, repo, session));
     let spool = originals::Spool::load_carrying(&repo.common_dir, session, &packs, carry.as_ref());
-    let inputs = TurnInputs {
+    let inputs = end.map(|end| TurnInputs {
         rt,
         store,
         repo,
         session,
         packs: &packs,
-    };
-    let turn = turn_end.then_some(&inputs);
+        end,
+    });
+    let turn = inputs.as_ref();
     // The main transcript is read once here; the seal and the subagents'
     // spawn index both take these bytes.
     let main = tasks::main_transcript_path(&repo.git_dir, session);

@@ -21,8 +21,8 @@ use super::git::{effective_config, session_raw_capture, state_from_token, strate
 use super::{now_ms, projection_db_at};
 
 pub(crate) use self::assembly::assemble_session;
-use self::assembly::assemble_turn_end;
 use self::assembly::SessionAssembly;
+use self::assembly::{assemble_session_end, assemble_turn_end};
 pub(super) use self::outlines::bind_and_cache_outlines;
 use self::outlines::bind_session_outlines;
 pub(crate) use self::spills::contained;
@@ -123,13 +123,15 @@ pub(super) fn archive_in_git_hook(
     // assembly, same boundary discipline as the post-commit worker. A git hook
     // keeps no phase timings, so its timer is the disabled one.
     let untimed = crate::hooktime::HookTimer::new("archive-now", false);
-    // A turn end seals the main transcript from its new lines alone; every
-    // other road seals it whole.
-    let turn_end = decision.reason == rift_shadow::hooks::strategy::ArchiveReason::TurnEnd;
-    let assemble = if turn_end {
-        assemble_turn_end
-    } else {
-        assemble_session
+    // A turn end seals the main transcript from its new lines alone; a
+    // session end seals only the tail its turn ends left; every other road
+    // seals it whole.
+    use rift_shadow::hooks::strategy::ArchiveReason;
+    let turn_end = decision.reason == ArchiveReason::TurnEnd;
+    let assemble = match decision.reason {
+        ArchiveReason::TurnEnd => assemble_turn_end,
+        ArchiveReason::SessionEnd => assemble_session_end,
+        _ => assemble_session,
     };
     let SessionAssembly {
         raw,

@@ -3,7 +3,10 @@ use rift_shadow_redact::RulePackSet;
 
 use rift_recall_substrate::worktree::git_blob_oid;
 
-use super::{seal_turn, seal_turn_through, ChainBreak, PriorChain, PriorPart, TurnSeal};
+use super::{
+    seal_session_end_through, seal_turn, seal_turn_through, ChainBreak, PriorChain, PriorPart,
+    TurnSeal,
+};
 use crate::backend::{RedactionFallback, SegmentPart, TranscriptBody};
 
 fn record(n: usize) -> String {
@@ -280,4 +283,61 @@ fn a_previous_shard_without_per_part_counts_carries_its_parts_as_zero() {
         chain_of(&second).fallbacks,
         vec![RedactionFallback::default(); 2]
     );
+}
+
+/// The session-end seal over the real gate, counting each call's first line.
+fn session_end(raw: &SecretBytes, prior: Option<PriorChain>, calls: &mut Vec<usize>) -> TurnSeal {
+    let packs = packs();
+    let mut gate = |bytes: &SecretBytes, first_line: usize| {
+        calls.push(first_line);
+        rift_shadow_redact::redact_with_at(bytes, &packs, first_line)
+    };
+    seal_session_end_through(raw, prior, &packs, &mut gate).unwrap()
+}
+
+#[test]
+fn a_session_end_seals_the_tail_through_the_last_line_and_matches_the_whole_seal() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let lines = records(0..6);
+    let mut calls = Vec::new();
+    let end = session_end(&doc(&lines), Some(chain_of(&first)), &mut calls);
+    assert_eq!(calls, vec![3], "only the tail past the turn's three lines");
+    let parts = segments_of(&end);
+    assert_eq!(parts[0], segments_of(&first)[0]);
+    assert_eq!(parts[1], lines[3..].concat().into_bytes());
+    let whole = rift_shadow_redact::redact_with(&doc(&lines), &packs()).unwrap();
+    assert_eq!(parts.concat(), whole.redacted.as_slice());
+}
+
+#[test]
+fn a_session_end_with_nothing_past_the_frontier_carries_the_parts_and_seals_nothing() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let mut calls = Vec::new();
+    let end = session_end(&doc(&records(0..3)), Some(chain_of(&first)), &mut calls);
+    assert!(
+        calls.is_empty(),
+        "no turn-end content passes the gate again"
+    );
+    let TurnSeal::Appended { body, .. } = &end else {
+        panic!("the carried parts are the final body");
+    };
+    let TranscriptBody::Segments(segments) = body else {
+        panic!("still segmented");
+    };
+    assert!(matches!(segments.parts(), [SegmentPart::Carried(_)]));
+}
+
+#[test]
+fn a_session_end_over_a_truncated_transcript_reseals_whole() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let mut calls = Vec::new();
+    let end = session_end(&doc(&records(0..1)), Some(chain_of(&first)), &mut calls);
+    assert!(matches!(
+        end,
+        TurnSeal::Whole {
+            broken: ChainBreak::Truncated,
+            ..
+        }
+    ));
+    assert_eq!(calls, vec![0]);
 }

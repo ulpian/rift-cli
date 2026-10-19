@@ -137,6 +137,45 @@ pub fn seal_turn_through(
     packs: &RulePackSet,
     gate: &mut Gate<'_>,
 ) -> Result<TurnSeal> {
+    seal_through(raw, prior, packs, gate, Cut::Admitted)
+}
+
+/// Seal what a session's turn-end seals left, at its end: every complete
+/// line past the frontier, through the end of the file. A turn end holds its
+/// newest line back until a later line admits the cut; at the session's end
+/// no later line will come, so the tail is sealed whole. With nothing past
+/// the frontier the earlier parts alone are carried, so no turn-end
+/// checkpoint's content passes the gate again. A refused chain reseals the
+/// whole file, exactly as a turn end does.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the gate returns one.
+pub fn seal_session_end_through(
+    raw: &SecretBytes,
+    prior: Option<PriorChain>,
+    packs: &RulePackSet,
+    gate: &mut Gate<'_>,
+) -> Result<TurnSeal> {
+    seal_through(raw, prior, packs, gate, Cut::EndOfFile)
+}
+
+/// Where the new part ends.
+#[derive(Clone, Copy)]
+enum Cut {
+    /// At the last cut R1 admits with a line after it: a turn end.
+    Admitted,
+    /// At the last complete line: a session end, after which nothing grows.
+    EndOfFile,
+}
+
+/// The seal both entries share; `rule` decides only where the new part ends.
+fn seal_through(
+    raw: &SecretBytes,
+    prior: Option<PriorChain>,
+    packs: &RulePackSet,
+    gate: &mut Gate<'_>,
+    rule: Cut,
+) -> Result<TurnSeal> {
     let lines = complete_lines(raw.as_slice());
     let fingerprint = packs.fingerprint();
     let carried_counts = prior
@@ -149,8 +188,12 @@ pub fn seal_turn_through(
         Some(Err(broken)) => return whole_reseal(raw, broken, gate),
     };
     let frontier = covered(&earlier);
-    let Some(cut) = last_admitted_cut(&lines, frontier, packs) else {
-        return Ok(TurnSeal::Unchanged);
+    let cut = match rule {
+        Cut::Admitted => last_admitted_cut(&lines, frontier, packs),
+        Cut::EndOfFile => (lines.len() > frontier).then_some(lines.len()),
+    };
+    let Some(cut) = cut else {
+        return nothing_new(rule, earlier, carried_counts, frontier, fingerprint);
     };
     let delta: Vec<u8> = lines.get(frontier..cut).unwrap_or_default().concat();
     let out = gate(&SecretBytes::new(delta), frontier)?;
@@ -162,6 +205,31 @@ pub fn seal_turn_through(
         body: TranscriptBody::Segments(segments),
         document_lines: u64::try_from(cut).unwrap_or(u64::MAX),
         fallback,
+    })
+}
+
+/// No line past the frontier. A turn end records nothing new; a session end
+/// carries every earlier part as its final body, so it seals nothing again.
+fn nothing_new(
+    rule: Cut,
+    earlier: Vec<CarriedPart>,
+    carried_counts: Vec<RedactionFallback>,
+    frontier: usize,
+    fingerprint: String,
+) -> Result<TurnSeal> {
+    if matches!(rule, Cut::Admitted) || earlier.is_empty() {
+        return Ok(TurnSeal::Unchanged);
+    }
+    let counts = if carried_counts.len() == earlier.len() {
+        carried_counts
+    } else {
+        vec![RedactionFallback::default(); earlier.len()]
+    };
+    let segments = Segments::carried(earlier, fingerprint)?.with_fallbacks(counts)?;
+    Ok(TurnSeal::Appended {
+        body: TranscriptBody::Segments(segments),
+        document_lines: u64::try_from(frontier).unwrap_or(u64::MAX),
+        fallback: RedactionFallback::default(),
     })
 }
 

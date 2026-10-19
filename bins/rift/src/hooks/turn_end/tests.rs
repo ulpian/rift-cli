@@ -206,6 +206,7 @@ fn a_second_turn_end_puts_only_the_new_lines_of_the_main_transcript_through_the_
         repo: &repo,
         session: "s-turn",
         packs: &packs,
+        end: SealEnd::Turn,
     };
     let mut seen: Vec<(Vec<u8>, usize)> = Vec::new();
     let mut gate = |bytes: &SecretBytes, first_line: usize| {
@@ -256,6 +257,109 @@ fn the_commit_road_still_seals_the_main_transcript_whole_after_a_turn_end() {
     assert!(assembly.turn_read.is_none());
 }
 
+/// The session's final archive, as its `SessionEnd` hook runs it.
+fn end_session(root: &Path, at: i64) -> String {
+    let (rt, store, _) = archive_inputs(root);
+    let decision = ArchiveDecision {
+        archive: true,
+        reason: ArchiveReason::SessionEnd,
+        strategy: StrategyKind::Scheduled,
+    };
+    let id = super::super::archive::archive_in_git_hook(
+        &rt,
+        &store,
+        root,
+        None,
+        "s-turn",
+        "claude-code",
+        decision,
+        at,
+    )
+    .unwrap()
+    .expect("the session end archives");
+    id.as_str().to_owned()
+}
+
+#[test]
+fn a_session_end_after_turn_ends_seals_only_the_tail_and_carries_every_turn_part() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    assert!(mint(checkout.path(), 60, 1_000));
+    write_lines(&transcript, 5);
+    assert!(mint(checkout.path(), 100, 2_000));
+    write_lines(&transcript, 7);
+    let (rt, store, packs) = archive_inputs(checkout.path());
+    let inputs = TurnInputs {
+        rt: &rt,
+        store: &store,
+        repo: &repo,
+        session: "s-turn",
+        packs: &packs,
+        end: SealEnd::Session,
+    };
+    let mut seen: Vec<usize> = Vec::new();
+    let mut gate = |bytes: &SecretBytes, first_line: usize| {
+        seen.push(first_line);
+        rift_shadow::redact::redact_with_at(bytes, &packs, first_line)
+    };
+    let raw = SecretBytes::new(std::fs::read(&transcript).unwrap());
+    let (pair, _, _) = seal_turn_pair_through(&inputs, &raw, 0, &mut gate).unwrap();
+    assert_eq!(seen, vec![4], "lines 4 to 6 only: the turns sealed 0 to 3");
+    let (whole, _) = rift_shadow::archived_transcript(&raw, 0, &packs).unwrap();
+    assert_eq!(pair.full.as_slice(), whole.full.as_slice());
+    let turns = turn_checkpoints(checkout.path());
+    let end = end_session(checkout.path(), 3_000);
+    let walker = rift_recall_substrate::ShardWalker::open(&repo.work_tree).unwrap();
+    let part = |id: &str, i: usize| walker.read_native_entry(id, &segment_name(i)).unwrap();
+    for i in 0..2 {
+        assert_eq!(part(&end, i).unwrap().0, part(&turns[1], i).unwrap().0);
+    }
+    assert!(part(&end, 2).is_some(), "the tail is the final part");
+}
+
+#[test]
+fn a_session_end_with_no_turn_end_seal_is_sealed_whole_as_before() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    let (rt, store, packs) = archive_inputs(checkout.path());
+    let inputs = TurnInputs {
+        rt: &rt,
+        store: &store,
+        repo: &repo,
+        session: "s-turn",
+        packs: &packs,
+        end: SealEnd::Session,
+    };
+    let raw = SecretBytes::new(std::fs::read(&transcript).unwrap());
+    assert!(
+        seal_turn_pair(&inputs, &raw, 0).is_none(),
+        "the caller seals whole"
+    );
+    let end = end_session(checkout.path(), 1_000);
+    let walker = rift_recall_substrate::ShardWalker::open(&repo.work_tree).unwrap();
+    assert!(walker
+        .read_native_entry(&end, &segment_name(0))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_session_end_over_a_transcript_shorter_than_its_frontier_reseals_whole_and_says_so() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    assert!(mint(checkout.path(), 60, 1_000));
+    write_lines(&transcript, 1);
+    let end = end_session(checkout.path(), 2_000);
+    let walker = rift_recall_substrate::ShardWalker::open(&repo.work_tree).unwrap();
+    assert!(walker
+        .read_native_entry(&end, &segment_name(0))
+        .unwrap()
+        .is_none());
+    let sealed = recorded_frontier(&repo);
+    assert_eq!(sealed.checkpoint, end);
+    assert_eq!(sealed.finding(None), Some("segment-chain-broken"));
+}
+
 /// Append `lines` assistant records of about 1 KB each, numbered from `from`.
 fn append_turns(path: &Path, from: usize, lines: usize) {
     use std::io::Write as _;
@@ -271,24 +375,72 @@ fn append_turns(path: &Path, from: usize, lines: usize) {
     }
 }
 
+/// This process's CPU seconds (user + system) so far, read through `ps`
+/// because the crate forbids the unsafe `getrusage` call.
+fn cpu_seconds() -> f64 {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "time=", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    text.trim()
+        .split(':')
+        .fold(0.0, |acc, part| acc * 60.0 + part.parse::<f64>().unwrap())
+}
+
+/// Loose plus packed object count and KiB, as `git count-objects -v` says.
+fn objects(root: &Path) -> (u64, u64) {
+    let out = std::process::Command::new("git")
+        .args(["count-objects", "-v"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let field = |name: &str| -> u64 {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name)?.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    (
+        field("count:") + field("in-pack:"),
+        field("size:") + field("size-pack:"),
+    )
+}
+
+/// One step's wall, CPU and object growth, printed on one line.
+fn timed(root: &Path, label: &str, step: impl FnOnce()) {
+    let (objects_before, kib_before) = objects(root);
+    let (cpu, started) = (cpu_seconds(), std::time::Instant::now());
+    step();
+    let (wall, cpu) = (started.elapsed(), cpu_seconds() - cpu);
+    let (objects_after, kib_after) = objects(root);
+    eprintln!(
+        "{label}: wall={wall:?} cpu={cpu:.2}s objects=+{} kib=+{}",
+        objects_after - objects_before,
+        kib_after - kib_before
+    );
+}
+
 #[test]
 #[ignore = "a timing on a 28 MB transcript, run by hand in a release build"]
 fn a_turn_end_mint_on_a_28_mb_transcript_is_timed() {
     let checkout = tempfile::tempdir().unwrap();
-    let (repo, transcript) = live_session(checkout.path(), 0);
+    let root = checkout.path();
+    let (_, transcript) = live_session(root, 0);
     append_turns(&transcript, 0, 28_000);
-    let started = std::time::Instant::now();
-    assert!(mint(checkout.path(), 1, 1_000));
-    let first = started.elapsed();
-    append_turns(&transcript, 28_000, 40);
-    let started = std::time::Instant::now();
-    assert!(mint(checkout.path(), 2, 2_000));
-    let second = started.elapsed();
-    let (rt, store, _) = archive_inputs(checkout.path());
-    let timer = crate::hooktime::HookTimer::new("test", false);
-    let started = std::time::Instant::now();
-    super::super::assemble_session(&timer, &rt, &store, &repo, "claude-code", "s-turn").unwrap();
-    let whole = started.elapsed();
     let bytes = std::fs::metadata(&transcript).unwrap().len();
-    eprintln!("bytes={bytes} first={first:?} second={second:?} whole_assembly={whole:?}");
+    eprintln!("bytes={bytes}");
+    timed(root, "first turn end", || assert!(mint(root, 1, 1_000)));
+    for turn in 1..=3 {
+        append_turns(&transcript, 28_000 + 40 * (turn - 1), 40);
+        let n = u64::try_from(turn).unwrap();
+        let at = 1_000 + i64::try_from(turn).unwrap() * 1_000;
+        timed(root, &format!("turn end {}", turn + 1), || {
+            assert!(mint(root, 1 + n, at));
+        });
+    }
+    append_turns(&transcript, 28_120, 40);
+    timed(root, "session end", || {
+        end_session(root, 9_000);
+    });
 }
