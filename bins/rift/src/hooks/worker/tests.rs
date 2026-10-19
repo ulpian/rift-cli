@@ -397,7 +397,7 @@ fn a_gone_interval_checkout_stays_owed_without_spending_an_attempt() {
 
 /// A session with everything the final archive cleans up (§4.3): a subagent
 /// claim marker, a spooled original, and the two sidecars.
-fn seed_session_leftovers(repo: &rift_git::RepoPaths, session: &str) -> [std::path::PathBuf; 4] {
+fn seed_session_leftovers(repo: &rift_git::RepoPaths, session: &str) -> [std::path::PathBuf; 5] {
     let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
     let claims = sessions.join(format!("{session}.subagents"));
     std::fs::create_dir_all(&claims).unwrap();
@@ -413,11 +413,13 @@ fn seed_session_leftovers(repo: &rift_git::RepoPaths, session: &str) -> [std::pa
     std::fs::write(&transcript, b"{}").unwrap();
     let usage = sessions.join(format!("{session}.usage"));
     std::fs::write(&usage, b"{}").unwrap();
-    [claims, spool, transcript, usage]
+    let frontier = sessions.join(format!("{session}.turn-seal"));
+    std::fs::write(&frontier, b"{}").unwrap();
+    [claims, spool, transcript, usage, frontier]
 }
 
 /// The final archive (a session-end condense) removes the claims, the spool
-/// and both sidecars, and keeps the `condensed-` marker and the cache; an
+/// and the three sidecars (transcript, usage, turn-seal frontier), and keeps the `condensed-` marker and the cache; an
 /// interval archive of a live session — a seal that is not final — removes
 /// nothing (L-0A §4.3).
 #[test]
