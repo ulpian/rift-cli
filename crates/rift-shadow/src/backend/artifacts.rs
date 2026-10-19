@@ -241,6 +241,9 @@ impl CheckpointArchive {
             obj.insert("commit".into(), commit.clone().into());
         }
         self.insert_worktree_members(&mut obj);
+        if let Some(oid) = &self.observed_head {
+            obj.insert("observed_head".into(), oid.clone().into());
+        }
         canonical_json(&serde_json::Value::Object(obj))
     }
 

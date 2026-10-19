@@ -40,6 +40,7 @@ pub(super) fn transcript_of(raw: &[u8]) -> ArchivedTranscript {
 /// A minimal, valid checkpoint archive over a real 64-hex id.
 pub(crate) fn archive() -> CheckpointArchive {
     CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: std::path::PathBuf::from("/tmp/r"),
         commit: Some("abc123".to_owned()),

@@ -210,6 +210,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
     let (transcript, task_transcript) = fixture_transcripts(&packs)?;
 
     let mut archive = CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: PathBuf::from("/shard-goldens"),
         commit: Some("9".repeat(40)),

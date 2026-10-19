@@ -259,6 +259,14 @@ pub struct CheckpointArchive {
     /// anchor and golden — none of which is built inside a repository —
     /// byte-identical, exactly as `created_at_ms` does.
     pub worktree: Option<WorktreeLabel>,
+    /// The commit `HEAD` named when a turn-end checkpoint was sealed, or
+    /// `None` on any other archive and on an unborn branch. A fact about the
+    /// moment of sealing, never an anchor: the anchor stays one checkpoint per
+    /// commit. Recall serves an anchorless turn-end to the same member while
+    /// this commit is still in that member's history on the branch the
+    /// `worktree` member names. `None` omits the key, so every other shard's
+    /// metadata stays byte-identical.
+    pub observed_head: Option<String>,
     /// Per-session labels for a MULTI-session shard: the sessions whose last
     /// observation was in a different worktree from the archiving one. Empty
     /// for every archive this binary writes today, because `condense` archives

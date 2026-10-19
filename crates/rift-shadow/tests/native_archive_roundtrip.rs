@@ -347,6 +347,7 @@ fn a_seeded_secret_never_reaches_any_native_artifact() {
     ))
     .unwrap();
     let archive = CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: tmp.path().to_path_buf(),
         commit: Some("2".repeat(40)),
@@ -415,6 +416,7 @@ fn archive_with_transcript(
 ) -> CheckpointArchive {
     let out = rift_shadow_redact::redact(&SecretBytes::new(capture.to_vec())).unwrap();
     let mut archive = CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: repo.to_path_buf(),
         commit: Some("3".repeat(40)),
