@@ -428,6 +428,10 @@ pub(crate) enum ServeAuditKind {
     ReadPrevented,
     /// The same decision, recorded and not acted on.
     ReadPreventedObserved,
+    /// A terminal result carried lines the window provably holds, and the
+    /// lever that would stand a frame in for them was only observing. The
+    /// bytes the frame would have spared ride in `total`.
+    ToolOutputHeld,
     /// A compacted context was handed the map of what it stopped holding.
     RecoveryInjected,
     /// A listing-shaped search was answered instead of run.

@@ -40,8 +40,8 @@
 //! | Payload member | Kinds | Frozen as |
 //! |---|---|---|
 //! | `kind` | every kind | kept; must name the verb's own kind |
-//! | `estimated_tokens_*`, `sections`, `total_tokens` | every kind that has them | kept (counts) |
-//! | `handle` | `read_*`, `doc_*` | kept when `file:<path>@sha256:<hash>[:L<lo>-<hi>]`, else withheld |
+//! | `estimated_tokens_*`, `sections`, `total_tokens`, `would_save_bytes` | every kind that has them | kept (counts) |
+//! | `handle` | `read_*`, `doc_*`, `tool_output_held` | kept when `file:<path>@sha256:<hash>[:L<lo>-<hi>]`, else withheld |
 //! | `handle` | `summary_served`, `invalidated` | kept when `summary:<path>`, else withheld |
 //! | `handle` | `exact_retrieved` | kept when a file, summary, `log:` or citation handle, else withheld |
 //! | `handle` | `grep_capped` | kept when `grep:matches=<n>`, else withheld |
@@ -331,6 +331,7 @@ fn declared(kind: &str) -> Option<&'static [(&'static str, Member)]> {
         "read_intercepted" | "doc_rewritten" | "doc_served" => &[FILE, REASON, RETURNED, AVOIDED],
         "read_repeat_observed" => &[FILE, REASON],
         "read_prevented" => &[FILE, REASON, AVOIDED],
+        "tool_output_held" => &[FILE, ("would_save_bytes", Member::Count)],
         "search_answered" => &[REASON, RETURNED, AVOIDED],
         "grep_capped" => &[("handle", GrepHandle)],
         "doc_deferred" => &[FILE, REASON, RETURNED],

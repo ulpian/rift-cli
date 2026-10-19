@@ -349,6 +349,22 @@ pub enum MemdEvent {
         /// Tokens the read that did not happen would have cost.
         estimated_tokens_avoided: u32,
     },
+    /// **A terminal result carried lines the window provably holds**, and
+    /// the lever that would stand a frame in for them was only observing.
+    ///
+    /// Nothing was rewritten and nothing was returned, so the row books no
+    /// token figure: it names the held lines and the revision in its handle
+    /// and carries the bytes a frame would have spared, delivered minus
+    /// frame, measured on the result in hand. A count of bytes rather than
+    /// tokens, because the hook that decides may not load the tokenizer; and
+    /// its own verb, so the class is sized by itself before it claims
+    /// anything.
+    ToolOutputHeld {
+        /// `file:<path>@sha256:<hash>:L<lo>-<hi>` — see [`read_handle`].
+        handle: String,
+        /// The bytes the substitution would have spared.
+        would_save_bytes: u32,
+    },
     /// A compacted or resumed context was handed the map of what it had
     /// stopped holding. Pure spend, like [`ManifestInjected`](Self::ManifestInjected)
     /// and for the same reason: the agent did not ask, so the row records the
@@ -449,6 +465,7 @@ impl MemdEvent {
             Self::ReadIntercepted { .. } => "read_intercepted",
             Self::ReadRepeatObserved { .. } => "read_repeat_observed",
             Self::ReadPrevented { .. } => "read_prevented",
+            Self::ToolOutputHeld { .. } => "tool_output_held",
             Self::RecoveryInjected { .. } => "recovery_injected",
             Self::SearchAnswered { .. } => "search_answered",
             Self::GrepCapped { .. } => "grep_capped",
@@ -511,6 +528,7 @@ impl MemdEvent {
             | Self::Invalidated { .. }
             | Self::Refused { .. }
             | Self::ReadRepeatObserved { .. }
+            | Self::ToolOutputHeld { .. }
             | Self::RecoveryInjected { .. }
             | Self::GrepCapped { .. }
             | Self::DocDeferred { .. } => 0,
@@ -580,6 +598,7 @@ impl MemdEvent {
             // A decision that put nothing in front of the model returns
             // nothing, and says so by having no field to return.
             Self::ReadRepeatObserved { .. }
+            | Self::ToolOutputHeld { .. }
             | Self::GrepCapped { .. }
             // A read that never ran put nothing in front of the model. The
             // frame that made it unnecessary was already charged where it was
@@ -882,6 +901,10 @@ mod tests {
                 reason: TAG_PREVENTED.into(),
                 estimated_tokens_avoided: 2,
             },
+            MemdEvent::ToolOutputHeld {
+                handle: handle.to_owned(),
+                would_save_bytes: 3,
+            },
             MemdEvent::RecoveryInjected {
                 estimated_tokens_returned: 1,
             },
@@ -949,6 +972,7 @@ mod tests {
                 MemdEvent::ReadIntercepted { .. } => ("read_intercepted", 1, 2),
                 MemdEvent::ReadRepeatObserved { .. } => ("read_repeat_observed", 0, 0),
                 MemdEvent::ReadPrevented { .. } => ("read_prevented", 0, 2),
+                MemdEvent::ToolOutputHeld { .. } => ("tool_output_held", 0, 0),
                 MemdEvent::RecoveryInjected { .. } => ("recovery_injected", 1, 0),
                 MemdEvent::SearchAnswered { .. } => ("search_answered", 1, 2),
                 MemdEvent::GrepCapped { .. } => ("grep_capped", 0, 0),

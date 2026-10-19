@@ -2,10 +2,11 @@
 //! map, a search answer and a redirect say, withhold, count and drop.
 
 use super::super::{
-    render_delta_frame, render_deny_frame, render_narrow_frame, render_recovery_map,
-    render_redirect_frame, render_search_answer, HeldEntry, HeldVerdict, PathStatus, SearchHit,
-    CLAUSE_REPEAT, FRAME_DENY_OPENER, FRAME_HINT_OPENER, FRAME_NARROW_OPENER,
-    FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER, WITHHELD_PATH,
+    render_delta_frame, render_deny_frame, render_held_output_frame, render_narrow_frame,
+    render_recovery_map, render_redirect_frame, render_search_answer, HeldEntry, HeldVerdict,
+    PathStatus, SearchHit, CLAUSE_REPEAT, FRAME_DENY_OPENER, FRAME_HINT_OPENER,
+    FRAME_NARROW_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER,
+    WITHHELD_PATH,
 };
 use super::{HASH, SRC};
 
@@ -421,5 +422,17 @@ fn a_redirect_names_the_sidecar_or_is_not_a_frame() {
     assert_eq!(
         render_redirect_frame("docs/report.docx", ".rift/state/doc/日本語.md"),
         None
+    );
+}
+
+/// The held-output line names the lines, the file, the short revision and
+/// the turn, and says nothing it cannot back.
+#[test]
+fn a_held_output_frame_names_the_lines_the_revision_and_the_turn() {
+    let text = render_held_output_frame(SRC, HASH, 10, 29, 3);
+    assert_eq!(
+        text,
+        "[rift] Output held: lines 10-29 of src/lib.rs at sha256:3f9a1c2e8b7d, \
+         unchanged since turn 3."
     );
 }
