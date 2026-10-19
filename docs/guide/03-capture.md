@@ -249,6 +249,7 @@ call's full input, every tool result in full — with secrets and the opaque
 thinking signatures masked
 ([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint) says why that,
 and not byte-identity, is the standard).
+A turn-end checkpoint can seal only the lines past the previous turn's cut, as one more part under `transcript.segments/`, and one resolver joins the parts back into the whole transcript every reader and every hash sees.
 
 An optional `turn_boundary_gaps.jsonl` records a checked repository/member recovery
 assertion. A genuine checkpoint session carries it; other subject session digests
