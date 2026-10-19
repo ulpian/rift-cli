@@ -208,14 +208,27 @@ The lever that declines a re-read of lines a context window already holds
 | `narrow` | `observe` | Decline the held part of a read that overlaps lines this window holds, asking for the unheld range only. |
 | `decline_family_held` | `observe` | Decline once a read of bytes another live window holds, offering a cheaper route. |
 | `recognise_by_output` | `observe` | Book the lines a Claude Code shell result showed the window, whatever the command line was; never above the read lever. |
-| `[interception.agents]` | absent | One mode per family (`claude-code`, `codex`, `antigravity`). |
+| `[interception.agents]` | absent | Per family, in registry order (`claude-code`, `codex`, `gemini`, `antigravity`, `cursor`, `copilot-cli`, `opencode`, `factory-droid`, `ollama`): one mode, or a table of per-lever modes. |
 
 The levers above are never above `mode` or the family's cap.
-`[interception.agents]` replaces `mode` for that family, and the pinned channel
-caps the result: a family whose reason channel no recorded run has confirmed
+`[interception.agents]` replaces `mode` for that family. A family written as a
+table instead takes `mode` and any of `first_contact`, `decline_family_held`,
+`inherit_by_name` and `narrow`; each lever it names replaces the repository's
+value for that family alone, and every lever it leaves out keeps it:
+
+```toml
+[interception.agents]
+codex = "observe"            # one mode for the whole family, as before
+
+[interception.agents.claude-code]
+first_contact = "enforce"    # this harness answers first reads; others observe
+```
+
+A per-lever entry is still a request: it never resolves above the family's read
+lever, and the pinned channel caps the result: a family whose reason channel no recorded run has confirmed
 resolves to `observe` however the table is written, and nothing lifts a family
-above what its rows allow — a cap, not a grant. An unknown family name fails the
-load. `enforce` is the default because all three channels are pinned and
+above what its rows allow — a cap, not a grant. An unknown family name, an unknown lever
+in a family's table and an unknown value each fail the load. `enforce` is the default because all three channels are pinned and
 confirmed; an explicit `off` or `observe` stays
 ([10](10-agent-integrations.md)).
 

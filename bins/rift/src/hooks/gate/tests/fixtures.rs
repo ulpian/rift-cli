@@ -134,9 +134,10 @@ pub(super) fn levers_for(
     // is reached only by being named, and a test that skipped the naming
     // would be testing the caveat rather than the lever.
     policy.interception.agents = rift_recall_policy::AgentModes {
-        claude_code: (family == "claude-code").then_some(mode),
-        codex: (family == "codex").then_some(mode),
-        antigravity: (family == "antigravity").then_some(mode),
+        claude_code: (family == "claude-code").then_some(mode.into()),
+        codex: (family == "codex").then_some(mode.into()),
+        antigravity: (family == "antigravity").then_some(mode.into()),
+        ..rift_recall_policy::AgentModes::default()
     };
     rift_recall_policy::resolve(
         &policy,
