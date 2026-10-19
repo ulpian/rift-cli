@@ -153,7 +153,7 @@ impl PinnedEntry {
     }
 
     /// The entry as the expectation it records, for the shared per-field checks.
-    fn as_expectation(&self) -> Expectation {
+    pub(crate) fn as_expectation(&self) -> Expectation {
         Expectation {
             pin_slot: self.pin_slot,
             source_key: self.source_key.clone(),

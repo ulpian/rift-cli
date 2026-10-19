@@ -77,3 +77,65 @@ fn a_declaration_reads_as_its_line_counts() {
     assert_eq!(declared_layout(&Value::Null), Declared::Whole);
     assert_eq!(segment_name(7), "transcript.segments/000007");
 }
+
+const COMPACT_META: &str = r#"{"transcript_compact_segments":2}"#;
+
+#[test]
+fn a_record_re_emitted_by_a_later_compact_part_supersedes_at_its_first_position() {
+    let first = br#"{"id":"m1","t":"a"}
+{"role":"user"}
+"#;
+    let second = br#"{"id":"m1","t":"ab"}
+{"id":"m2","t":"c"}
+"#;
+    let joined = join_compact_segments(&[first.to_vec(), second.to_vec()]);
+    let expected = br#"{"id":"m1","t":"ab"}
+{"role":"user"}
+{"id":"m2","t":"c"}
+"#;
+    assert_eq!(joined, expected.to_vec());
+}
+
+#[test]
+fn declared_compact_parts_read_back_as_their_join_for_the_parent_and_a_task() {
+    for dir in ["", "tasks/toolu_1/"] {
+        let (meta, a, b) = (
+            format!("{dir}metadata.json"),
+            format!("{dir}transcript.compact.segments/000000"),
+            format!("{dir}transcript.compact.segments/000001"),
+        );
+        let map = store(&[
+            (&meta, COMPACT_META),
+            (&a, "{\"id\":\"m\",\"t\":1}\n"),
+            (&b, "{\"id\":\"m\",\"t\":2}\n"),
+        ]);
+        let rel = format!("{dir}transcript.compact.jsonl");
+        assert_eq!(
+            read(&map, &rel).unwrap(),
+            b"{\"id\":\"m\",\"t\":2}\n",
+            "{dir}"
+        );
+    }
+}
+
+#[test]
+fn a_compact_part_missing_or_beside_a_whole_compact_reads_as_absent() {
+    let missing = store(&[
+        ("metadata.json", COMPACT_META),
+        ("transcript.compact.segments/000000", "a\n"),
+    ]);
+    assert_eq!(read(&missing, "transcript.compact.jsonl"), None);
+    let both = store(&[
+        ("metadata.json", r#"{"transcript_compact_segments":1}"#),
+        ("transcript.compact.segments/000000", "a\n"),
+        ("transcript.compact.jsonl", "w\n"),
+    ]);
+    assert_eq!(read(&both, "transcript.compact.jsonl"), None);
+    let bad = store(&[
+        ("metadata.json", r#"{"transcript_compact_segments":0}"#),
+        ("transcript.compact.jsonl", "w\n"),
+    ]);
+    assert_eq!(read(&bad, "transcript.compact.jsonl"), None);
+    let whole = store(&[("metadata.json", "{}"), ("transcript.compact.jsonl", "w\n")]);
+    assert_eq!(read(&whole, "transcript.compact.jsonl").unwrap(), b"w\n");
+}
