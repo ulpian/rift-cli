@@ -2,6 +2,7 @@
 //! resume the job, admit its hold, drive the stages, and release the hold on
 //! every exit. The plan directory and every stage record stay behind as the
 //! receipt; a later run takes a new hold and the stages recheck what changed.
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -10,9 +11,12 @@ use rift_shadow::backend::NativeBackend;
 use rift_shadow::hooks::AdapterRegistry;
 
 use crate::capture_queue::QueueLock;
-use crate::capture_recovery::hold::admit_own_hold;
+use crate::capture_recovery::hold::{admit_own_hold, HOLD_NAME};
 use crate::capture_recovery::job::{begin, release, Job, Member};
 use crate::capture_recovery::runner::{recover, Context};
+
+/// The same words the walk ends with when its inventory is empty.
+const NOTHING_OWED: &str = "capture recovery: nothing to recover";
 
 /// Why no recovery ran, or why its hold could not be released.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +57,10 @@ pub(super) fn run(root: &Path, repo: &rift_git::RepoPaths) -> Result<String, Ref
         return Err(Refusal::NotSetUp);
     }
     let family = crate::family::resolve_at(root).map_err(|_| Refusal::NotSetUp)?;
+    // A run with nothing owed writes nothing: no lock, no plan, no hold.
+    if !owed(&repo.git_dir) {
+        return Ok(NOTHING_OWED.to_owned());
+    }
     let family_dir = family_dir(&family.family_id)?;
     let owner = crate::capture_queue::acquire_owner(&repo.git_dir).map_err(|_| Refusal::Busy)?;
     let member = Member {
@@ -66,6 +74,29 @@ pub(super) fn run(root: &Path, repo: &rift_git::RepoPaths) -> Result<String, Ref
     let walked = walk(root, repo, &owner, &job, now);
     release(&owner, &job).map_err(|_| Refusal::HoldKept)?;
     walked
+}
+
+/// Whether anything is owed, read without a lock or a write: a hold left
+/// to resume, or a `*.json` ticket in the member's agent journal. With
+/// neither, the inventory is empty and the walk could only say so, so no
+/// plan is minted for it. A ticket that arrives after this read waits for
+/// the next run.
+fn owed(git_dir: &Path) -> bool {
+    if git_dir.join(HOLD_NAME).symlink_metadata().is_ok() {
+        return true;
+    }
+    crate::family::run_state::agent_queue_read_dirs(git_dir)
+        .iter()
+        .any(|dir| holds_ticket(dir))
+}
+
+fn holds_ticket(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| Path::new(&entry.file_name()).extension() == Some(OsStr::new("json")))
 }
 
 fn family_dir(family_id: &rift_core::RepoId) -> Result<PathBuf, Refusal> {

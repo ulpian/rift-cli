@@ -103,3 +103,56 @@ fn capture_recovery_report_names_a_held_recovery_and_changes_nothing() {
     );
     assert!(cache.iter().all(|p| after.contains(p)));
 }
+
+fn recovery_dirs(home: &Path) -> Vec<PathBuf> {
+    tree(&home.join("cache"))
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "recovery"))
+        .collect()
+}
+
+/// The legacy agent journal in the git dir: the first run that resolves the
+/// member moves what it holds into the member's journal under the cache root.
+fn legacy_agent_queue(f: &Fixture) -> PathBuf {
+    let dir = f.repo.path().join(".git").join("rift-agent-queue");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn capture_recovery_fix_with_nothing_owed_writes_no_plan_and_takes_no_hold() {
+    let f = Fixture::initialized();
+    let cache = tree(&f.home.path().join("cache"));
+    let report = f.rift(&["doctor"]);
+    assert!(!String::from_utf8_lossy(&report.stdout).contains("capture recovery held"));
+    let after_report = tree(&f.home.path().join("cache"));
+    assert!(cache.iter().all(|p| after_report.contains(p)));
+    assert!(recovery_dirs(f.home.path()).is_empty());
+    for _ in 0..2 {
+        let out = f.rift(&["doctor", "--fix"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("capture recovery: nothing to recover"),
+            "{stdout}"
+        );
+        assert!(recovery_dirs(f.home.path()).is_empty(), "{stdout}");
+        assert!(!f.hold().exists());
+    }
+}
+
+#[test]
+fn capture_recovery_fix_that_refuses_still_releases_its_hold() {
+    let f = Fixture::initialized();
+    // One unreadable ticket: work is owed, so a plan is minted, and the
+    // selection then refuses before any stage record is written.
+    std::fs::write(legacy_agent_queue(&f).join("boundary-x.json"), b"{not json").unwrap();
+    let out = f.rift(&["doctor", "--fix"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("capture recovery"), "{stdout}");
+    assert!(!stdout.contains("nothing to recover"), "{stdout}");
+    assert!(
+        !f.hold().exists(),
+        "the refusal released the hold: {stdout}"
+    );
+    assert_eq!(recovery_dirs(f.home.path()).len(), 1, "{stdout}");
+}
