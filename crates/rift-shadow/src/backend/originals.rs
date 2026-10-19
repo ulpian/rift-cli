@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use rift_core::{RedactedBytes, Result};
+use rift_core::Result;
 
 use super::rewrite::{LineRange, RewriteForm, Rewritten};
 use super::{ArchivedTranscript, CheckpointArchive, OriginalLeafBytes};
@@ -64,7 +64,7 @@ impl OriginalState {
 
 /// One spooled original, sealed or accounted for.
 ///
-/// No `Debug`: the body is [`RedactedBytes`], which withholds it.
+/// No `Debug`: the body holds [`rift_core::RedactedBytes`], which withholds it.
 #[derive(Clone)]
 pub struct ArchivedOriginal {
     /// The rewritten call — the sealed file's stem.
@@ -83,8 +83,9 @@ pub struct ArchivedOriginal {
     /// How the original reached the shard.
     pub state: OriginalState,
     /// The sealed bytes; `None` exactly when the state is
-    /// [`OriginalState::Unsealed`].
-    pub body: Option<RedactedBytes>,
+    /// [`OriginalState::Unsealed`]. Sealed now, or carried by oid from the
+    /// previous turn-end shard when its spool record is unchanged.
+    pub body: Option<super::TranscriptBody>,
 }
 
 impl ArchivedOriginal {
@@ -128,7 +129,7 @@ impl ArchivedTranscript {
     /// The originals this transcript carries a sealed body for.
     pub(super) fn sealed_originals(
         &self,
-    ) -> impl Iterator<Item = (&ArchivedOriginal, &RedactedBytes)> {
+    ) -> impl Iterator<Item = (&ArchivedOriginal, &super::TranscriptBody)> {
         self.originals
             .iter()
             .filter_map(|o| o.body.as_ref().map(|body| (o, body)))
@@ -239,7 +240,7 @@ mod tests {
             rewritten: (state == OriginalState::Sealed)
                 .then_some(Rewritten::Delivered(RewriteForm::FoldedOutput)),
             state,
-            body: body.map(redacted_of),
+            body: body.map(|b| redacted_of(b).into()),
         }
     }
 

@@ -662,3 +662,59 @@ fn a_paths_blobs_come_back_newest_first_over_the_bounded_history() {
         Some(std::fs::canonicalize(dir.path()).unwrap())
     );
 }
+
+/// Lay down one segmented turn-end shard on the checked-out checkpoint
+/// branch and commit it there. Nothing touches the working branch.
+fn add_turn_end_shard(dir: &Path, id: &str, parts: &[&str]) {
+    let (hi, rest) = id.split_at(2);
+    let shard = dir.join(hi).join(rest);
+    let lines = vec!["1"; parts.len()].join(",");
+    write(
+        &shard.join("metadata.json"),
+        &format!(
+            r#"{{"strategy":"turn-end","created_at":"2026-01-01T00:00:00Z","transcript_segments":{},"segment_raw_lines":[{lines}]}}"#,
+            parts.len()
+        ),
+    );
+    for (n, part) in parts.iter().enumerate() {
+        write(&shard.join(format!("transcript.segments/{n:06}")), part);
+    }
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "turn-end"]);
+}
+
+/// Before the first commit on the working branch, each turn-end seal lands
+/// only on `refs/heads/rift/checkpoints/v1`. The next catalogue build lists
+/// it, anchorless and dated by its own record, and reads its joined parts:
+/// no commit on the working branch is needed for a seal to be seen.
+#[test]
+fn a_turn_end_seal_on_the_checkpoint_branch_is_catalogued_before_any_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    pin_line_endings(dir);
+    git(dir, &["checkout", "-q", "--orphan", "rift/checkpoints/v1"]);
+    add_turn_end_shard(dir, "ab12", &["a\n"]);
+    git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    let reader = GixSubstrate::open(dir).unwrap();
+    let first = rift_recall_substrate::build_checkpoint_catalogue(&reader).unwrap();
+    assert_eq!(first.len(), 1);
+
+    git(
+        dir,
+        &["symbolic-ref", "HEAD", "refs/heads/rift/checkpoints/v1"],
+    );
+    add_turn_end_shard(dir, "cd34", &["a\n", "b\n"]);
+    git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    let reader = GixSubstrate::open(dir).unwrap();
+    let next = rift_recall_substrate::build_checkpoint_catalogue(&reader).unwrap();
+    let ids: Vec<&str> = next.iter().map(|e| e.checkpoint_id.as_str()).collect();
+    assert_eq!(ids, ["ab12", "cd34"]);
+    for entry in &next {
+        assert!(entry.anchor_commit.is_none(), "{}", entry.checkpoint_id);
+        assert!(entry.recorded_at_ms.is_some(), "{}", entry.checkpoint_id);
+        assert!(entry.issues.is_empty(), "{:?}", entry.issues);
+    }
+    let joined = reader.read_artifact("cd34", "transcript.jsonl").unwrap();
+    assert_eq!(joined.as_deref(), Some(&b"a\nb\n"[..]));
+}

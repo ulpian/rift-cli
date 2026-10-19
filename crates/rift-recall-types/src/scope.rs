@@ -239,6 +239,27 @@ pub struct Scope {
     pub checkpoints: CheckpointWindow,
     /// Cross-scope grant (none by default).
     pub cross: CrossScopeGrant,
+    /// The caller's own member and the branch its `HEAD` names. On an unborn
+    /// branch the caller is served the checkpoints this member archived on
+    /// that branch. On a born branch it admits only this member's anchorless
+    /// seals on that branch whose observed head is in the caller's history.
+    /// Nothing a sibling member or another branch wrote passes through it.
+    pub member: Option<SameMember>,
+}
+
+/// One member on one branch: the route an anchorless seal is served through.
+///
+/// A turn-end checkpoint sealed before the first commit has no anchor, so the
+/// ancestry route can never admit it. The name `HEAD` points at still exists,
+/// and the member token says the checkpoint was written here, so the pair is
+/// enough to serve this member its own live record without widening to every
+/// anchorless row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SameMember {
+    /// The short branch name the symbolic `HEAD` points at.
+    pub branch: String,
+    /// The member's worktree token, as the archive recorded it.
+    pub token: String,
 }
 
 impl Scope {
@@ -261,6 +282,7 @@ impl Scope {
             developer: DeveloperScope::CurrentOnly,
             checkpoints: CheckpointWindow::LastN(last_n),
             cross: CrossScopeGrant::none(),
+            member: None,
         }
     }
 
@@ -309,7 +331,16 @@ impl Scope {
             developer: DeveloperScope::CurrentOnly,
             checkpoints: CheckpointWindow::All,
             cross: CrossScopeGrant::none(),
+            member: None,
         }
+    }
+
+    /// The same scope, naming the caller's member and the branch its `HEAD`
+    /// points at, born or unborn.
+    #[must_use]
+    pub fn with_member(mut self, member: SameMember) -> Self {
+        self.member = Some(member);
+        self
     }
 }
 

@@ -95,8 +95,11 @@ async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
 ///
 /// `HEAD` is read from the discovered `RepoPaths` as a file, never through a
 /// `git` process (the 100 ms latency budget is shared with the hook path that
-/// also calls this). Unreadable or unborn ⇒ `None`, which the predicate reads
-/// as *exclude and report* — the one direction that cannot invent a saving.
+/// also calls this). Unreadable ⇒ `None`, which the predicate reads as
+/// *exclude and report* — the one direction that cannot invent a saving. The
+/// scope always names this member and its branch (`Scope::with_member`): an
+/// unborn branch is served this member's own seals on it, and a born one its
+/// anchorless seals whose observed head is still in `HEAD`'s history.
 ///
 /// The worktree axis stays [`WorktreeScope::Any`]: a summary computed in one
 /// member must be servable in the next, which is the whole point of the family
@@ -105,15 +108,18 @@ pub(crate) fn serving_scope(
     family: &rift_git::family::Family,
     repo: &Path,
 ) -> Result<(Scope, Box<dyn AncestryOracle>)> {
-    let head = rift_git::discover(repo)
-        .ok()
-        .and_then(|paths| rift_git::head_state(&paths).oid);
-    let scope = Scope::for_worktree(
+    let paths = rift_git::discover(repo).ok();
+    let state = paths.as_ref().map(rift_git::head_state).unwrap_or_default();
+    let member = paths.as_ref().and_then(|p| own_member(p, &state));
+    let mut scope = Scope::for_worktree(
         family.recall_id.as_str(),
         u32::MAX,
-        head,
+        state.oid,
         WorktreeScope::Any,
     );
+    if let Some(member) = member {
+        scope = scope.with_member(member);
+    }
     let ancestry: Box<dyn AncestryOracle> = match GixAncestry::open(repo) {
         Ok(oracle) => Box::new(oracle),
         // A repository this process cannot open answers *unknown*, which
@@ -121,6 +127,24 @@ pub(crate) fn serving_scope(
         Err(_) => Box::new(NoAncestry),
     };
     Ok((scope, ancestry))
+}
+
+/// This member and the branch its `HEAD` names, born or unborn, so its
+/// anchorless turn-end seals on that branch can be served. A detached HEAD
+/// names nothing. The file reader cannot see a reftable store, so a missing
+/// oid there is a read failure, not an unborn branch: no member is named and
+/// the scope stays on the anchor route.
+fn own_member(
+    paths: &rift_git::RepoPaths,
+    state: &rift_git::HeadState,
+) -> Option<rift_recall_types::SameMember> {
+    if paths.common_dir.join("reftable").exists() {
+        return None;
+    }
+    Some(rift_recall_types::SameMember {
+        branch: state.branch.clone()?,
+        token: paths.worktree_token(),
+    })
 }
 
 /// The one recall ingest pass: blob-oid map first, then the

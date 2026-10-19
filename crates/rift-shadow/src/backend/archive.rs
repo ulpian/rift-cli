@@ -259,6 +259,14 @@ pub struct CheckpointArchive {
     /// anchor and golden — none of which is built inside a repository —
     /// byte-identical, exactly as `created_at_ms` does.
     pub worktree: Option<WorktreeLabel>,
+    /// The commit `HEAD` named when a turn-end checkpoint was sealed, or
+    /// `None` on any other archive and on an unborn branch. A fact about the
+    /// moment of sealing, never an anchor: the anchor stays one checkpoint per
+    /// commit. Recall serves an anchorless turn-end to the same member while
+    /// this commit is still in that member's history on the branch the
+    /// `worktree` member names. `None` omits the key, so every other shard's
+    /// metadata stays byte-identical.
+    pub observed_head: Option<String>,
     /// Per-session labels for a MULTI-session shard: the sessions whose last
     /// observation was in a different worktree from the archiving one. Empty
     /// for every archive this binary writes today, because `condense` archives
@@ -281,7 +289,7 @@ pub struct ArchivedTranscript {
     pub full: super::TranscriptBody,
     /// `transcript.compact.jsonl` — the redacted deterministic compaction,
     /// also self-contained (a reader with one shard needs no other shard).
-    pub compact: RedactedBytes,
+    pub compact: super::TranscriptBody,
     /// The 0-based compact-line index where this checkpoint's slice begins
     /// ([`crate::transcript::CompactTranscript::compact_transcript_start`]);
     /// rounds toward inclusion, recorded in `metadata.json`.
@@ -300,6 +308,20 @@ pub struct ArchivedTranscript {
     /// fallback, summed over both artifacts; recorded on the metadata
     /// document beside the pair only when non-zero.
     pub redaction_fallback: RedactionFallback,
+    /// How a session end's whole seal compared with the turn-end parts
+    /// (design §3.4); `None` on every other archive, which writes nothing.
+    pub reconciliation: Option<Reconciliation>,
+}
+
+/// The session-end comparison's outcome, recorded on the final shard's
+/// metadata as `reconciled` and, for a difference, `supersedes_segments`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reconciliation {
+    /// The parts equal the whole seal and stand as the final body.
+    Matched,
+    /// The parts differ; the whole seal is the body and supersedes them,
+    /// while the earlier checkpoints stay as written.
+    Superseded,
 }
 
 /// What the redaction gate's per-line fallback cost one transcript pair: the

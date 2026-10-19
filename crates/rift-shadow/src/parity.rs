@@ -553,6 +553,7 @@ fn empty_archive() -> CheckpointArchive {
     )
     .unwrap_or_else(|_| "0".repeat(64));
     CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: PathBuf::from("/parity-sandbox"),
         commit: Some("0".repeat(40)),
@@ -626,6 +627,7 @@ fn two_turn_archive() -> CheckpointArchive {
     ];
     let content = empty_content();
     CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: PathBuf::from("/parity-sandbox"),
         commit: Some("1".repeat(40)),
@@ -854,6 +856,7 @@ mod tests {
             })
             .collect();
         CheckpointArchive {
+            observed_head: None,
             boundary_gaps: None,
             repo: PathBuf::from("/parity-sandbox"),
             commit: Some(format!("{commit_byte:02x}").repeat(20)),

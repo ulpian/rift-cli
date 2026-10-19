@@ -30,7 +30,7 @@ pub use outcome::{LabelSubject, OutcomeKind, OUTCOME_KINDS};
 pub use provenance::{CheckpointFacts, NoProvenance, ProvenanceOracle, TokenClasses};
 pub use scope::{
     AncestorSet, AncestryOracle, BranchScope, CheckpointWindow, CrossScopeGrant, DeveloperScope,
-    NoAncestry, Scope, WorktreeScope, ANCESTRY_WALK_CAP,
+    NoAncestry, SameMember, Scope, WorktreeScope, ANCESTRY_WALK_CAP,
 };
 
 /// The semantic payload selected for one native agent boundary.

@@ -265,6 +265,7 @@ fn archive_for_id(
     facts: SessionFacts,
 ) -> CheckpointArchive {
     CheckpointArchive {
+        observed_head: None,
         boundary_gaps: facts.boundary_gaps,
         repo: std::path::PathBuf::new(),
         commit: None,
@@ -296,6 +297,12 @@ fn archive_for_id(
         worktree: None,
         session_worktrees: std::collections::BTreeMap::new(),
     }
+}
+
+/// The commit `HEAD` names when a turn-end seal is minted; `None` otherwise.
+fn observed_head(repo: &Path, reason: ArchiveReason) -> Option<String> {
+    (reason == ArchiveReason::TurnEnd).then_some(())?;
+    rift_git::head_state(&rift_git::discover(repo).ok()?).oid
 }
 
 /// Condense raw shadow capture into a durable, redacted checkpoint and record the
@@ -339,6 +346,7 @@ pub async fn condense(
     // artifacts inside `CheckpointArchive::merkle_root`, which is why condense
     // cannot get it wrong: there is nowhere left to supply it.
     let mut archive = CheckpointArchive {
+        observed_head: observed_head(repo, reason),
         repo: repo.to_path_buf(),
         commit: commit_oid.map(str::to_owned),
         // Filled from the archive itself on the next line: the id is a function
@@ -681,6 +689,7 @@ mod tests {
             .unwrap()
             .redacted;
         let mut archive = CheckpointArchive {
+            observed_head: None,
             boundary_gaps: None,
             repo: std::path::PathBuf::from("/tmp/r"),
             commit: Some("abc123".to_owned()),
@@ -1387,6 +1396,23 @@ mod tests {
     /// The archive one condense of an empty capture hands its backend when run
     /// from `repo` — a fresh store and backend each time.
     async fn archive_condensed_in(repo: &std::path::Path) -> CheckpointArchive {
+        archive_condensed_for(repo, ArchiveReason::Commit).await
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_condense_records_the_head_it_saw_and_a_commit_one_does_not() {
+        let tmp = repo_with_a_member();
+        let refs = tmp.path().join("main/.git/refs/heads/swt");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("a-foundations"), format!("{}\n", "1".repeat(40))).unwrap();
+        let member = tmp.path().join("member");
+        let turn_end = archive_condensed_for(&member, ArchiveReason::TurnEnd).await;
+        assert_eq!(turn_end.observed_head, Some("1".repeat(40)));
+        let commit = archive_condensed_for(&member, ArchiveReason::Commit).await;
+        assert_eq!(commit.observed_head, None);
+    }
+
+    async fn archive_condensed_for(repo: &Path, reason: ArchiveReason) -> CheckpointArchive {
         let backend = KeepingBackend::default();
         let s = store();
         let raw = SecretBytes::new(Vec::new());
@@ -1397,7 +1423,7 @@ mod tests {
             "01JSESSION",
             &raw,
             StrategyKind::ManualCommit,
-            ArchiveReason::Commit,
+            reason,
             Some("abc123"),
             1,
             SessionFacts::default(),

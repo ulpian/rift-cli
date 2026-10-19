@@ -67,7 +67,11 @@ fn original(id: &str, form: RewriteForm, line: u64) -> ArchivedOriginal {
         line: Some(line),
         rewritten: Some(Rewritten::Delivered(form)),
         state: OriginalState::Sealed,
-        body: Some(rift_shadow::transcript::sealed_original(&raw, &packs).unwrap()),
+        body: Some(
+            rift_shadow::transcript::sealed_original(&raw, &packs)
+                .unwrap()
+                .into(),
+        ),
     }
 }
 
