@@ -25,11 +25,13 @@ pub(super) fn codex_findings(trust: Option<&CodexTrust>) -> Vec<Finding> {
             skipped.join(", "),
         )];
     }
-    if trust.state() != "unverifiable" {
-        return Vec::new();
-    }
+    let reason = match trust.state() {
+        "unverifiable" => Reason::CodexTrustUnverifiable,
+        "unsupported_version" => Reason::CodexVersionUnsupported,
+        _ => return Vec::new(),
+    };
     vec![Finding::new(
-        Reason::CodexTrustUnverifiable,
+        reason,
         CODEX,
         None,
         unverifiable_detail(trust),

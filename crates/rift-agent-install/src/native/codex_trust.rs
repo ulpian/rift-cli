@@ -14,7 +14,9 @@
 //! The comparison is only as good as the reproduced hash, so it is made only
 //! for the Codex versions the fixtures pin ([`PROVEN_CODEX_VERSIONS`]). For
 //! any other version, or when no Codex session has said which version runs
-//! here, every handler is "unverifiable", in those words, never a guess.
+//! here, every handler is "unverifiable", in those words, never a guess. A
+//! version newer than every pin is named apart, as an unsupported version,
+//! because a client update says nothing about whether the user trusts a hook.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,7 +27,9 @@ use serde_json::{Map, Value};
 use crate::{read_json_object, ClientFamily};
 
 use super::codex_client::observed_codex_client;
-use super::codex_identity::{event_key_label, handler_identity_hash, PROVEN_CODEX_VERSIONS};
+use super::codex_identity::{
+    event_key_label, handler_identity_hash, is_newer_than_every_proven, PROVEN_CODEX_VERSIONS,
+};
 
 /// Codex's verdict on one handler Rift wrote, reached the way Codex reaches
 /// it.
@@ -99,16 +103,31 @@ impl CodexTrust {
     }
 
     /// The row's word: `error` when Codex skips any of Rift's hooks,
-    /// `unverifiable` when Rift cannot tell, `trusted` otherwise.
+    /// `unsupported_version` when the client is newer than every pin,
+    /// `unverifiable` when Rift cannot tell otherwise, `trusted` when every
+    /// hook is trusted.
     #[must_use]
     pub fn state(&self) -> &'static str {
         if !self.needs_review().is_empty() {
             return "error";
         }
-        if self.count(CodexHookVerdict::Unverifiable) > 0 {
-            return "unverifiable";
+        if self.count(CodexHookVerdict::Unverifiable) == 0 {
+            return "trusted";
         }
-        "trusted"
+        if self.unsupported_version().is_some() {
+            return "unsupported_version";
+        }
+        "unverifiable"
+    }
+
+    /// The recorded Codex version, when it is newer than every version the
+    /// trust check is proven against.
+    #[must_use]
+    pub fn unsupported_version(&self) -> Option<&str> {
+        self.client
+            .as_ref()
+            .and_then(|client| client.version.as_deref())
+            .filter(|version| is_newer_than_every_proven(version))
     }
 
     /// The remedy, when Codex is skipping any of Rift's hooks. The one place
@@ -142,6 +161,10 @@ impl CodexTrust {
             );
         }
         if self.count(CodexHookVerdict::Unverifiable) > 0 {
+            if let Some(version) = self.unsupported_version() {
+                let sentence = crate::health::remedy::codex_unsupported_version_sentence(version);
+                return format!("unsupported version — {sentence}");
+            }
             return format!("unverifiable — {}", self.unverifiable_reason());
         }
         format!("trusted ({total} of {total} hooks)")
@@ -534,33 +557,73 @@ mod tests {
         );
     }
 
-    /// Only the versions the fixtures were recorded against are judged; any
-    /// other says unverifiable, and says why, rather than guessing.
+    /// Only the versions the fixtures were recorded against are judged; an
+    /// older or in-between version says unverifiable, and says why, rather
+    /// than guessing.
     #[test]
     fn an_unproven_codex_version_is_unverifiable_and_says_so() {
         let machine = machine(FIXTURE_HOOKS);
         record(&machine, FIXTURE_CONFIG, &machine.hooks_json);
-        let trust = codex_hook_trust(
-            &machine.hooks_json,
-            Some(&machine.home),
-            client(CodexSurface::Terminal, "0.158.0"),
-        );
-        assert!(trust
-            .hooks
-            .iter()
-            .all(|hook| hook.verdict == CodexHookVerdict::Unverifiable));
-        assert_eq!(trust.state(), "unverifiable");
-        assert_eq!(trust.remedy(), None);
-        assert_eq!(
-            trust.summary(),
-            "unverifiable — Codex 0.158.0 is not a version Rift's hook-trust check is proven against"
-        );
+        for version in ["0.150.0", "0.155.0", "0.156.2"] {
+            let trust = codex_hook_trust(
+                &machine.hooks_json,
+                Some(&machine.home),
+                client(CodexSurface::Terminal, version),
+            );
+            assert!(trust
+                .hooks
+                .iter()
+                .all(|hook| hook.verdict == CodexHookVerdict::Unverifiable));
+            assert_eq!(trust.state(), "unverifiable");
+            assert_eq!(trust.unsupported_version(), None);
+            assert_eq!(trust.remedy(), None);
+            assert_eq!(
+                trust.summary(),
+                format!(
+                    "unverifiable — Codex {version} is not a version Rift's hook-trust check \
+                     is proven against"
+                )
+            );
+        }
 
         let unseen = codex_hook_trust(&machine.hooks_json, Some(&machine.home), None);
         assert_eq!(
             unseen.summary(),
             "unverifiable — no Codex session has been recorded in this checkout yet"
         );
+    }
+
+    /// A client newer than every pinned version is its own state, never
+    /// "untrusted": the record may well be current, Rift just cannot hash
+    /// the way that client does. Codex 0.163.0 is the owner's client at the
+    /// time of writing, and its record still holds the 0.157.0 hashes.
+    #[test]
+    fn a_codex_newer_than_every_pin_is_an_unsupported_version_not_untrusted() {
+        let machine = machine(FIXTURE_HOOKS);
+        record(&machine, FIXTURE_CONFIG_0157, &machine.hooks_json);
+        let trust = codex_hook_trust(
+            &machine.hooks_json,
+            Some(&machine.home),
+            client(CodexSurface::Terminal, "0.163.0"),
+        );
+        assert!(trust.needs_review().is_empty());
+        assert_eq!(trust.state(), "unsupported_version");
+        assert_eq!(trust.unsupported_version(), Some("0.163.0"));
+        assert_eq!(trust.remedy(), None);
+        assert_eq!(
+            trust.summary(),
+            "unsupported version — Codex 0.163.0 is newer than 0.157.0, the newest Codex \
+             version Rift's hook-trust check is proven against, so Rift cannot tell whether \
+             Codex runs its hooks"
+        );
+
+        let pinned = codex_hook_trust(
+            &machine.hooks_json,
+            Some(&machine.home),
+            client(CodexSurface::Terminal, "0.157.0"),
+        );
+        assert_eq!(pinned.state(), "trusted");
+        assert_eq!(pinned.unsupported_version(), None);
     }
 
     #[test]

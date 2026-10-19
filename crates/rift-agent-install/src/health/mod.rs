@@ -45,6 +45,10 @@ pub enum Reason {
     /// Rift cannot reproduce Codex's trust answer: an unproven Codex version,
     /// or no recorded Codex session to name one.
     CodexTrustUnverifiable,
+    /// The recorded Codex is newer than every version the trust check is
+    /// proven against: a separate warning, because a client update is not a
+    /// sign that the user withdrew trust.
+    CodexVersionUnsupported,
     /// An agent's newest recent session holds tool events but neither a
     /// native session-opening nor a prompt event.
     LifecycleHooksMissing,
@@ -106,9 +110,10 @@ pub struct Facts<'a> {
 
 impl Reason {
     /// Every reason, in the order findings sort by.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::CodexHooksSkipped,
         Self::CodexTrustUnverifiable,
+        Self::CodexVersionUnsupported,
         Self::LifecycleHooksMissing,
         Self::HookBinaryMissing,
         Self::HookBinaryDisagrees,
@@ -121,6 +126,7 @@ impl Reason {
         match self {
             Self::CodexHooksSkipped => "codex-hooks-skipped",
             Self::CodexTrustUnverifiable => "codex-trust-unverifiable",
+            Self::CodexVersionUnsupported => "codex-version-unsupported",
             Self::LifecycleHooksMissing => "lifecycle-hooks-missing",
             Self::HookBinaryMissing => "hook-binary-missing",
             Self::HookBinaryDisagrees => "hook-binary-disagrees",
@@ -128,13 +134,15 @@ impl Reason {
         }
     }
 
-    /// The reason's one severity. The two warnings are the cases where both
+    /// The reason's one severity. The warnings are the cases where both
     /// binaries still run and where Codex's answer is unknown: nothing is
     /// being lost that Rift can show.
     #[must_use]
     pub const fn severity(self) -> Severity {
         match self {
-            Self::CodexTrustUnverifiable | Self::HookBinaryDisagrees => Severity::Warning,
+            Self::CodexTrustUnverifiable
+            | Self::CodexVersionUnsupported
+            | Self::HookBinaryDisagrees => Severity::Warning,
             Self::CodexHooksSkipped
             | Self::LifecycleHooksMissing
             | Self::HookBinaryMissing

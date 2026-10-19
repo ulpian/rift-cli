@@ -20,13 +20,48 @@ use sha2::{Digest as _, Sha256};
 
 /// The Codex versions whose hook hashing the fixtures were recorded against.
 /// A version outside this list may hash differently, so a hash computed for
-/// it proves nothing and the trust verdict is "unverifiable" instead.
+/// it proves nothing and the trust verdict is "unverifiable" instead, or
+/// "unsupported version" when it is newer than every version here.
 ///
 /// `fixtures/codex-trust/config.toml` pins 0.153.1 and 0.155.0-alpha.16.3:
 /// a record taken before the user re-trusted two modified handlers, so it
 /// carries two mismatches. `fixtures/codex-trust/config-0.157.0.toml` pins
 /// 0.157.0: the record taken after that re-trust, all ten hashes current.
 pub(super) const PROVEN_CODEX_VERSIONS: [&str; 3] = ["0.153.1", "0.155.0-alpha.16.3", "0.157.0"];
+
+/// The newest of [`PROVEN_CODEX_VERSIONS`], the one a newer client is
+/// measured against.
+pub(crate) fn newest_proven_codex_version() -> &'static str {
+    PROVEN_CODEX_VERSIONS
+        .iter()
+        .copied()
+        .max_by_key(|version| version_order(version))
+        .unwrap_or_default()
+}
+
+/// Whether `version` is newer than every proven version. A version Rift
+/// cannot read as `major.minor.patch` is never called newer, so it stays
+/// merely unverifiable.
+pub(super) fn is_newer_than_every_proven(version: &str) -> bool {
+    let newest = version_order(newest_proven_codex_version());
+    version_order(version).is_some_and(|order| Some(order) > newest)
+}
+
+/// A sortable form of a Codex version: the three numbers, then whether it is
+/// a full release, since `0.155.0-alpha.1` comes before `0.155.0`.
+fn version_order(version: &str) -> Option<(u64, u64, u64, bool)> {
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let mut parts = core.split('.').map(str::parse::<u64>);
+    let (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    Some((major, minor, patch, pre.is_none()))
+}
 
 /// The context limit Codex applies when a handler declares none; a handler
 /// that declares exactly this hashes as if it declared nothing.

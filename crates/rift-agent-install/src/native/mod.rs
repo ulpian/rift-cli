@@ -34,6 +34,7 @@ use descriptor::{descriptor_path, rift_owns_descriptor};
 use hooks::{hook_family, inspect_client_hooks};
 use manifest::read_manifest;
 
+pub(crate) use codex_identity::newest_proven_codex_version;
 pub use codex_trust::{
     codex_home_from_process, codex_hook_trust, codex_trust, CodexClient, CodexHookTrust,
     CodexHookVerdict, CodexSurface, CodexTrust,
