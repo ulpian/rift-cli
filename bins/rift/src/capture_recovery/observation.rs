@@ -4,7 +4,9 @@
 //! is made durable before the collector runs and its completion, naming the
 //! checkpoint, after; a rerun that finds the completion does nothing, and one
 //! that finds only the attempt looks the checkpoint up by its boundary before
-//! it collects again, so the boundary is never collected twice.
+//! it collects again, so the boundary is never collected twice. Once the
+//! baseline is durable the reserved ticket itself is discharged, and the
+//! completion records what became of it.
 use serde::{Deserialize, Serialize};
 
 use crate::capture_recovery::files::Namespace;
@@ -12,8 +14,10 @@ use crate::capture_recovery::hold::OwnHold;
 use crate::capture_recovery::record::{self, Publication, RecordError};
 use crate::capture_recovery::selection::ReservedObservation;
 
+mod discharge;
 mod live;
 
+pub(crate) use discharge::ReservedTicket;
 pub(crate) use live::BoundaryCollector;
 
 pub(crate) const ATTEMPT_NAME: &str = "observation-attempt.json";
@@ -84,6 +88,9 @@ pub(crate) struct ObservationAttempt {
 pub(crate) struct ObservationCollected {
     pub(crate) schema_version: u32,
     pub(crate) checkpoint_id: Option<String>,
+    /// The reserved ticket's discharge; absent where nothing was reserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reserved_ticket: Option<ReservedTicket>,
 }
 
 /// The reserved boundary with the operation and the intent that set it
@@ -128,7 +135,7 @@ pub(crate) fn attempt_observation(
         .private()
         .map_err(|_| ObservationOwed::HoldUnavailable)?;
     let Some(reservation) = reservation else {
-        complete(private, None)?;
+        complete(private, None, None)?;
         return Ok(ObservationOutcome::NoReservation);
     };
     let observation = reservation.observation;
@@ -138,7 +145,8 @@ pub(crate) fn attempt_observation(
         Publication::Resumed if completed(private)? => return Ok(ObservationOutcome::Recognized),
         Publication::Resumed => resume(collector, observation)?,
     };
-    complete(private, Some(checkpoint_id(observation)))?;
+    let ticket = discharge::discharge_reserved(hold, &queue, private, &observation.expectation);
+    complete(private, Some(checkpoint_id(observation)), Some(ticket))?;
     Ok(outcome)
 }
 
@@ -170,10 +178,15 @@ fn completed(private: &Namespace) -> Result<bool, ObservationOwed> {
     }
 }
 
-fn complete(private: &Namespace, checkpoint_id: Option<String>) -> Result<(), ObservationOwed> {
+fn complete(
+    private: &Namespace,
+    checkpoint_id: Option<String>,
+    reserved_ticket: Option<ReservedTicket>,
+) -> Result<(), ObservationOwed> {
     let done = ObservationCollected {
         schema_version: 1,
         checkpoint_id,
+        reserved_ticket,
     };
     publish(private, COLLECTED_NAME, &done).map(|_| ())
 }

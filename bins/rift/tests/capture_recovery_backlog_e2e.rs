@@ -185,7 +185,6 @@ fn stdout(out: &Output) -> String {
 }
 
 #[test]
-#[ignore = "blocked: the first --fix now completes and retires exactly the historical tickets, but the reserved current ticket stays owed (its snapshot exists, so the ordinary drain defers it), so the second --fix runs recovery again instead of a no-op (G5f)"]
 fn capture_recovery_fix_archives_a_seeded_backlog_once_and_then_says_complete() {
     let f = Fixture::initialized();
     f.seed_backlog();
@@ -201,23 +200,14 @@ fn capture_recovery_fix_archives_a_seeded_backlog_once_and_then_says_complete() 
         stdout(&report)
     );
 
-    eprintln!(
-        "REPORT: {} OWED {:?} DIR {}",
-        stdout(&report),
-        agent_jobs_named(&f.repo, "boundary-"),
-        agent_queue_of(&f.repo).display()
-    );
     let fix = f.rift(&["doctor", "--fix"]);
     let said = stdout(&fix);
-    eprintln!("FIX: {said}\nERR: {}", String::from_utf8_lossy(&fix.stderr));
     assert!(said.contains("capture recovery complete"), "{said}");
     assert!(!f.hold().exists(), "the hold is released: {said}");
-    // Exactly the historical tickets are retired. The reserved current one
-    // is collected but its ticket is not discharged: the ordinary drain
-    // defers it because its snapshot already exists (a G5f finding).
+    // The historical tickets are retired and the reserved current one is
+    // discharged by the observation that collected its baseline.
     let left = agent_jobs_named(&f.repo, "boundary-");
-    assert_eq!(left.len(), 1, "{left:?} {said}");
-    assert!(owed.contains(&left[0]), "{left:?} {said}");
+    assert!(left.is_empty(), "{left:?} {said}");
     let plans = plan_dirs(&f.cache());
     assert_eq!(plans.len(), 1, "{said}");
     let shards = checkpoint_shards(&f.repo);
@@ -232,6 +222,9 @@ fn capture_recovery_fix_archives_a_seeded_backlog_once_and_then_says_complete() 
     assert_eq!(plan_dirs(&f.cache()), plans, "no new plan dir");
     assert_eq!(checkpoint_shards(&f.repo), shards, "no new checkpoint");
 
-    let after = f.rift(&["doctor"]);
-    eprintln!("AFTER: {}", stdout(&after));
+    // Report-only names a recovery only while a hold is held; complete means
+    // no hold is named and the capture queue is empty.
+    let after = stdout(&f.rift(&["doctor"]));
+    assert!(!after.contains("capture recovery"), "{after}");
+    assert!(after.contains("capture queue:  empty"), "{after}");
 }

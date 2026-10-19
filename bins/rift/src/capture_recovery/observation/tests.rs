@@ -209,3 +209,78 @@ fn capture_recovery_the_live_collector_leaves_one_fresh_checkpoint_and_a_rerun_a
     assert_eq!(again, Ok(ObservationOutcome::Recognized));
     assert_eq!(audits(&rig, &id), stamped);
 }
+
+/// One open turn with its boundary queued: the selection reserves it and the
+/// pin loop pins it, as the hold does before it observes.
+fn pinned_reservation(rig: &Rig, hold: &OwnHold<'_>) -> ReservedObservation {
+    let body = crate::capture_recovery::eligibility::fixtures::payload("session_id", "cur");
+    rig.ingest("claude-code", "SessionStart", &body, 10);
+    rig.ingest("claude-code", "UserPromptSubmit", &body, 20);
+    enqueue(&rig.fixture, "cur", 1, Start);
+    let selected = rig
+        .rt
+        .block_on(crate::capture_recovery::selection::select(
+            &rig.store,
+            hold,
+            &rig.registry,
+        ))
+        .unwrap();
+    let pinned = crate::capture_recovery::cut::pin_all(hold, selected).unwrap();
+    let mut observation = reserved();
+    observation.expectation = pinned.reserved_pin.unwrap().expectation;
+    observation
+}
+
+fn queued(hold: &OwnHold<'_>, observation: &ReservedObservation) -> std::path::PathBuf {
+    let queue = hold.agent_queue_namespace().unwrap();
+    queue
+        .queue()
+        .path
+        .join(&observation.expectation.source_name)
+}
+
+fn recorded(rig: &Rig) -> ObservationCollected {
+    let bytes = std::fs::read(rig.fixture.evidence.join(COLLECTED_NAME)).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn capture_recovery_the_reserved_ticket_is_removed_and_recorded_once_its_baseline_is_durable() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let observation = pinned_reservation(&rig, &hold);
+    assert!(queued(&hold, &observation).is_file());
+    let mut collector = counting(&rig, Collection::Observed);
+    let first = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(first, Ok(ObservationOutcome::Observed));
+    assert!(!queued(&hold, &observation).exists());
+    assert_eq!(
+        recorded(&rig).reserved_ticket,
+        Some(ReservedTicket::Retired)
+    );
+    // A rerun finds the completion and touches nothing.
+    let again = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(again, Ok(ObservationOutcome::Recognized));
+    assert_eq!(
+        recorded(&rig).reserved_ticket,
+        Some(ReservedTicket::Retired)
+    );
+}
+
+#[test]
+fn capture_recovery_a_different_file_under_the_reserved_name_is_kept_and_recorded_typed() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let observation = pinned_reservation(&rig, &hold);
+    let source = queued(&hold, &observation);
+    std::fs::remove_file(&source).unwrap();
+    std::fs::write(&source, b"a later delivery").unwrap();
+    let mut collector = counting(&rig, Collection::Observed);
+    let first = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(first, Ok(ObservationOutcome::Observed));
+    assert_eq!(std::fs::read(&source).unwrap(), b"a later delivery");
+    assert_eq!(
+        recorded(&rig).reserved_ticket,
+        Some(ReservedTicket::NameReused)
+    );
+}

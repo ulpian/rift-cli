@@ -785,7 +785,7 @@ mod platform {
 // Only the physical-redelivery regression tests import these until the
 // controller lands.
 #[cfg(unix)]
-pub(crate) use platform::discharge::discharge_original;
+pub(crate) use platform::discharge::{discharge_original, Discharge};
 #[cfg_attr(
     not(test),
     expect(
