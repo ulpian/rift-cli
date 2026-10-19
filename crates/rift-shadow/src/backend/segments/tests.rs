@@ -118,3 +118,41 @@ fn a_carried_part_enters_the_tree_by_its_oid_and_writes_no_blob() {
     let packs = format!(r#""segment_packs":"{}""#, "f".repeat(64));
     assert!(meta.contains(&packs), "{meta}");
 }
+
+#[test]
+fn per_part_fallback_counts_are_recorded_on_the_metadata_and_read_back() {
+    let counts = vec![
+        RedactionFallback::default(),
+        RedactionFallback {
+            lines: 2,
+            placeholders: 1,
+        },
+    ];
+    let body = TranscriptBody::Segments(
+        Segments::new(vec![redacted_of(b"a\n"), redacted_of(b"b\n")])
+            .unwrap()
+            .with_fallbacks(counts.clone())
+            .unwrap(),
+    );
+    let mut obj = serde_json::Map::new();
+    insert_segment_members(&mut obj, &body);
+    assert_eq!(
+        obj[SEGMENT_FALLBACK_KEY],
+        serde_json::json!([[0, 0], [2, 1]])
+    );
+    assert_eq!(segment_fallbacks(&serde_json::Value::Object(obj)), counts);
+}
+
+#[test]
+fn fallback_counts_that_do_not_name_every_part_are_refused() {
+    let segments = Segments::new(vec![redacted_of(b"a\n"), redacted_of(b"b\n")]).unwrap();
+    assert!(segments
+        .with_fallbacks(vec![RedactionFallback::default()])
+        .is_err());
+}
+
+#[test]
+fn a_malformed_fallback_member_reads_as_none_recorded() {
+    let meta = serde_json::json!({ SEGMENT_FALLBACK_KEY: [[1, 0], ["x", 0]] });
+    assert!(segment_fallbacks(&meta).is_empty());
+}

@@ -203,6 +203,7 @@ fn prior_chain(work_tree: &Path, checkpoint: &str) -> Option<PriorChain> {
             .get(SEGMENT_PACKS_KEY)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        fallbacks: rift_shadow::backend::segment_fallbacks(&meta),
         raw_lines,
         parts,
     })

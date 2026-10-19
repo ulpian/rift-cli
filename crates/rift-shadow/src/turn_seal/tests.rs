@@ -4,7 +4,7 @@ use rift_shadow_redact::RulePackSet;
 use rift_recall_substrate::worktree::git_blob_oid;
 
 use super::{seal_turn, seal_turn_through, ChainBreak, PriorChain, PriorPart, TurnSeal};
-use crate::backend::{SegmentPart, TranscriptBody};
+use crate::backend::{RedactionFallback, SegmentPart, TranscriptBody};
 
 fn record(n: usize) -> String {
     format!("{{\"type\":\"user\",\"message\":\"turn line {n}\"}}\n")
@@ -42,6 +42,7 @@ fn chain_of(seal: &TurnSeal) -> PriorChain {
         raw_lines: segments.raw_lines(),
         leaf: rift_hashchain::leaf_hash(body.as_slice()),
         packs: segments.packs().map(str::to_owned),
+        fallbacks: segments.fallbacks().to_vec(),
     }
 }
 
@@ -250,4 +251,33 @@ fn an_earlier_chain_that_names_no_packs_reseals_whole() {
             ..
         }
     ));
+}
+
+#[test]
+fn a_later_turn_carries_the_earlier_parts_fallback_counts_and_adds_its_own() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let mut chain = chain_of(&first);
+    assert_eq!(chain.fallbacks, vec![RedactionFallback::default()]);
+    let recorded = RedactionFallback {
+        lines: 3,
+        placeholders: 1,
+    };
+    chain.fallbacks = vec![recorded];
+    let second = seal_turn(&doc(&records(0..8)), Some(chain), &packs()).unwrap();
+    assert_eq!(
+        chain_of(&second).fallbacks,
+        vec![recorded, RedactionFallback::default()]
+    );
+}
+
+#[test]
+fn a_previous_shard_without_per_part_counts_carries_its_parts_as_zero() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let mut chain = chain_of(&first);
+    chain.fallbacks.clear();
+    let second = seal_turn(&doc(&records(0..8)), Some(chain), &packs()).unwrap();
+    assert_eq!(
+        chain_of(&second).fallbacks,
+        vec![RedactionFallback::default(); 2]
+    );
 }

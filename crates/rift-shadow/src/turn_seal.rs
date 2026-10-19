@@ -44,6 +44,9 @@ pub struct PriorChain {
     /// Its `segment_packs` member: the fingerprint of the packs its parts
     /// were sealed under, `None` where it records none.
     pub packs: Option<String>,
+    /// Its `segment_redaction_fallback` member, one entry per part; empty
+    /// where it records none.
+    pub fallbacks: Vec<RedactionFallback>,
 }
 
 /// One earlier part: the blob oid its tree entry names, and the bytes read
@@ -131,6 +134,10 @@ fn seal_turn_through(
 ) -> Result<TurnSeal> {
     let lines = complete_lines(raw.as_slice());
     let fingerprint = packs.fingerprint();
+    let carried_counts = prior
+        .as_ref()
+        .map(|c| c.fallbacks.clone())
+        .unwrap_or_default();
     let earlier = match prior.map(|chain| read_back(chain, lines.len(), &fingerprint)) {
         None => Vec::new(),
         Some(Ok(parts)) => parts,
@@ -143,11 +150,29 @@ fn seal_turn_through(
     let delta: Vec<u8> = lines.get(frontier..cut).unwrap_or_default().concat();
     let out = gate(&SecretBytes::new(delta), frontier)?;
     let fallback = RedactionFallback::of(&[&out.report]);
+    let counts = per_part_counts(carried_counts, earlier.len(), fallback);
+    let segments =
+        Segments::carrying(earlier, out.redacted, fingerprint)?.with_fallbacks(counts)?;
     Ok(TurnSeal::Appended {
-        body: TranscriptBody::Segments(Segments::carrying(earlier, out.redacted, fingerprint)?),
+        body: TranscriptBody::Segments(segments),
         document_lines: u64::try_from(cut).unwrap_or(u64::MAX),
         fallback,
     })
+}
+
+/// The earlier parts' recorded counts, then this turn's. A previous shard
+/// that recorded none, or not one per part, counts each carried part as zero:
+/// the parts are still sound, and the whole pair's own member keeps the total.
+fn per_part_counts(
+    mut carried: Vec<RedactionFallback>,
+    earlier: usize,
+    new: RedactionFallback,
+) -> Vec<RedactionFallback> {
+    if carried.len() != earlier {
+        carried = vec![RedactionFallback::default(); earlier];
+    }
+    carried.push(new);
+    carried
 }
 
 /// Check the earlier parts and admit each by its recorded blob oid.
