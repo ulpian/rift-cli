@@ -20,8 +20,8 @@ pub(crate) struct Survey {
     pub(crate) lines: usize,
     /// Rows dropped for not parsing — forged, torn, or from another version.
     pub(crate) dropped: usize,
-    /// Declines a client ran the call in spite of.
-    pub(crate) ineffective: usize,
+    /// What became of the declines planned here, joined by native call id.
+    pub(crate) calls: super::DeclineCalls,
 }
 
 /// Which of this module's three file shapes a name is.
@@ -64,7 +64,7 @@ pub(crate) fn survey(work_tree: &Path) -> Survey {
         .load();
         survey.lines += loaded.journal.lines().len();
         survey.dropped += loaded.dropped;
-        survey.ineffective += ineffective_denies(&loaded.journal);
+        survey.calls.add(&ineffective_denies(&loaded.journal));
     }
     survey
 }

@@ -72,7 +72,7 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
     let _ = std::io::stdin().read_to_end(&mut body);
     record_hook_health(agent, Some("hook execution did not complete"));
 
-    let mut decline: Option<String> = None;
+    let mut decline = super::gate::Decline::default();
     let mut document: Option<DocAnswer> = None;
     let mut search: Option<crate::search_gate::SearchAnswer> = None;
     let mut held_output: Option<serde_json::Value> = None;
@@ -88,7 +88,7 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
         )
     }));
     let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session_context_plan(agent, verb, &body, decline.as_deref())
+        session_context_plan(agent, verb, &body, decline.reason.as_deref())
     }));
     let mut failure = match (&ingest, &planned) {
         (Err(_), _) => Some("capture hook panicked"),
@@ -109,7 +109,7 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
         // A replaced result is about a call that already ran, so no decision
         // about a call still waiting can be in play beside it.
         (None, Some(output)) => rift_agent::respond::GateDecision::ReplaceOutput(output),
-        (None, None) => tool_call_decision(&document, decline.as_deref(), search.as_ref()),
+        (None, None) => tool_call_decision(&document, decline.reason.as_deref(), search.as_ref()),
     };
     let encoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rift_agent::respond::respond_with_plan(&id, verb, &context, &decision)
@@ -117,6 +117,7 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
     if encoded.is_err() {
         failure = Some("response encoding panicked");
     }
+    let mut wrote = false;
     if let Ok(Some(response)) = encoded {
         // `process::exit` does not run destructors. Complete local output
         // before bookkeeping; a successful flush does not prove client use.
@@ -135,9 +136,16 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
                 }
             }
         });
+        wrote = emitted.is_ok();
         if emitted.is_err() {
             failure = Some("hook response write failed");
         }
+    }
+    // The emission receipt for a declined call: a response that was never
+    // composed, or whose write failed, is recorded as not written, so a
+    // client is never blamed for ignoring bytes it was not sent.
+    if let Some(receipt) = &decline.receipt {
+        super::gate::record_emission(receipt, wrote, 0);
     }
     record_hook_health(agent, failure);
     std::process::exit(0);

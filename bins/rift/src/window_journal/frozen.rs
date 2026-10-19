@@ -189,7 +189,9 @@ fn archived_window_row(line: &Line) -> Option<ArchivedWindowRow> {
         // which it does not below enforce; its frozen kind arrives with it.
         Line::Family { .. } => return family_held_row(line),
         Line::Matched { .. } => return matched_row(line),
-        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } => return None,
+        Line::Outline { .. } | Line::Spawn { .. } | Line::Claim { .. } | Line::Call { .. } => {
+            return None
+        }
     })
 }
 
@@ -268,7 +270,8 @@ fn line_at_ms(line: &Line) -> u64 {
         | Line::Spawn { at_ms, .. }
         | Line::Claim { at_ms, .. }
         | Line::Family { at_ms, .. }
-        | Line::Matched { at_ms, .. } => *at_ms,
+        | Line::Matched { at_ms, .. }
+        | Line::Call { at_ms, .. } => *at_ms,
     }
 }
 

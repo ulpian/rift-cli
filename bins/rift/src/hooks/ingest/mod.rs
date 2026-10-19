@@ -42,7 +42,7 @@ pub(super) fn try_ingest_agent_hook(
     agent: &str,
     verb: &str,
     body: &[u8],
-    decline: &mut Option<String>,
+    decline: &mut crate::hooks::gate::Decline,
     document: &mut Option<DocAnswer>,
     search: &mut Option<crate::search_gate::SearchAnswer>,
     held_output: &mut Option<serde_json::Value>,
@@ -75,7 +75,7 @@ pub(super) fn try_ingest_agent_hook(
         search,
     );
     *held_output = held;
-    arm_agent_replacement(&repo.work_tree, &raw, decline.as_deref());
+    arm_agent_replacement(&repo.work_tree, &raw, decline.reason.as_deref());
     capture_into_projection(&t, &repo, &registry, &raw, agent, gate_journaled)
 }
 

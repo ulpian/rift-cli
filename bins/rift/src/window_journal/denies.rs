@@ -5,7 +5,9 @@
 //! arithmetic next door because a decline is a fact about one call, and an
 //! edit is arithmetic about a file.
 
-use rift_agent::window_journal::{DenyKey, Journal, Line};
+use std::collections::BTreeMap;
+
+use rift_agent::window_journal::{CallFact, DenyKey, Journal, Line};
 
 /// Whether this window's last word on exactly these lines is a decline that
 /// nothing has answered since.
@@ -30,46 +32,130 @@ pub(crate) fn deny_stands(journal: &Journal, key: &DenyKey) -> bool {
     }) == Some(true)
 }
 
-/// Declines a client did not act on: a decline, and then a read of exactly
-/// those lines, with no emptying between them.
+/// What became of the declines one window planned, joined call by call on
+/// the id the client gave each call.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeclineCalls {
+    /// Declines planned for a call that carried a native id.
+    pub(crate) planned: usize,
+    /// Of those, the ones whose response was written and flushed.
+    pub(crate) emitted: usize,
+    /// Of those, the ones whose response never reached stdout.
+    pub(crate) unwritten: usize,
+    /// Emitted declines the client ran the call in spite of.
+    pub(crate) ineffective: usize,
+    /// Declines planned for a call with no native id, which nothing pairs.
+    pub(crate) uncorrelatable: usize,
+}
+
+impl DeclineCalls {
+    /// Fold another window's counts into this one.
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.planned += other.planned;
+        self.emitted += other.emitted;
+        self.unwritten += other.unwritten;
+        self.ineffective += other.ineffective;
+        self.uncorrelatable += other.uncorrelatable;
+    }
+}
+
+/// Declines a client did not act on, keyed by the native call id: a planned
+/// decline, a response written for it, and then a result for the same call.
 ///
-/// A client too old to understand a decision on the channel it was sent on
-/// runs the call regardless, and the read that follows is how that shows. It
-/// is not a failure of the decision — the bytes did reach the window and the
-/// journal records that they did — but a count of them is the difference
-/// between "the model asked again" and "the client never asked the model".
-pub(crate) fn ineffective_denies(journal: &Journal) -> usize {
-    let mut standing: Vec<DenyKey> = Vec::new();
-    let mut ineffective = 0usize;
+/// Only the id joins the three facts. A result that merely names the same
+/// lines is not counted, because a later call may read them for its own
+/// reasons, and a call that carried no id is counted apart rather than paired
+/// by time. A decline whose response was never written is not the client's
+/// failure, so it is never counted as ignored.
+pub(crate) fn ineffective_denies(journal: &Journal) -> DeclineCalls {
+    let mut calls = DeclineCalls::default();
+    // Per id: whether the response was written, and whether a result came.
+    let mut seen: BTreeMap<&str, (Option<bool>, bool)> = BTreeMap::new();
     for line in journal.lines() {
-        match line {
-            Line::Deny {
-                path, hash, range, ..
+        let Line::Call { call, fact, .. } = line else {
+            continue;
+        };
+        match (call.as_deref(), fact) {
+            (None, CallFact::Planned) => calls.uncorrelatable += 1,
+            (None, _) => {}
+            (Some(id), CallFact::Planned) => {
+                seen.entry(id).or_default();
             }
-            | Line::Outline {
-                path, hash, range, ..
-            } => standing.push(DenyKey {
-                path: path.clone(),
-                hash: *hash,
-                range: *range,
-            }),
-            Line::Read {
-                path, hash, range, ..
-            } => {
-                if let Some(at) = standing
-                    .iter()
-                    .position(|key| key.matches(path, *hash, *range))
-                {
-                    standing.remove(at);
-                    ineffective += 1;
+            (Some(id), CallFact::Emitted { wrote, .. }) => {
+                if let Some(entry) = seen.get_mut(id) {
+                    entry.0 = Some(*wrote);
                 }
             }
-            // An emptying spends every decline before it: the window no longer
-            // holds what it was declined for, so the next read of those lines
-            // is a first read and not a decision ignored.
-            Line::Evict { .. } => standing.clear(),
-            _ => {}
+            (Some(id), CallFact::Applied) => {
+                if let Some(entry) = seen.get_mut(id) {
+                    entry.1 = true;
+                }
+            }
         }
     }
-    ineffective
+    calls.planned = seen.len();
+    for (wrote, applied) in seen.values() {
+        match wrote {
+            Some(true) if *applied => {
+                calls.emitted += 1;
+                calls.ineffective += 1;
+            }
+            Some(true) => calls.emitted += 1,
+            Some(false) => calls.unwritten += 1,
+            None => {}
+        }
+    }
+    calls
+}
+
+#[cfg(test)]
+mod tests {
+    use rift_agent::window_journal::{CallFact, Journal, Line};
+
+    use super::*;
+
+    fn call(id: Option<&str>, fact: CallFact) -> Line {
+        Line::Call {
+            turn: 1,
+            call: id.map(str::to_owned),
+            fact,
+            at_ms: 1,
+        }
+    }
+
+    const WROTE: CallFact = CallFact::Emitted {
+        wrote: true,
+        exit: 0,
+    };
+    const FAILED: CallFact = CallFact::Emitted {
+        wrote: false,
+        exit: 0,
+    };
+
+    #[test]
+    fn a_decline_is_ignored_only_when_the_same_call_was_emitted_and_then_ran() {
+        let journal = Journal::from_lines(vec![
+            call(Some("ran"), CallFact::Planned),
+            call(Some("ran"), WROTE),
+            call(Some("held"), CallFact::Planned),
+            call(Some("held"), WROTE),
+            call(Some("lost"), CallFact::Planned),
+            call(Some("lost"), FAILED),
+            call(Some("lost"), CallFact::Applied),
+            call(Some("ran"), CallFact::Applied),
+            call(Some("stranger"), CallFact::Applied),
+            call(None, CallFact::Planned),
+            call(None, WROTE),
+        ]);
+        assert_eq!(
+            ineffective_denies(&journal),
+            DeclineCalls {
+                planned: 3,
+                emitted: 2,
+                unwritten: 1,
+                ineffective: 1,
+                uncorrelatable: 1,
+            }
+        );
+    }
 }

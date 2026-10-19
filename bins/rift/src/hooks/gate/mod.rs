@@ -13,6 +13,7 @@
 //! read an announcement made unnecessary ([`prevented`]).
 
 mod answer;
+mod calls;
 mod delivery;
 mod family;
 mod file;
@@ -39,6 +40,7 @@ use super::ingest::edit_record;
 
 pub(in crate::hooks) use self::answer::GateOutcome;
 pub(crate) use self::answer::AUDIT_IDS;
+pub(in crate::hooks) use self::calls::{record_emission, Decline};
 pub(crate) use self::file::payload_cwd;
 pub(in crate::hooks) use self::file::{gate_file, gate_rel_path};
 pub(in crate::hooks) use self::linehash_cache::{linehash_cache_dir, linehash_cache_name};
@@ -84,7 +86,7 @@ pub(in crate::hooks) fn window_journal_step(
     raw: &rift_shadow::hooks::RawHook,
     git_dir: &Path,
     work_tree: &Path,
-    decline: &mut Option<String>,
+    decline: &mut Decline,
     document: &mut Option<DocAnswer>,
     search: &mut Option<crate::search_gate::SearchAnswer>,
 ) -> (AdapterRegistry, bool, Option<serde_json::Value>) {
@@ -147,7 +149,10 @@ pub(in crate::hooks) fn window_journal_step(
     // Handed back the moment it is known, and before the ingest below can
     // fail: the decline is already a line of the window's journal, so the
     // answer the agent gets says the same thing whatever becomes of the rest.
-    *decline = outcome.deny_reason;
+    *decline = Decline {
+        reason: outcome.deny_reason,
+        receipt: outcome.receipt,
+    };
     (
         registry,
         outcome.journaled || documents.journaled || searches.journaled || prevented,
@@ -276,6 +281,16 @@ pub(in crate::hooks) fn read_gate(
         _ => None,
     };
     let held = journal.load().journal;
+    let window = calls::Window {
+        work_tree,
+        session: &raw.session,
+        child: facts.child_session.as_deref(),
+        turn,
+        at_ms,
+    };
+    if matches!(step, GateStep::CrossCheck) {
+        calls::record_applied(&window, &journal, &held, &raw.payload);
+    }
     if cross_check_is_idle(&step, stated, &held) {
         return quiet;
     }
@@ -304,9 +319,14 @@ pub(in crate::hooks) fn read_gate(
     let mut members =
         gate_decide_members(raw, work_tree, cwd.as_deref(), effective, &pass, &requests);
     let deny_reason = settle_whole_call(&mut members, requests.len());
+    let journaled = gate_record_members(git_dir, work_tree, raw, &members, &pass);
+    let receipt = deny_reason
+        .is_some()
+        .then(|| calls::plan_decline(&window, &journal, &raw.payload));
     GateOutcome {
-        journaled: gate_record_members(git_dir, work_tree, raw, &members, &pass),
+        journaled,
         deny_reason,
+        receipt,
     }
 }
 

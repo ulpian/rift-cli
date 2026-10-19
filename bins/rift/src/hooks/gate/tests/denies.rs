@@ -104,9 +104,14 @@ fn a_verification_read_after_a_full_read_and_an_edit_is_denied_once_with_exact_s
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        vec!["read", "edit", "deny", "read"],
+        vec!["read", "edit", "deny", "call", "read"],
         "declined once, then handed the bytes and recorded as holding them"
     );
+    // The decline is also a planned call fact. This fixture's call carries
+    // no native id, so it is recorded as uncorrelatable and never paired.
+    let journal = crate::window_journal::WindowJournal::open(here, "s-delta", None);
+    let calls = crate::window_journal::ineffective_denies(&journal.load().journal);
+    assert_eq!((calls.planned, calls.uncorrelatable), (0, 1));
 }
 
 /// Reading exactly the lines that changed is the right thing to do, so it

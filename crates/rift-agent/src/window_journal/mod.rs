@@ -25,6 +25,7 @@
 //!    journal is read: the worst a malformed or forged line can cost is a
 //!    saving that is not taken.
 
+mod call;
 mod decision;
 mod delivery;
 mod family;
@@ -42,6 +43,7 @@ use rift_core::Sha256Id;
 
 use self::holds::held_of;
 
+pub use self::call::CallFact;
 pub use self::decision::{
     decide, record, Decision, DenyShape, EditEcho, Limits, Mode, NARROW_MIN_HELD_LINES, NARROW_MODE,
 };
