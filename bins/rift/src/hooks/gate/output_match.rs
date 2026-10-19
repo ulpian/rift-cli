@@ -118,6 +118,7 @@ pub(super) fn output_match_step(
         work_tree,
         raw,
         window: &crate::window_journal::key(&raw.session, facts.child_session.as_deref()),
+        agent: facts.child_session.as_deref(),
         mode: gate_mode(effective.substitute_held_output),
     };
     let replaced = if held.mode == Mode::Off {

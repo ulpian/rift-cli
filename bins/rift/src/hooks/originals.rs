@@ -39,13 +39,6 @@
 //! not implemented here; `rift doctor` names a spool whose session has no
 //! live state ([`spooled_sessions`]).
 
-// The result rewriter is the interface's first production caller; until it
-// lands, the spool is reached only from its tests.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the result rewriter is the first caller")
-)]
-
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -142,6 +135,10 @@ pub(crate) enum SpoolRefusal {
 
 impl SpoolRefusal {
     /// The refusal's stable word.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a refusal is not yet named in any report")
+    )]
     pub(crate) const fn word(self) -> &'static str {
         match self {
             Self::TooLarge => "too_large",

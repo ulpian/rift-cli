@@ -195,10 +195,6 @@ const FRAME_OUTLINE_OPENER: &str = "[rift] Read outlined:";
 /// another window found the bytes worth reading.
 const FRAME_HELD_OPENER: &str = "[rift] Read held by another window:";
 
-/// The head of the line that stands in a terminal result for file lines the
-/// window already holds at the same revision.
-const FRAME_HELD_OUTPUT_OPENER: &str = "[rift] Output held:";
-
 /// The head of the recovery map, injected at the boundary where the context
 /// lost the bytes it held.
 const FRAME_RECOVERY_OPENER: &str = "[rift] Context was compacted.";
@@ -542,7 +538,11 @@ pub fn render_deny_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: Option<
 pub fn render_held_output_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: u32) -> String {
     let shown = path_display(path);
     let at_hash = hex_prefix(hash, 12).map_or_else(String::new, |h| format!(" at sha256:{h}"));
-    format!("{FRAME_HELD_OUTPUT_OPENER} lines {lo}-{hi} of {shown}{at_hash}, unchanged since turn {turn}.")
+    // Spelled inline, as the fold line is: the bracketed shape is the one the
+    // originals checker recognises as a held frame, so a delivered result
+    // matches its sealed original line for line, and declaring it as a frame
+    // opener would make that checker's reading of it a second writer.
+    format!("[rift held: lines {lo}-{hi} of {shown}{at_hash}, unchanged since turn {turn}]")
 }
 
 /// The one line that stands in a terminal result for `n` lines that differ

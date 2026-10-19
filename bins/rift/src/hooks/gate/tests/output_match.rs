@@ -327,8 +327,23 @@ fn held_step(
     Option<serde_json::Value>,
     Vec<crate::agent_queue::ServeAudit>,
 ) {
-    let tmp = checkout();
-    let root = tmp.path();
+    let tmp = super::fixtures::minted(checkout());
+    held_step_in(tmp.path(), mode, stdout, Some(CALL))
+}
+
+/// The call id the held tests spool under.
+const CALL: &str = "toolu_held";
+
+/// [`held_step`] in `root`, the call named `call` when there is one.
+fn held_step_in(
+    root: &Path,
+    mode: rift_recall_policy::Mode,
+    stdout: &str,
+    call: Option<&str>,
+) -> (
+    Option<serde_json::Value>,
+    Vec<crate::agent_queue::ServeAudit>,
+) {
     crate::window_journal::WindowJournal::open(root, "s-out", None)
         .append(&Line::Read {
             turn: 2,
@@ -341,12 +356,11 @@ fn held_step(
         .unwrap();
     let mut effective = observing();
     effective.substitute_held_output = mode;
-    let raw = hook(
-        "claude-code",
-        "PostToolUse",
-        "s-out",
-        bash(root, "cat a.rs", stdout),
-    );
+    let mut payload = bash(root, "cat a.rs", stdout);
+    if let Some(call) = call {
+        payload["tool_use_id"] = serde_json::Value::from(call);
+    }
+    let raw = hook("claude-code", "PostToolUse", "s-out", payload);
     let (_, replaced) = crate::hooks::gate::output_match::output_match_step(
         &AdapterRegistry::with_builtin(),
         &raw,
@@ -406,6 +420,50 @@ fn output_match_enforce_never_substitutes_a_stretch_whose_bytes_differ() {
         .collect();
     let (replaced, audits) = held_step(rift_recall_policy::Mode::Enforce, &numbered);
     assert_eq!(replaced, None);
+    assert!(audits
+        .iter()
+        .all(|a| a.decision != crate::agent_queue::ServeAuditKind::ToolOutputSubstituted));
+}
+
+/// ★ An enforced substitution goes out only with its original spooled under
+/// the held form, and the delivered text checks against that original.
+#[test]
+fn held_output_enforce_spools_the_original_its_delivery_checks_against() {
+    use rift_shadow::backend::rewrite::{check_rendering, RenderCheck, ResultText, RewriteForm};
+    let tmp = super::fixtures::minted(checkout());
+    let root = tmp.path();
+    let stdout = format!("$ header\n{}tail\n", lines(&source("a"), 4, 20));
+    let (replaced, _) = held_step_in(root, rift_recall_policy::Mode::Enforce, &stdout, Some(CALL));
+    let replaced = replaced.expect("a held stretch was replaced");
+    let (header, _) = super::fixtures::spooled(root, "s-out", CALL);
+    assert_eq!(header.form, RewriteForm::HeldOutputSubstitution);
+    let check = check_rendering(
+        header.form,
+        ResultText {
+            stdout: &stdout,
+            stderr: "",
+        },
+        ResultText {
+            stdout: replaced["stdout"].as_str().unwrap(),
+            stderr: "",
+        },
+        &header.replaced,
+    );
+    assert_eq!(check, RenderCheck::HeldUnchecked(1));
+}
+
+/// ★ A spool that refuses (here: the call names no id) leaves the result as
+/// the tool wrote it, and the stretch is booked only as observed.
+#[test]
+fn held_output_enforce_without_a_spooled_original_delivers_the_result_unchanged() {
+    let tmp = super::fixtures::minted(checkout());
+    let stdout = format!("$ header\n{}", lines(&source("a"), 4, 20));
+    let (replaced, audits) =
+        held_step_in(tmp.path(), rift_recall_policy::Mode::Enforce, &stdout, None);
+    assert_eq!(replaced, None);
+    assert!(audits
+        .iter()
+        .any(|a| a.decision == crate::agent_queue::ServeAuditKind::ToolOutputHeld));
     assert!(audits
         .iter()
         .all(|a| a.decision != crate::agent_queue::ServeAuditKind::ToolOutputSubstituted));

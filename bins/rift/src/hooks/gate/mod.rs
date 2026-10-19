@@ -24,6 +24,7 @@ mod members;
 mod outline_cache;
 mod output_match;
 mod prevented;
+mod rewrite_spool;
 
 use std::path::Path;
 
@@ -131,12 +132,7 @@ pub(in crate::hooks) fn window_journal_step(
     });
     // WHAT A TERMINAL RESULT SHOWED the window, and what folding it would spare:
     // two phases sized apart, deciding nothing, so neither touches the answer.
-    let (_, held_output) = guarded_phase(t, "output_match", || {
-        output_match_step(&registry, raw, git_dir, work_tree, &effective)
-    });
-    guarded_phase(t, "fold_output", || {
-        fold_output::fold_output_record(&registry, raw, git_dir, work_tree, &effective)
-    });
+    let held_output = terminal_output_phases(t, &registry, raw, git_dir, work_tree, &effective);
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.
     guarded_phase(t, "spawn_record", || {
@@ -157,6 +153,35 @@ pub(in crate::hooks) fn window_journal_step(
         outcome.journaled || documents.journaled || searches.journaled || prevented,
         held_output,
     )
+}
+
+/// What a terminal result showed the window, then what folding it would spare:
+/// two phases timed apart, the held substitution first.
+///
+/// A result gets at most one form, because its sealed original names one: the
+/// fold stands down when a held substitution already rewrote the result.
+fn terminal_output_phases(
+    t: &crate::hooktime::HookTimer,
+    registry: &AdapterRegistry,
+    raw: &rift_shadow::hooks::RawHook,
+    git_dir: &Path,
+    work_tree: &Path,
+    effective: &rift_recall_policy::Effective,
+) -> Option<serde_json::Value> {
+    let (_, held) = guarded_phase(t, "output_match", || {
+        output_match_step(registry, raw, git_dir, work_tree, effective)
+    });
+    let (_, folded) = guarded_phase(t, "fold_output", || {
+        let call = fold_output::FoldCall {
+            registry,
+            raw,
+            git_dir,
+            work_tree,
+            held_applied: held.is_some(),
+        };
+        fold_output::fold_output_step(&call, effective)
+    });
+    held.or(folded)
 }
 
 /// One phase of the step, timed and behind its own panic guard.

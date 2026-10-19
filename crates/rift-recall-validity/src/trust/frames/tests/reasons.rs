@@ -432,7 +432,7 @@ fn a_held_output_frame_names_the_lines_the_revision_and_the_turn() {
     let text = render_held_output_frame(SRC, HASH, 10, 29, 3);
     assert_eq!(
         text,
-        "[rift] Output held: lines 10-29 of src/lib.rs at sha256:3f9a1c2e8b7d, \
-         unchanged since turn 3."
+        "[rift held: lines 10-29 of src/lib.rs at sha256:3f9a1c2e8b7d, \
+         unchanged since turn 3]"
     );
 }

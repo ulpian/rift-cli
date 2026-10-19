@@ -252,11 +252,15 @@ pub const CAPABILITIES: &[(AgentId, &str, Channel)] = &[
         AgentId::CLAUDE_CODE,
         // The 2026-10-11 run in this family's fixture: a Bash result is
         // replaced only by the object of its own shape, and the replacement is
-        // what the transcript keeps. The one form is a held stretch of lines
-        // stood in for by its frame, every other byte kept.
+        // what the transcript keeps. The forms are a held stretch of lines
+        // stood in for by its frame, or runs of alike lines folded to one
+        // line each, every other byte kept; never both on one result.
         "PostToolUse",
         Channel::UpdatedToolOutput {
-            forms: &[RewriteForm::HeldOutputSubstitution],
+            forms: &[
+                RewriteForm::HeldOutputSubstitution,
+                RewriteForm::FoldedOutput,
+            ],
         },
     ),
     (
@@ -702,8 +706,8 @@ fn rewrite_response(agent: &AgentId, verb: &str, rewrite: &Rewrite<'_>) -> Optio
     )]))
 }
 
-/// The replaced-result response for a family whose row lists the held-output
-/// form, or `None`.
+/// The replaced-result response for a family whose row lists a result
+/// rewrite form, or `None`. The caller spooled the original under its form.
 ///
 /// Only an object passes: the pinned run showed a Bash result replaced by
 /// anything but its own object shape is ignored by the client, and a
@@ -714,7 +718,7 @@ fn output_response(agent: &AgentId, verb: &str, output: &Value) -> Option<Value>
     }) else {
         return None;
     };
-    if !forms.contains(&RewriteForm::HeldOutputSubstitution) || !output.is_object() {
+    if forms.is_empty() || !output.is_object() {
         return None;
     }
     Some(object(vec![(
