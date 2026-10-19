@@ -21,6 +21,11 @@ pub const TRANSCRIPT_SEGMENTS_KEY: &str = "transcript_segments";
 /// The metadata member listing each part's line count, in order.
 pub const SEGMENT_RAW_LINES_KEY: &str = "segment_raw_lines";
 
+/// The metadata member naming the redaction pack set the parts were sealed
+/// under (`RulePackSet::fingerprint`); a later turn carries them only under
+/// the same one.
+pub const SEGMENT_PACKS_KEY: &str = "segment_packs";
+
 /// The artifact name the resolver answers for.
 const TRANSCRIPT_NAME: &str = "transcript.jsonl";
 

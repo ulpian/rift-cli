@@ -11,7 +11,7 @@ use rift_core::Result;
 
 use super::{dispatch_agent_worker, CapturedHook};
 use crate::agent_queue::{
-    AgentJob, BoundaryEdge, BoundarySnapshot, IntervalArchive, IntervalReason, JobKind,
+    AgentJob, BoundaryEdge, BoundarySnapshot, IntervalArchive, IntervalReason, JobKind, SealTurn,
 };
 use crate::hooks::git::{effective_config, strategy_kind};
 use crate::hooks::now_ms;
@@ -55,7 +55,32 @@ pub(super) fn snapshot_boundaries(
             note_boundary_failure(&run.repo.git_dir, session, &e);
         }
     }
+    if boundaries
+        .iter()
+        .any(|(_, b)| matches!(b, rift_shadow::Boundary::End))
+    {
+        queue_turn_seal(run, agent, captured_at_ms);
+    }
     true
+}
+
+/// Journal the checkpoint a turn end owes (L-5 SealTurn ruling). The hook only
+/// enqueues: the frontier is a stat of the transcript, and a session with no
+/// transcript on record has nothing to seal.
+fn queue_turn_seal(run: &CapturedHook<'_>, agent: &str, now: i64) {
+    let session = run.raw.session.as_str();
+    let Some(frontier) = crate::hooks::turn_end::transcript_frontier(&run.repo.git_dir, session)
+    else {
+        return;
+    };
+    let kind = JobKind::SealTurn(SealTurn {
+        session_id: session.to_owned(),
+        agent: agent.to_owned(),
+        frontier,
+    });
+    if let Err(e) = journal_once(run.repo, kind, now) {
+        note_boundary_failure(&run.repo.git_dir, session, &e);
+    }
 }
 
 /// Publish the complete delivery context without replacing a pending context.

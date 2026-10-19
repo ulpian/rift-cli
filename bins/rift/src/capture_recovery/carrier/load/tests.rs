@@ -130,6 +130,32 @@ fn a_completion_marker_in_the_queue_is_never_grafted_onto() {
     );
 }
 
+/// The marker `agent_queue::mark_condensed` writes for a native session.
+fn write_legacy_marker(case: &Case) {
+    let key = rift_shadow::sha256_hex(&[NATIVE.as_bytes()]);
+    let path = queue_dir(&case.rig.fixture).join(format!("condensed-{key}"));
+    std::fs::write(path, b"").unwrap();
+}
+
+#[test]
+fn a_session_condensed_the_legacy_way_is_never_admitted_as_a_carrier() {
+    let case = Case::genuine();
+    write_legacy_marker(&case);
+    let owed = [(Reason::LegacyCondensed, 1)].into_iter().collect();
+    assert_eq!(
+        case.admit(),
+        Err(LoadOwed::Carrier(CarrierOwed::NoneAdmissible(owed)))
+    );
+}
+
+#[test]
+fn a_legacy_condense_landing_after_admission_refuses_the_recheck() {
+    let case = Case::genuine();
+    let admission = case.admit().unwrap();
+    write_legacy_marker(&case);
+    assert_eq!(case.recheck(&admission), Err(Changed::Facts));
+}
+
 #[test]
 fn an_absent_cache_is_an_absence_but_an_unreadable_one_refuses_the_load() {
     let case = Case::genuine();

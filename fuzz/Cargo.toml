@@ -109,6 +109,15 @@ test = false
 doc = false
 bench = false
 
+# The same grammar against the shell itself: a line it accepts, `bash -n` must
+# accept too.
+[[bin]]
+name = "shell_read_bash"
+path = "fuzz_targets/shell_read_bash.rs"
+test = false
+doc = false
+bench = false
+
 # Fourteen container formats, over files an agent found in a repository: the
 # largest parser surface in the tree, and the newest.
 [[bin]]

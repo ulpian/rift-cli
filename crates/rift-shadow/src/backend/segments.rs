@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::parse::segments::{
-    segment_name, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_KEY,
+    segment_name, SEGMENT_PACKS_KEY, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_KEY,
 };
 use rift_recall_substrate::worktree::git_blob_oid;
 
@@ -37,6 +37,9 @@ pub struct Segments {
     /// The concatenation, kept so the body reads as one slice. It is a copy
     /// of gate output, never a write path: each part takes the durable door.
     joined: Vec<u8>,
+    /// The fingerprint of the packs the sealed part ran under; `None` for a
+    /// body built from parts alone, which a later turn never carries.
+    packs: Option<String>,
 }
 
 /// One part of a segmented body.
@@ -108,14 +111,18 @@ impl Segments {
         Self::of(parts.into_iter().map(SegmentPart::Sealed).collect())
     }
 
-    /// The earlier parts carried by oid, then this turn's sealed one.
+    /// The earlier parts carried by oid, then this turn's sealed one, all
+    /// under the pack set `packs` fingerprints (`RulePackSet::fingerprint`).
     ///
     /// # Errors
     /// As [`Segments::new`].
-    pub fn carrying(earlier: Vec<CarriedPart>, new: RedactedBytes) -> Result<Self> {
+    pub fn carrying(earlier: Vec<CarriedPart>, new: RedactedBytes, packs: String) -> Result<Self> {
         let mut parts: Vec<SegmentPart> = earlier.into_iter().map(SegmentPart::Carried).collect();
         parts.push(SegmentPart::Sealed(new));
-        Self::of(parts)
+        Ok(Self {
+            packs: Some(packs),
+            ..Self::of(parts)?
+        })
     }
 
     fn of(parts: Vec<SegmentPart>) -> Result<Self> {
@@ -132,7 +139,17 @@ impl Segments {
             .flat_map(SegmentPart::as_slice)
             .copied()
             .collect();
-        Ok(Self { parts, joined })
+        Ok(Self {
+            parts,
+            joined,
+            packs: None,
+        })
+    }
+
+    /// The fingerprint of the packs the parts were sealed under, if recorded.
+    #[must_use]
+    pub fn packs(&self) -> Option<&str> {
+        self.packs.as_deref()
     }
 
     /// The parts, in document order.
@@ -183,6 +200,9 @@ pub(super) fn insert_segment_members(
     };
     obj.insert(TRANSCRIPT_SEGMENTS_KEY.into(), segments.parts.len().into());
     obj.insert(SEGMENT_RAW_LINES_KEY.into(), segments.raw_lines().into());
+    if let Some(packs) = &segments.packs {
+        obj.insert(SEGMENT_PACKS_KEY.into(), packs.clone().into());
+    }
 }
 
 /// The artifact-map entries a body occupies under `dir` (`""` or

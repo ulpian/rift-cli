@@ -41,6 +41,7 @@ fn chain_of(seal: &TurnSeal) -> PriorChain {
             .collect(),
         raw_lines: segments.raw_lines(),
         leaf: rift_hashchain::leaf_hash(body.as_slice()),
+        packs: segments.packs().map(str::to_owned),
     }
 }
 
@@ -212,4 +213,41 @@ fn a_later_turn_carries_earlier_parts_by_the_previous_shards_oids() {
         rift_hashchain::leaf_hash(joined.as_slice()),
         rift_hashchain::leaf_hash(one_shot.redacted.as_slice())
     );
+}
+
+#[test]
+fn a_segmented_seal_records_the_fingerprint_of_the_packs_it_ran_under() {
+    let seal = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    assert_eq!(chain_of(&seal).packs, Some(packs().fingerprint()));
+}
+
+#[test]
+fn an_earlier_chain_sealed_under_other_packs_reseals_whole_instead_of_carrying() {
+    let lines = records(0..6);
+    let first = seal_turn(&doc(&lines[..4]), None, &packs()).unwrap();
+    let broader = RulePackSet::builtin()
+        .with_vendor_pattern("acme", r"acme_[a-z0-9]{8}", "acme@1")
+        .unwrap();
+    let seal = seal_turn(&doc(&lines), Some(chain_of(&first)), &broader).unwrap();
+    let TurnSeal::Whole { broken, .. } = seal else {
+        panic!("a pack change must not carry earlier segments");
+    };
+    assert_eq!(broken, ChainBreak::PacksChanged);
+    assert_eq!(broken.finding(), "segment-chain-broken");
+}
+
+#[test]
+fn an_earlier_chain_that_names_no_packs_reseals_whole() {
+    let lines = records(0..6);
+    let first = seal_turn(&doc(&lines[..4]), None, &packs()).unwrap();
+    let mut chain = chain_of(&first);
+    chain.packs = None;
+    let seal = seal_turn(&doc(&lines), Some(chain), &packs()).unwrap();
+    assert!(matches!(
+        seal,
+        TurnSeal::Whole {
+            broken: ChainBreak::PacksChanged,
+            ..
+        }
+    ));
 }

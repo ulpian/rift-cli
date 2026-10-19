@@ -69,6 +69,8 @@ pub enum ArchiveReason {
     SensitivePath,
     /// The session ended (the state machine's `RequestCondense` effect).
     SessionEnd,
+    /// A turn ended (the agent's `Stop`): one checkpoint per turn end (L-5).
+    TurnEnd,
 }
 
 impl ArchiveReason {
@@ -81,6 +83,7 @@ impl ArchiveReason {
             Self::Schedule => "schedule",
             Self::SensitivePath => "sensitive-path",
             Self::SessionEnd => "session-end",
+            Self::TurnEnd => "turn-end",
         }
     }
 }

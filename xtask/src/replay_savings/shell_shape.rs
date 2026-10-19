@@ -677,7 +677,7 @@ mod tests {
             Shape::PipedIntoFilter(Filter::Grep)
         );
         assert_eq!(
-            shape_of("sed -n '1,9p' a | wc -l"),
+            shape_of("sed -n '1,9p' a | wc --lines"),
             Shape::PipedIntoFilter(Filter::Wc)
         );
         assert_eq!(shape_of("cat a | head"), Shape::PipedIntoHeadTail);

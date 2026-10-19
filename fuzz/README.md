@@ -31,6 +31,7 @@ the input to the seed corpus.
 | `diff` | `rift_shadow_attribution` unified-diff parse | **live** |
 | `checkpoint_artifact` | `rift_recall_substrate::parse` (all five shard entrypoints) | **live** |
 | `mcp_request` | `rift_recall_serve::decode_request` (target name frozen: renaming it discards the accumulated corpus) | **live** |
+| `shell_read_bash` | `rift_agent::shell_read::recognise` against `bash -n` (skips where no `bash` runs) | **live** |
 
 Every live target runs a 60-second smoke in PR CI (the required `fuzz-smoke`
 job in `.github/workflows/ci.yml`) and a 10-minute daily deep run
