@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(policy.interception.first_contact, Mode::Enforce);
         assert_eq!(
             policy.interception.decline_family_held,
-            Mode::Observe,
+            Mode::Enforce,
             "a lever the line did not name is left as it was"
         );
         assert_eq!(policy.interception.inherit_by_name, Mode::Observe);

@@ -295,8 +295,9 @@ pub struct InterceptionPolicy {
     pub first_contact_min_bytes: u64,
     /// Declining once a read of bytes another live window of the repository
     /// holds, with a cheaper route to them. Never above the read lever, and
-    /// `observe` until its own pool says otherwise: the decline rests on a
-    /// window other than the one being declined.
+    /// `enforce` by default: its observe pool passed its flip gate (owner
+    /// ruling 2026-10-19); the decline rests on a window other than the one
+    /// being declined, so an unconfirmed channel still only observes it.
     pub decline_family_held: Mode,
     /// Recording the lines of a file a terminal result was found to carry,
     /// matched against the file's bytes, whatever the command line was.
@@ -321,7 +322,7 @@ impl Default for InterceptionPolicy {
             narrow: Mode::Observe,
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
-            decline_family_held: Mode::Observe,
+            decline_family_held: Mode::Enforce,
             recognise_by_output: Mode::Observe,
             agents: AgentModes::default(),
         }

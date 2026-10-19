@@ -698,14 +698,19 @@ mod tests {
         );
     }
 
-    /// The family-held lever ships at `observe`, reads what is written, and is
+    /// The family-held lever ships at `enforce`, reads what is written, and is
     /// never above the read lever: a family whose channel no run confirmed, a
     /// repository at `off` and a value it does not know all hold it there or
     /// below.
     #[test]
-    fn the_family_held_lever_ships_observing_and_is_never_above_the_read_lever() {
+    fn the_family_held_lever_ships_enforcing_and_is_never_above_the_read_lever() {
         let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
-        assert_eq!(shipped.decline_family_held, Mode::Observe);
+        assert_eq!(shipped.decline_family_held, Mode::Enforce);
+        assert_eq!(
+            resolve(&ServePolicy::default(), "codex", NO_CHANNEL).decline_family_held,
+            Mode::Observe,
+            "the reason channel holds an unconfirmed family at observe"
+        );
         let (written, _d) = load_src("[interception]\ndecline_family_held = \"enforce\"\n");
         assert_eq!(
             resolve(&written.policy, "claude-code", FULL).decline_family_held,
@@ -815,7 +820,7 @@ mod tests {
     #[test]
     fn a_per_lever_entry_enforces_one_lever_for_one_family_while_the_others_observe() {
         let (loaded, _d) = load_src(
-            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\n\n\
+            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\ndecline_family_held = \"observe\"\n\n\
              [interception.agents.claude-code]\nfirst_contact = \"enforce\"\n",
         );
         assert_eq!(loaded.source, ServePolicySource::Declared);
@@ -902,7 +907,7 @@ mod tests {
                 Some(Mode::Off)
             );
             let (table, _d) = load_src(&format!(
-                "[interception]\nfirst_contact = \"observe\"\n\n\
+                "[interception]\nfirst_contact = \"observe\"\ndecline_family_held = \"observe\"\n\n\
                  [interception.agents.{family}]\nfirst_contact = \"enforce\"\n\
                  decline_family_held = \"enforce\"\ninherit_by_name = \"enforce\"\n\
                  narrow = \"enforce\"\n"

@@ -206,7 +206,7 @@ The lever that declines a re-read of lines a context window already holds
 | `first_contact` | `enforce` | Answer a window's first read of a large file once with its bound outline. |
 | `first_contact_min_lines` / `_min_bytes` | `400` / `16384` | "Large": either floor is enough. |
 | `narrow` | `observe` | Decline the held part of a read that overlaps lines this window holds, asking for the unheld range only. |
-| `decline_family_held` | `observe` | Decline once a read of bytes another live window holds, offering a cheaper route. |
+| `decline_family_held` | `enforce` | Decline once a read of bytes another live window holds, offering a cheaper route. |
 | `recognise_by_output` | `observe` | Book the lines a Claude Code shell result showed the window, whatever the command line was; never above the read lever. |
 | `[interception.agents]` | absent | Per family, in registry order (`claude-code`, `codex`, `gemini`, `antigravity`, `cursor`, `copilot-cli`, `opencode`, `factory-droid`, `ollama`): one mode, or a table of per-lever modes. |
 
@@ -239,12 +239,12 @@ nothing is diffed, so keeping the bytes would buy no answer.
 
 `first_contact` answers the first read of a large file once with its bound
 outline ([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file))
-by default, capped by the family's mode and channel as they cap `mode` itself.
+and `decline_family_held` declines once a read another live window holds,
+with a cheaper route ([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)),
+both by default, capped by the family's mode and channel as they cap `mode` itself.
 At `observe`, `inherit_by_name` records lines a subagent was *pointed at*
 ([07 §7.3](07-serving-and-injection.md#what-a-subagents-window-inherits)),
-`narrow` the held part of a partly held read it would have declined,
-`decline_family_held` the decline it would have made
-([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)), and
+`narrow` the held part of a partly held read it would have declined, and
 `recognise_by_output` the lines a shell result showed
 ([07 §7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)). No read is
 declined on any of them: each acts only where it is written `enforce`, and

@@ -481,8 +481,8 @@ mod tests {
         assert!(out.contains(
             "first contact first_contact enforce  first_contact_min_lines 400  first_contact_min_bytes 16384"
         ));
-        assert!(out.contains("family held   decline_family_held observe"));
-        assert_eq!(json["interception"]["decline_family_held"], "observe");
+        assert!(out.contains("family held   decline_family_held enforce"));
+        assert_eq!(json["interception"]["decline_family_held"], "enforce");
         assert!(out.contains("output match  recognise_by_output observe"));
         assert_eq!(json["interception"]["recognise_by_output"], "observe");
         let (shut, shut_json) = status_policy(Some(

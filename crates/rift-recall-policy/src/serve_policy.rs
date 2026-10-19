@@ -36,7 +36,7 @@ first_contact = "enforce"      # a first read of a large file answered with its 
 first_contact_min_lines = 400  # a file this long, or
 first_contact_min_bytes = 16384 # this large, is large enough to outline
 narrow = "observe"             # the held part of a partly held read, declined for the unheld range; never above mode
-decline_family_held = "observe" # a read another live window holds, declined once with a cheaper route; never above mode
+decline_family_held = "enforce" # a read another live window holds, declined once with a cheaper route; never above mode
 recognise_by_output = "observe" # lines a command's output was matched to a file as carrying; never above mode
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
