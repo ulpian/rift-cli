@@ -17,6 +17,7 @@ mod delivery;
 mod family;
 mod file;
 mod first_contact;
+mod held_output;
 mod linehash_cache;
 mod members;
 mod outline_cache;

@@ -89,6 +89,10 @@ pub enum RewriteForm {
     /// A strict Codex shell read is replaced by a command printing Rift's
     /// bounded prepared result.
     ShellReadReplacement,
+    /// A terminal result's stretches the window provably holds at the
+    /// revision on disk are replaced by a frame naming them; every other
+    /// line is kept verbatim.
+    HeldOutputSubstitution,
 }
 
 impl RewriteForm {
@@ -99,6 +103,7 @@ impl RewriteForm {
             Self::DocumentSidecarPath => "document_sidecar_path",
             Self::GrepHeadLimit => "grep_head_limit",
             Self::ShellReadReplacement => "shell_read_replacement",
+            Self::HeldOutputSubstitution => "held_output_substitution",
         }
     }
 }

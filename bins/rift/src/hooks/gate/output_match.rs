@@ -19,12 +19,13 @@ use rift_agent::window_journal::output_match::{
     chain_members, file_line_hashes, match_delivery, printed_paths, Booking, ChainMember, Matching,
     Owners,
 };
-use rift_agent::window_journal::{matched_lines, DEFAULT_MAX_SHELL_DELIVERED_BYTES};
+use rift_agent::window_journal::{matched_lines, Mode, DEFAULT_MAX_SHELL_DELIVERED_BYTES};
 
 use super::delivery::{PERSISTED_OUTPUT_MARKER, PERSISTED_OUTPUT_PATH};
 use super::file::{gate_rel_path, GateFile};
+use super::held_output::{held_output_record, HeldCall};
 use super::linehash_cache::load_linehash_cache;
-use super::{gate_turn, payload_cwd};
+use super::{gate_mode, gate_turn, payload_cwd};
 
 /// The most files one delivery is matched against: the files its members
 /// name, then the files its own printed paths name under a named directory.
@@ -58,7 +59,9 @@ struct Candidates {
 }
 
 /// Record what a Claude Code `Bash` result showed this window, under the
-/// resolved lever `recognise_by_output`. Says whether a row was written.
+/// resolved lever `recognise_by_output`, and book what substituting its held
+/// lines would save under `substitute_held_output`. Says whether a row was
+/// written.
 pub(super) fn output_match_record(
     registry: &rift_shadow::hooks::AdapterRegistry,
     raw: &rift_shadow::hooks::RawHook,
@@ -98,6 +101,18 @@ pub(super) fn output_match_record(
         &raw.session,
         facts.child_session.as_deref(),
     );
+    // Loaded before this result's own rows land, though they could not prove
+    // anything anyway: the held proof never counts a matched row.
+    let held = HeldCall {
+        git_dir,
+        work_tree,
+        raw,
+        window: &crate::window_journal::key(&raw.session, facts.child_session.as_deref()),
+        mode: gate_mode(effective.substitute_held_output),
+    };
+    if held.mode != Mode::Off {
+        held_output_record(&held, &journal.load().journal, &candidates.files, &bookings);
+    }
     let turn = gate_turn(raw, git_dir);
     let at_ms = u64::try_from(raw.occurred_at_ms).unwrap_or_default();
     let mut written = false;

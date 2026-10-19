@@ -195,6 +195,10 @@ const FRAME_OUTLINE_OPENER: &str = "[rift] Read outlined:";
 /// another window found the bytes worth reading.
 const FRAME_HELD_OPENER: &str = "[rift] Read held by another window:";
 
+/// The head of the line that stands in a terminal result for file lines the
+/// window already holds at the same revision.
+const FRAME_HELD_OUTPUT_OPENER: &str = "[rift] Output held:";
+
 /// The head of the recovery map, injected at the boundary where the context
 /// lost the bytes it held.
 const FRAME_RECOVERY_OPENER: &str = "[rift] Context was compacted.";
@@ -524,6 +528,21 @@ pub fn render_deny_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: Option<
         let _ = write!(out, " {why}");
     }
     out
+}
+
+/// The one line that stands in a terminal result for lines `lo`-`hi` of
+/// `path` at `hash`, which the window was handed in turn `turn` and still
+/// holds unchanged.
+///
+/// A fact the model can check against its own context, nothing more: the
+/// lines, the file, the revision and the turn. Every line the window does not
+/// hold stays in the result verbatim around it, so the line never has to say
+/// what else the command printed.
+#[must_use]
+pub fn render_held_output_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: u32) -> String {
+    let shown = path_display(path);
+    let at_hash = hex_prefix(hash, 12).map_or_else(String::new, |h| format!(" at sha256:{h}"));
+    format!("{FRAME_HELD_OUTPUT_OPENER} lines {lo}-{hi} of {shown}{at_hash}, unchanged since turn {turn}.")
 }
 
 /// The reason frame for a read of a file the session holds at an older hash,

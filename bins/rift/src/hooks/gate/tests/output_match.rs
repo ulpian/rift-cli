@@ -9,7 +9,7 @@ use rift_agent::window_journal::output_match::{encode_line_hashes, file_line_has
 use rift_agent::window_journal::{Interval, Line};
 use rift_shadow::hooks::AdapterRegistry;
 
-use super::fixtures::{hook, lines_of, observing};
+use super::fixtures::{audits, hook, levers_for, lines_of, observing, revision};
 use crate::hooks::gate::linehash_cache::{linehash_cache_dir, linehash_cache_name};
 use crate::hooks::gate::output_match::output_match_record;
 
@@ -260,4 +260,59 @@ fn a_read_of_lines_a_command_showed_is_declined_only_where_the_lever_enforces() 
         );
         assert_eq!(step(root, &read).is_some(), declined, "{mode}");
     }
+}
+
+/// ★ Lines a read handed the window, printed again by a command at the same
+/// revision, are booked as held output with what a frame would spare, and
+/// the result itself is left alone; lines the window never read are not.
+#[test]
+fn output_match_books_the_held_lines_of_a_result_and_nothing_it_never_read() {
+    let tmp = checkout();
+    let root = tmp.path();
+    crate::window_journal::WindowJournal::open(root, "s-out", None)
+        .append(&Line::Read {
+            turn: 2,
+            path: "a.rs".to_owned(),
+            hash: revision(root, "a.rs"),
+            range: Interval::new(1, 10).unwrap(),
+            total_lines: 30,
+            at_ms: 1,
+        })
+        .unwrap();
+    let stdout = lines(&source("a"), 4, 20);
+    record(root, bash(root, "sed -n 4,20p a.rs", &stdout), &observing());
+    let held: Vec<_> = audits(root)
+        .into_iter()
+        .filter(|a| a.decision == crate::agent_queue::ServeAuditKind::ToolOutputHeld)
+        .collect();
+    assert_eq!(held.len(), 1, "one held stretch");
+    let lines = held[0].basis.as_ref().unwrap().lines.unwrap();
+    assert_eq!((lines.lo, lines.hi), (4, 10));
+    let frame = rift_recall_serve::render_held_output_frame(
+        "a.rs",
+        &revision(root, "a.rs").to_hex(),
+        4,
+        10,
+        2,
+    );
+    let delivered: usize = source("a")
+        .lines()
+        .skip(3)
+        .take(7)
+        .map(|l| l.len() + 1)
+        .sum();
+    assert_eq!(
+        held[0].total,
+        Some(u32::try_from(delivered - frame.len() - 1).unwrap())
+    );
+    assert!(held[0].frame.is_empty(), "nothing was handed to the model");
+
+    let off = checkout();
+    let off_root = off.path();
+    record(
+        off_root,
+        bash(off_root, "sed -n 4,20p a.rs", &stdout),
+        &levers_for("claude-code", rift_recall_policy::Mode::Off),
+    );
+    assert!(audits(off_root).is_empty(), "an off lever books nothing");
 }

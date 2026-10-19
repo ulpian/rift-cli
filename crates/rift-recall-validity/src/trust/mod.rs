@@ -25,10 +25,11 @@ pub use directive::{
 pub use frames::{
     neutral_inline_span, render_coordinator_reads_naming, render_delta_frame,
     render_delta_manifest, render_delta_manifest_naming, render_deny_frame,
-    render_held_lines_frame, render_held_outline_frame, render_narrow_frame, render_outline_frame,
-    render_prepared_result, render_recovery_map, render_recovery_map_naming, render_redirect_frame,
-    render_search_answer, render_structural_read_plan, CoordinatorRead, HeldEntry, HeldVerdict,
-    OutlineEntry, OutlinedRead, PathStatus, SearchHit, MAX_OUTLINE_FRAME_DEFINITIONS,
+    render_held_lines_frame, render_held_outline_frame, render_held_output_frame,
+    render_narrow_frame, render_outline_frame, render_prepared_result, render_recovery_map,
+    render_recovery_map_naming, render_redirect_frame, render_search_answer,
+    render_structural_read_plan, CoordinatorRead, HeldEntry, HeldVerdict, OutlineEntry,
+    OutlinedRead, PathStatus, SearchHit, MAX_OUTLINE_FRAME_DEFINITIONS,
     OUTLINE_FRAME_MIN_PAGE_LINES,
 };
 pub use manifest::{EntryDetail, ManifestEntry};
