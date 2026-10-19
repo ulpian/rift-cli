@@ -29,6 +29,7 @@ jobs:
             palette_parse,
             search_query,
             shell_read,
+            shell_read_bash,
             doc_convert,
           ]
     steps:
