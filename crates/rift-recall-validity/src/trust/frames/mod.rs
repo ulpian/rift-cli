@@ -545,6 +545,19 @@ pub fn render_held_output_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: 
     format!("{FRAME_HELD_OUTPUT_OPENER} lines {lo}-{hi} of {shown}{at_hash}, unchanged since turn {turn}.")
 }
 
+/// The one line that stands in a terminal result for `n` lines that differ
+/// from the kept line above only in their digits.
+///
+/// The count comes first and the bracket closes the line because that is the
+/// shape the originals spool checks, so verify can count what a fold replaced.
+#[must_use]
+pub fn render_fold_frame(n: u32) -> String {
+    // The spool's own opener, spelled here rather than declared as a frame
+    // opener: rift-shadow and verify read it, and a declared opener would make
+    // every one of those readers a second writer.
+    format!("[rift fold: {n} more lines like the line above, differing only in digits]")
+}
+
 /// The reason frame for a read of a file the session holds at an older hash,
 /// whose changes Rift can name exactly.
 ///

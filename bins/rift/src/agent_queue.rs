@@ -436,6 +436,10 @@ pub(crate) enum ServeAuditKind {
     /// model read because the lever enforces. Booked apart from the observed
     /// row so an acted figure and a would-be figure never mix.
     ToolOutputSubstituted,
+    /// A terminal result carried runs of alike lines a fold line could stand
+    /// in for, and the lever that would fold them was only observing. The
+    /// bytes the folds would have spared ride in `total`.
+    ToolOutputFolded,
     /// A compacted context was handed the map of what it stopped holding.
     RecoveryInjected,
     /// A listing-shaped search was answered instead of run.

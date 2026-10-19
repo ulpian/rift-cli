@@ -93,6 +93,10 @@ pub enum RewriteForm {
     /// revision on disk are replaced by a frame naming them; every other
     /// line is kept verbatim.
     HeldOutputSubstitution,
+    /// A terminal result's runs of lines alike but for their digits are each
+    /// folded to their first line and one line with a count; every line the
+    /// model may act on is kept verbatim.
+    FoldedOutput,
 }
 
 impl RewriteForm {
@@ -104,6 +108,7 @@ impl RewriteForm {
             Self::GrepHeadLimit => "grep_head_limit",
             Self::ShellReadReplacement => "shell_read_replacement",
             Self::HeldOutputSubstitution => "held_output_substitution",
+            Self::FoldedOutput => "folded_output",
         }
     }
 }

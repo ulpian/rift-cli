@@ -17,6 +17,7 @@ mod delivery;
 mod family;
 mod file;
 mod first_contact;
+mod fold_output;
 mod held_output;
 mod linehash_cache;
 mod members;
@@ -128,11 +129,13 @@ pub(in crate::hooks) fn window_journal_step(
     let prevented = guarded_phase(t, "prevented_record", || {
         prevented_record(&registry, raw, git_dir, work_tree, &effective)
     });
-    // WHAT A TERMINAL RESULT SHOWED the window, whatever its command line
-    // was: the lines of the named files found in the delivered output. It
-    // records and decides nothing, so it never touches the answer above.
+    // WHAT A TERMINAL RESULT SHOWED the window, and what folding it would spare:
+    // two phases sized apart, deciding nothing, so neither touches the answer.
     let (_, held_output) = guarded_phase(t, "output_match", || {
         output_match_step(&registry, raw, git_dir, work_tree, &effective)
+    });
+    guarded_phase(t, "fold_output", || {
+        fold_output::fold_output_record(&registry, raw, git_dir, work_tree, &effective)
     });
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.

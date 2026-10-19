@@ -39,6 +39,7 @@ narrow = "observe"             # the held part of a partly held read, declined f
 decline_family_held = "enforce" # a read another live window holds, declined once with a cheaper route; never above mode
 recognise_by_output = "observe" # lines a command's output was matched to a file as carrying; never above mode
 substitute_held_output = "observe" # a terminal result's held lines replaced by a frame naming them; never above mode
+fold_command_output = "observe" # runs of alike lines in a terminal result folded to one line with a count; never above mode
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
 # a family whose reason channel no recorded run has confirmed resolves to

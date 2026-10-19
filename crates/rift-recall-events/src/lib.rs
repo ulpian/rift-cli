@@ -365,6 +365,17 @@ pub enum MemdEvent {
         /// The bytes the substitution would have spared.
         would_save_bytes: u32,
     },
+    /// **A terminal result carried runs of alike lines** a fold line could
+    /// stand in for, and the lever that would fold them was only observing.
+    ///
+    /// No file is named, so the row has no handle: it carries the bytes the
+    /// folds would have spared, folded lines minus fold lines, measured on
+    /// the result in hand, and books no token figure for the same reason the
+    /// held-output row does not.
+    ToolOutputFolded {
+        /// The bytes folding would have spared.
+        would_save_bytes: u32,
+    },
     /// A compacted or resumed context was handed the map of what it had
     /// stopped holding. Pure spend, like [`ManifestInjected`](Self::ManifestInjected)
     /// and for the same reason: the agent did not ask, so the row records the
@@ -466,6 +477,7 @@ impl MemdEvent {
             Self::ReadRepeatObserved { .. } => "read_repeat_observed",
             Self::ReadPrevented { .. } => "read_prevented",
             Self::ToolOutputHeld { .. } => "tool_output_held",
+            Self::ToolOutputFolded { .. } => "tool_output_folded",
             Self::RecoveryInjected { .. } => "recovery_injected",
             Self::SearchAnswered { .. } => "search_answered",
             Self::GrepCapped { .. } => "grep_capped",
@@ -529,6 +541,7 @@ impl MemdEvent {
             | Self::Refused { .. }
             | Self::ReadRepeatObserved { .. }
             | Self::ToolOutputHeld { .. }
+            | Self::ToolOutputFolded { .. }
             | Self::RecoveryInjected { .. }
             | Self::GrepCapped { .. }
             | Self::DocDeferred { .. } => 0,
@@ -599,6 +612,7 @@ impl MemdEvent {
             // nothing, and says so by having no field to return.
             Self::ReadRepeatObserved { .. }
             | Self::ToolOutputHeld { .. }
+            | Self::ToolOutputFolded { .. }
             | Self::GrepCapped { .. }
             // A read that never ran put nothing in front of the model. The
             // frame that made it unnecessary was already charged where it was
@@ -905,6 +919,9 @@ mod tests {
                 handle: handle.to_owned(),
                 would_save_bytes: 3,
             },
+            MemdEvent::ToolOutputFolded {
+                would_save_bytes: 4,
+            },
             MemdEvent::RecoveryInjected {
                 estimated_tokens_returned: 1,
             },
@@ -973,6 +990,7 @@ mod tests {
                 MemdEvent::ReadRepeatObserved { .. } => ("read_repeat_observed", 0, 0),
                 MemdEvent::ReadPrevented { .. } => ("read_prevented", 0, 2),
                 MemdEvent::ToolOutputHeld { .. } => ("tool_output_held", 0, 0),
+                MemdEvent::ToolOutputFolded { .. } => ("tool_output_folded", 0, 0),
                 MemdEvent::RecoveryInjected { .. } => ("recovery_injected", 1, 0),
                 MemdEvent::SearchAnswered { .. } => ("search_answered", 1, 2),
                 MemdEvent::GrepCapped { .. } => ("grep_capped", 0, 0),

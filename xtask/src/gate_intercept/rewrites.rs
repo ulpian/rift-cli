@@ -20,13 +20,15 @@ const REWRITE_FIELDS: [&str; 3] = ["tool_input", "file_path", "head_limit"];
 const REWRITE_VARIANTS: [&str; 2] = ["DocumentSidecar", "GrepHeadLimit"];
 
 /// Every form the response capability table may name: two additive field
-/// amendments, one bounded replacement of a strict redundant shell read, and
-/// one substitution of a terminal result's provably held lines by a frame.
-const RESPONSE_REWRITE_FORMS: [&str; 4] = [
+/// amendments, one bounded replacement of a strict redundant shell read, one
+/// substitution of a terminal result's provably held lines by a frame, and one
+/// fold of a terminal result's runs of alike lines into a count.
+const RESPONSE_REWRITE_FORMS: [&str; 5] = [
     "DocumentSidecarPath",
     "GrepHeadLimit",
     "ShellReadReplacement",
     "HeldOutputSubstitution",
+    "FoldedOutput",
 ];
 
 /// **A tool-call rewrite is one of three pinned forms, never an open-ended edit.**
@@ -36,7 +38,7 @@ const RESPONSE_REWRITE_FORMS: [&str; 4] = [
 ///
 /// 1. every `Rewrite::<Variant> { … }` names a variant from
 ///    `REWRITE_VARIANTS` and fields from `REWRITE_FIELDS`;
-/// 2. every `RewriteForm::<Variant>` names one of the four pinned response forms;
+/// 2. every `RewriteForm::<Variant>` names one of the five pinned response forms;
 /// 3. the additive `Rewrite` enum's own declaration names its two variants and
 ///    no others, with those field names and no others — read separately,
 ///    because a declaration is not written in the shape a construction site.

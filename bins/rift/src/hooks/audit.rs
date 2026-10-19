@@ -328,6 +328,7 @@ fn serve_audit_step(kind: crate::agent_queue::ServeAuditKind) -> &'static str {
         // step is a figure nobody can separate again.
         K::ReadPrevented | K::ReadPreventedObserved => "prevented",
         K::ToolOutputHeld | K::ToolOutputSubstituted => "output-held",
+        K::ToolOutputFolded => "output-fold",
         K::RecoveryInjected => "recovery-map",
         K::SearchAnswered | K::GrepCapped => "search-gate",
         K::DocRewritten | K::DocDeferred => "doc-gate",
@@ -349,7 +350,11 @@ fn serve_audit_default_tag(kind: crate::agent_queue::ServeAuditKind) -> &'static
         K::DocRewritten => TAG_DECLARED_BASELINE,
         K::DocDeferred => TAG_CONVERT_DEADLINE,
         K::ToolOutputSubstituted => "output_substituted",
-        K::RecoveryInjected | K::SearchAnswered | K::GrepCapped | K::ToolOutputHeld => "",
+        K::RecoveryInjected
+        | K::SearchAnswered
+        | K::GrepCapped
+        | K::ToolOutputHeld
+        | K::ToolOutputFolded => "",
     }
 }
 
@@ -376,6 +381,7 @@ fn serve_audit_figures(
         crate::agent_queue::ServeAuditKind::ReadPreventedObserved
             | crate::agent_queue::ServeAuditKind::ToolOutputHeld
             | crate::agent_queue::ServeAuditKind::ToolOutputSubstituted
+            | crate::agent_queue::ServeAuditKind::ToolOutputFolded
     ) {
         return (0, 0, None);
     }
@@ -591,6 +597,9 @@ pub(super) fn serve_audit_event(
         },
         K::ToolOutputHeld | K::ToolOutputSubstituted => MemdEvent::ToolOutputHeld {
             handle,
+            would_save_bytes: audit.total.unwrap_or_default(),
+        },
+        K::ToolOutputFolded => MemdEvent::ToolOutputFolded {
             would_save_bytes: audit.total.unwrap_or_default(),
         },
         K::RecoveryInjected => MemdEvent::RecoveryInjected {
