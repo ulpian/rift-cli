@@ -8,10 +8,11 @@ use super::{is_test_surface, line_of, rust_corpus, Leg};
 
 /// The literals a hook response is made of. A file that spells one of these is
 /// either the chokepoint, a test, a pinned artifact, or a violation.
-const RESPONSE_LITERALS: [&str; 5] = [
+const RESPONSE_LITERALS: [&str; 6] = [
     "permissionDecision",
     "\"decision\"",
     "updatedInput",
+    "updatedToolOutput",
     "injectSteps",
     "hookSpecificOutput",
 ];

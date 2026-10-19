@@ -130,6 +130,66 @@ fn held_run(journal: &Journal, delivered: &Delivered<'_>, stretch: Interval) -> 
     })
 }
 
+/// The result text with each held stretch replaced by its frame, or `None`
+/// when no stretch could be replaced.
+///
+/// A stretch is replaced only where the result carries the file's own lines
+/// `lo..=hi` byte for byte, starting at a line start and ending at a line
+/// break. The proof above is about the file; this check is about the result,
+/// so a stretch the result printed any other way (a `12:` prefix, a cut last
+/// line, a different revision) is left alone rather than trusted. Every byte
+/// outside a replaced stretch is kept as it came, and stretches are taken in
+/// order, each after the one before it.
+#[must_use]
+pub fn substitute_held_lines(
+    result: &str,
+    file: &[u8],
+    stretches: &[(Interval, String)],
+) -> Option<String> {
+    let lines: Vec<&[u8]> = file.split_inclusive(|byte| *byte == b'\n').collect();
+    let mut out = String::with_capacity(result.len());
+    let mut from = 0;
+    for (run, frame) in stretches {
+        let lo = usize::try_from(run.lo.saturating_sub(1)).ok()?;
+        let hi = usize::try_from(run.hi).ok()?;
+        let Some(held) = lines.get(lo..hi).map(<[&[u8]]>::concat) else {
+            continue;
+        };
+        let Ok(held) = std::str::from_utf8(&held) else {
+            continue;
+        };
+        let Some(at) = line_aligned_find(result, from, held) else {
+            continue;
+        };
+        out.push_str(result.get(from..at)?);
+        out.push_str(frame);
+        out.push('\n');
+        from = at + held.len();
+    }
+    if from == 0 && out.is_empty() {
+        return None;
+    }
+    out.push_str(result.get(from..)?);
+    Some(out)
+}
+
+/// Where `held` occurs in `result` at or after `from`, beginning a line and
+/// ending with a line break.
+fn line_aligned_find(result: &str, from: usize, held: &str) -> Option<usize> {
+    if held.is_empty() || !held.ends_with('\n') {
+        return None;
+    }
+    let mut start = from;
+    while let Some(found) = result.get(start..)?.find(held) {
+        let at = start + found;
+        if at == 0 || result.as_bytes().get(at - 1) == Some(&b'\n') {
+            return Some(at);
+        }
+        start = at + 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::{hash, read_line, run};
@@ -200,5 +260,44 @@ mod tests {
     fn substitute_keeps_a_stretch_shorter_than_its_frame() {
         let journal = Journal::from_lines(vec![read_line(3, "src/a.rs", 1, 5, 5)]);
         assert_eq!(decide(&journal, &[run(1, 40)], Mode::Enforce), None);
+    }
+
+    const FILE: &[u8] = b"one\ntwo\nthree\nfour\nfive\n";
+
+    #[test]
+    fn substitute_held_lines_replaces_exactly_the_held_stretches_and_keeps_the_rest() {
+        let result = "$ build\none\ntwo\nthree\nmiddle\nfour\nfive\nok\n";
+        let stretches = [
+            (run(1, 3), "[frame A]".to_owned()),
+            (run(4, 5), "[frame B]".to_owned()),
+        ];
+        assert_eq!(
+            substitute_held_lines(result, FILE, &stretches).as_deref(),
+            Some("$ build\n[frame A]\nmiddle\n[frame B]\nok\n")
+        );
+    }
+
+    #[test]
+    fn substitute_never_replaces_a_stretch_whose_bytes_differ_from_the_held_lines() {
+        let numbered = "1:one\n2:two\n3:three\n";
+        let stretches = [(run(1, 3), "[frame]".to_owned())];
+        assert_eq!(substitute_held_lines(numbered, FILE, &stretches), None);
+        let cut_short = "one\ntwo\nthre";
+        assert_eq!(substitute_held_lines(cut_short, FILE, &stretches), None);
+        let mid_line = "xone\ntwo\nthree\n";
+        assert_eq!(substitute_held_lines(mid_line, FILE, &stretches), None);
+    }
+
+    #[test]
+    fn substitute_leaves_an_unmatched_stretch_verbatim_beside_a_replaced_one() {
+        let result = "one\ntwo\nFOUR\nfive\n";
+        let stretches = [
+            (run(1, 2), "[frame]".to_owned()),
+            (run(4, 5), "[other]".to_owned()),
+        ];
+        assert_eq!(
+            substitute_held_lines(result, FILE, &stretches).as_deref(),
+            Some("[frame]\nFOUR\nfive\n")
+        );
     }
 }

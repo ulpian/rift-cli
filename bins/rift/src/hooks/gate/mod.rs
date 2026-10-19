@@ -30,7 +30,7 @@ use rift_shadow::hooks::AdapterRegistry;
 
 use self::delivery::stated_delivery;
 use self::members::{gate_decide_members, gate_record_members, settle_whole_call, GatePass};
-use self::output_match::output_match_record;
+use self::output_match::output_match_step;
 use self::prevented::prevented_record;
 use super::doc_gate::{doc_gate, DocAnswer};
 use super::ingest::edit_record;
@@ -85,7 +85,7 @@ pub(in crate::hooks) fn window_journal_step(
     decline: &mut Option<String>,
     document: &mut Option<DocAnswer>,
     search: &mut Option<crate::search_gate::SearchAnswer>,
-) -> (AdapterRegistry, bool) {
+) -> (AdapterRegistry, bool, Option<serde_json::Value>) {
     let registry = AdapterRegistry::with_builtin();
     // What the operator permitted, read once for the whole step: every half
     // writes against one policy file, and a lever that is off writes nothing.
@@ -131,8 +131,8 @@ pub(in crate::hooks) fn window_journal_step(
     // WHAT A TERMINAL RESULT SHOWED the window, whatever its command line
     // was: the lines of the named files found in the delivered output. It
     // records and decides nothing, so it never touches the answer above.
-    guarded_phase(t, "output_match", || {
-        output_match_record(&registry, raw, git_dir, work_tree, &effective)
+    let (_, held_output) = guarded_phase(t, "output_match", || {
+        output_match_step(&registry, raw, git_dir, work_tree, &effective)
     });
     // A SPAWN, from either end: the spawning call's line in the session's main
     // journal, or the opening subagent's claim on it and what it inherits.
@@ -152,6 +152,7 @@ pub(in crate::hooks) fn window_journal_step(
     (
         registry,
         outcome.journaled || documents.journaled || searches.journaled || prevented,
+        held_output,
     )
 }
 

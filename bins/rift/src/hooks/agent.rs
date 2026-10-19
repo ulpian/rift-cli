@@ -75,8 +75,17 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
     let mut decline: Option<String> = None;
     let mut document: Option<DocAnswer> = None;
     let mut search: Option<crate::search_gate::SearchAnswer> = None;
+    let mut held_output: Option<serde_json::Value> = None;
     let ingest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        try_ingest_agent_hook(agent, verb, &body, &mut decline, &mut document, &mut search)
+        try_ingest_agent_hook(
+            agent,
+            verb,
+            &body,
+            &mut decline,
+            &mut document,
+            &mut search,
+            &mut held_output,
+        )
     }));
     let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         session_context_plan(agent, verb, &body, decline.as_deref())
@@ -95,10 +104,12 @@ pub(super) fn run_agent_hook(agent: &str, args: &[String]) -> ! {
     // One object on stdout, composed in the one place a decision about a tool
     // call becomes JSON. A family without a confirmed reason channel answers
     // its neutral response there and the call runs, whatever this decided.
-    let decision = if failure.is_none() {
-        tool_call_decision(&document, decline.as_deref(), search.as_ref())
-    } else {
-        rift_agent::respond::GateDecision::Allow
+    let decision = match (&failure, &held_output) {
+        (Some(_), _) => rift_agent::respond::GateDecision::Allow,
+        // A replaced result is about a call that already ran, so no decision
+        // about a call still waiting can be in play beside it.
+        (None, Some(output)) => rift_agent::respond::GateDecision::ReplaceOutput(output),
+        (None, None) => tool_call_decision(&document, decline.as_deref(), search.as_ref()),
     };
     let encoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rift_agent::respond::respond_with_plan(&id, verb, &context, &decision)

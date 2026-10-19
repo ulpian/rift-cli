@@ -45,6 +45,7 @@ pub(super) fn try_ingest_agent_hook(
     decline: &mut Option<String>,
     document: &mut Option<DocAnswer>,
     search: &mut Option<crate::search_gate::SearchAnswer>,
+    held_output: &mut Option<serde_json::Value>,
 ) -> Result<()> {
     let t = crate::hooktime::HookTimer::from_env("agent-hook");
     let verb = verb.to_owned();
@@ -64,7 +65,7 @@ pub(super) fn try_ingest_agent_hook(
     };
     // WHAT THIS CONTEXT WINDOW IS BEING HANDED AND WHAT IT HAS WRITTEN, and
     // the one registry the rest of this hook maps its payload through.
-    let (registry, gate_journaled) = window_journal_step(
+    let (registry, gate_journaled, held) = window_journal_step(
         &t,
         &raw,
         &repo.git_dir,
@@ -73,6 +74,7 @@ pub(super) fn try_ingest_agent_hook(
         document,
         search,
     );
+    *held_output = held;
     arm_agent_replacement(&repo.work_tree, &raw, decline.as_deref());
     capture_into_projection(&t, &repo, &registry, &raw, agent, gate_journaled)
 }

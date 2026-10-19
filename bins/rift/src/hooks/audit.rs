@@ -327,7 +327,7 @@ fn serve_audit_step(kind: crate::agent_queue::ServeAuditKind) -> &'static str {
         // what each lever is worth, and a figure folded into another lever's
         // step is a figure nobody can separate again.
         K::ReadPrevented | K::ReadPreventedObserved => "prevented",
-        K::ToolOutputHeld => "output-held",
+        K::ToolOutputHeld | K::ToolOutputSubstituted => "output-held",
         K::RecoveryInjected => "recovery-map",
         K::SearchAnswered | K::GrepCapped => "search-gate",
         K::DocRewritten | K::DocDeferred => "doc-gate",
@@ -348,6 +348,7 @@ fn serve_audit_default_tag(kind: crate::agent_queue::ServeAuditKind) -> &'static
         K::ReadPreventedObserved => TAG_PREVENTED_OBSERVED,
         K::DocRewritten => TAG_DECLARED_BASELINE,
         K::DocDeferred => TAG_CONVERT_DEADLINE,
+        K::ToolOutputSubstituted => "output_substituted",
         K::RecoveryInjected | K::SearchAnswered | K::GrepCapped | K::ToolOutputHeld => "",
     }
 }
@@ -374,6 +375,7 @@ fn serve_audit_figures(
         audit.decision,
         crate::agent_queue::ServeAuditKind::ReadPreventedObserved
             | crate::agent_queue::ServeAuditKind::ToolOutputHeld
+            | crate::agent_queue::ServeAuditKind::ToolOutputSubstituted
     ) {
         return (0, 0, None);
     }
@@ -587,7 +589,7 @@ pub(super) fn serve_audit_event(
             reason,
             estimated_tokens_avoided,
         },
-        K::ToolOutputHeld => MemdEvent::ToolOutputHeld {
+        K::ToolOutputHeld | K::ToolOutputSubstituted => MemdEvent::ToolOutputHeld {
             handle,
             would_save_bytes: audit.total.unwrap_or_default(),
         },

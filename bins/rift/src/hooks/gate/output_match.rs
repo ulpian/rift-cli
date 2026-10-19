@@ -62,6 +62,7 @@ struct Candidates {
 /// resolved lever `recognise_by_output`, and book what substituting its held
 /// lines would save under `substitute_held_output`. Says whether a row was
 /// written.
+#[cfg(test)]
 pub(super) fn output_match_record(
     registry: &rift_shadow::hooks::AdapterRegistry,
     raw: &rift_shadow::hooks::RawHook,
@@ -69,24 +70,33 @@ pub(super) fn output_match_record(
     work_tree: &Path,
     effective: &rift_recall_policy::Effective,
 ) -> bool {
+    output_match_step(registry, raw, git_dir, work_tree, effective).0
+}
+
+/// `output_match_record`, also handing back the replaced result object when
+/// the held-output lever enforces and at least one stretch was stood in for.
+pub(super) fn output_match_step(
+    registry: &rift_shadow::hooks::AdapterRegistry,
+    raw: &rift_shadow::hooks::RawHook,
+    git_dir: &Path,
+    work_tree: &Path,
+    effective: &rift_recall_policy::Effective,
+) -> (bool, Option<serde_json::Value>) {
     if effective.recognise_by_output == rift_recall_policy::Mode::Off || raw.session.is_empty() {
-        return false;
+        return (false, None);
     }
     let Some(adapter) = registry.get(&raw.agent) else {
-        return false;
+        return (false, None);
     };
     let facts = adapter.facts(&raw.verb, &raw.payload);
     let Some((command, output)) = bash_delivery(raw, facts.tool_name.as_deref()) else {
-        return false;
+        return (false, None);
     };
-    let Ok(root) = work_tree.canonicalize() else {
-        return false;
-    };
-    let Some(cwd) = payload_cwd(&facts) else {
-        return false;
+    let (Ok(root), Some(cwd)) = (work_tree.canonicalize(), payload_cwd(&facts)) else {
+        return (false, None);
     };
     let Some(members) = chain_members(&command) else {
-        return false;
+        return (false, None);
     };
     let names = chain_names(&root, &cwd, &members);
     let hashing = Hashing {
@@ -110,9 +120,11 @@ pub(super) fn output_match_record(
         window: &crate::window_journal::key(&raw.session, facts.child_session.as_deref()),
         mode: gate_mode(effective.substitute_held_output),
     };
-    if held.mode != Mode::Off {
-        held_output_record(&held, &journal.load().journal, &candidates.files, &bookings);
-    }
+    let replaced = if held.mode == Mode::Off {
+        None
+    } else {
+        held_output_record(&held, &journal.load().journal, &candidates.files, &bookings)
+    };
     let turn = gate_turn(raw, git_dir);
     let at_ms = u64::try_from(raw.occurred_at_ms).unwrap_or_default();
     let mut written = false;
@@ -133,7 +145,7 @@ pub(super) fn output_match_record(
             written |= journal.append(&line).is_ok();
         }
     }
-    written
+    (written, replaced)
 }
 
 /// The command line and the text a `Bash` result handed the model, or

@@ -147,6 +147,12 @@ pub enum Channel {
         /// The closed set of amendments this family accepts from Rift.
         forms: &'static [RewriteForm],
     },
+    /// The tool's result is replaced after it ran, in one of the closed forms.
+    /// Only the result's own text changes; its shape is the one the tool gave.
+    UpdatedToolOutput {
+        /// The closed set of result replacements this family accepts.
+        forms: &'static [RewriteForm],
+    },
     /// The family requires an acknowledgement here, or documents none, and
     /// Rift writes nothing that carries a fact. Naming the verb keeps a later
     /// reader from mistaking silence for an oversight.
@@ -175,6 +181,16 @@ impl fmt::Display for Channel {
             ),
             Self::UpdatedInput { forms } => {
                 write!(f, "channel=UpdatedInput forms=")?;
+                for (i, form) in forms.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{}", form.as_str())?;
+                }
+                Ok(())
+            }
+            Self::UpdatedToolOutput { forms } => {
+                write!(f, "channel=UpdatedToolOutput forms=")?;
                 for (i, form) in forms.iter().enumerate() {
                     if i > 0 {
                         write!(f, ",")?;
@@ -226,6 +242,17 @@ pub const CAPABILITIES: &[(AgentId, &str, Channel)] = &[
         AgentId::CLAUDE_CODE,
         "PostToolUse",
         Channel::AdditionalContext { limit_field: None },
+    ),
+    (
+        AgentId::CLAUDE_CODE,
+        // The 2026-10-11 run in this family's fixture: a Bash result is
+        // replaced only by the object of its own shape, and the replacement is
+        // what the transcript keeps. The one form is a held stretch of lines
+        // stood in for by its frame, every other byte kept.
+        "PostToolUse",
+        Channel::UpdatedToolOutput {
+            forms: &[RewriteForm::HeldOutputSubstitution],
+        },
     ),
     (
         AgentId::CLAUDE_CODE,
@@ -546,6 +573,11 @@ pub enum GateDecision<'a> {
     /// bytes Rift made. Never together with a decline: a call is either
     /// declined or run, and a declined call has no input to amend.
     Rewrite(Rewrite<'a>),
+    /// Replace a terminal result that already ran with the same result in
+    /// which the window's provably held stretches stand as their frames. The
+    /// value is the whole result object, built by the caller from the one the
+    /// client handed over, so its shape is the tool's own.
+    ReplaceOutput(&'a Value),
 }
 
 /// One of the two rewrites, bound to the call it amends.
@@ -665,6 +697,30 @@ fn rewrite_response(agent: &AgentId, verb: &str, rewrite: &Rewrite<'_>) -> Optio
     )]))
 }
 
+/// The replaced-result response for a family whose row lists the held-output
+/// form, or `None`.
+///
+/// Only an object passes: the pinned run showed a Bash result replaced by
+/// anything but its own object shape is ignored by the client, and a
+/// response the client ignores is one Rift should not have written.
+fn output_response(agent: &AgentId, verb: &str, output: &Value) -> Option<Value> {
+    let Some(Channel::UpdatedToolOutput { forms }) = pinned_channel(agent, verb, |channel| {
+        matches!(channel, Channel::UpdatedToolOutput { .. })
+    }) else {
+        return None;
+    };
+    if !forms.contains(&RewriteForm::HeldOutputSubstitution) || !output.is_object() {
+        return None;
+    }
+    Some(object(vec![(
+        "hookSpecificOutput",
+        object(vec![
+            ("hookEventName", Value::from(verb)),
+            ("updatedToolOutput", output.clone()),
+        ]),
+    )]))
+}
+
 /// The channel of one kind this `(family, verb)` has a pinned row for.
 ///
 /// The table is the authority for what may be written and the fixtures are the
@@ -761,6 +817,9 @@ pub fn gate(agent: &AgentId, verb: &str, decision: &GateDecision<'_>) -> Option<
         GateDecision::Deny { reason } => deny(agent, verb, reason).or_else(|| neutral(agent, verb)),
         GateDecision::Rewrite(rewrite) => {
             rewrite_response(agent, verb, rewrite).or_else(|| neutral(agent, verb))
+        }
+        GateDecision::ReplaceOutput(output) => {
+            output_response(agent, verb, output).or_else(|| neutral(agent, verb))
         }
     }))
     .unwrap_or_else(|_| neutral(agent, verb))

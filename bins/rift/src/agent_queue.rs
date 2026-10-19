@@ -432,6 +432,10 @@ pub(crate) enum ServeAuditKind {
     /// lever that would stand a frame in for them was only observing. The
     /// bytes the frame would have spared ride in `total`.
     ToolOutputHeld,
+    /// The same held stretch, stood in for by its frame in the result the
+    /// model read because the lever enforces. Booked apart from the observed
+    /// row so an acted figure and a would-be figure never mix.
+    ToolOutputSubstituted,
     /// A compacted context was handed the map of what it stopped holding.
     RecoveryInjected,
     /// A listing-shaped search was answered instead of run.
