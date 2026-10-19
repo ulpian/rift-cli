@@ -161,6 +161,8 @@ pub struct AgentLevers {
     pub inherit_by_name: Option<Mode>,
     /// Replaces `[interception] narrow` for this family.
     pub narrow: Option<Mode>,
+    /// Replaces `[interception] substitute_held_output` for this family.
+    pub substitute_held_output: Option<Mode>,
 }
 
 /// What a family's line under `[interception.agents]` may say: the one mode it
@@ -188,6 +190,7 @@ impl AgentEntry {
                 decline_family_held: None,
                 inherit_by_name: None,
                 narrow: None,
+                substitute_held_output: None,
             },
             Self::Levers(levers) => levers,
         }
@@ -307,6 +310,12 @@ pub struct InterceptionPolicy {
     /// Never above the read lever; `enforce` lets a decline rest on those
     /// lines, and it stays `observe` until its own pool says otherwise.
     pub recognise_by_output: Mode,
+    /// Replacing the stretches of a terminal result this window provably
+    /// holds at the revision on disk with a frame naming them. Never above
+    /// the read lever, and `observe` by default: the decision and its credit
+    /// are recorded and the result is handed over untouched, until a corpus
+    /// shows no substitution ever claimed lines the original did not carry.
+    pub substitute_held_output: Mode,
     /// `[interception.agents]`.
     pub agents: AgentModes,
 }
@@ -327,6 +336,7 @@ impl Default for InterceptionPolicy {
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
             decline_family_held: Mode::Enforce,
             recognise_by_output: Mode::Observe,
+            substitute_held_output: Mode::Observe,
             agents: AgentModes::default(),
         }
     }
