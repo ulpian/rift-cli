@@ -1,0 +1,105 @@
+//! `rift doctor --fix` for capture recovery: take the owner lock, begin or
+//! resume the job, admit its hold, drive the stages, and release the hold on
+//! every exit. The plan directory and every stage record stay behind as the
+//! receipt; a later run takes a new hold and the stages recheck what changed.
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use rift_recall_substrate::GixSubstrate;
+use rift_shadow::backend::NativeBackend;
+use rift_shadow::hooks::AdapterRegistry;
+
+use crate::capture_queue::QueueLock;
+use crate::capture_recovery::hold::admit_own_hold;
+use crate::capture_recovery::job::{begin, release, Job, Member};
+use crate::capture_recovery::runner::{recover, Context};
+
+/// Why no recovery ran, or why its hold could not be released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Refusal {
+    NotSetUp,
+    Busy,
+    PlanUnwritten,
+    HoldUnadmitted,
+    StoreUnavailable,
+    NativeUnavailable,
+    HoldKept,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Refusal::NotSetUp => "capture recovery not run: this repository is not set up here",
+            Refusal::Busy => "capture recovery not run: another capture holds the queue; retry",
+            Refusal::PlanUnwritten => {
+                "capture recovery not run: the recovery plan could not be written"
+            }
+            Refusal::HoldUnadmitted => "capture recovery stopped: its hold could not be admitted",
+            Refusal::StoreUnavailable => {
+                "capture recovery stopped: the projection could not be opened"
+            }
+            Refusal::NativeUnavailable => {
+                "capture recovery stopped: the native tree could not be read"
+            }
+            Refusal::HoldKept => {
+                "capture recovery hold could not be removed; capture waits until a later --fix"
+            }
+        })
+    }
+}
+
+pub(super) fn run(root: &Path, repo: &rift_git::RepoPaths) -> Result<String, Refusal> {
+    if !crate::family::provisioned_here(root) {
+        return Err(Refusal::NotSetUp);
+    }
+    let family = crate::family::resolve_at(root).map_err(|_| Refusal::NotSetUp)?;
+    let family_dir = family_dir(&family.family_id)?;
+    let owner = crate::capture_queue::acquire_owner(&repo.git_dir).map_err(|_| Refusal::Busy)?;
+    let member = Member {
+        repo_id: &family.family_id,
+        work_tree: &repo.work_tree,
+        family_dir: &family_dir,
+    };
+    let now = crate::hooks::now_ms();
+    let job = begin(&owner, &member, &format!("fix-{now}")).map_err(|_| Refusal::PlanUnwritten)?;
+    // The hold is released before any result is reported, refusal included.
+    let walked = walk(root, repo, &owner, &job, now);
+    release(&owner, &job).map_err(|_| Refusal::HoldKept)?;
+    walked
+}
+
+fn family_dir(family_id: &rift_core::RepoId) -> Result<PathBuf, Refusal> {
+    let cache = crate::family::cache_root()
+        .canonicalize()
+        .map_err(|_| Refusal::NotSetUp)?;
+    Ok(rift_store::projection_dir_under(&cache, family_id))
+}
+
+fn walk(
+    root: &Path,
+    repo: &rift_git::RepoPaths,
+    owner: &QueueLock,
+    job: &Job,
+    now: i64,
+) -> Result<String, Refusal> {
+    let hold = admit_own_hold(owner, &job.evidence, &job.operation)
+        .map_err(|_| Refusal::HoldUnadmitted)?;
+    let store = crate::projection::open_projection(root).map_err(|_| Refusal::StoreUnavailable)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| Refusal::StoreUnavailable)?;
+    let reader = GixSubstrate::open(&repo.work_tree).map_err(|_| Refusal::NativeUnavailable)?;
+    let backend = NativeBackend::new(rift_git::PlumbingGitWrite::new(repo.clone()));
+    let registry = AdapterRegistry::with_builtin();
+    let cx = Context {
+        rt: &rt,
+        store: &store,
+        registry: &registry,
+        repo,
+        backend: &backend,
+        reader: &reader,
+        now,
+    };
+    Ok(recover(cx, &hold))
+}

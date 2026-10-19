@@ -36,6 +36,8 @@ pub(crate) mod plan;
 #[cfg(unix)]
 mod record;
 #[cfg(unix)]
+pub(crate) mod runner;
+#[cfg(unix)]
 mod selection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

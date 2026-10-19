@@ -106,7 +106,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("memory_chain", doctor_memory_chain(root, strict_read_only));
     report.leg("sessions", doctor_session_sweep(root, fix));
     report.leg("capture_queue", doctor_capture_queue(root, fix));
-    report.leg("capture_recovery", doctor_capture_recovery(root));
+    report.leg("capture_recovery", doctor_capture_recovery(root, repair));
     report.leg("capture_chain", doctor_capture_chain(root, fix));
     report.leg("watermark", doctor_watermark(root, fix, strict_read_only));
     report.leg("shadow_refs", doctor_shadow_refs(root));
