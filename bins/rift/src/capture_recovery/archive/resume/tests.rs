@@ -48,7 +48,11 @@ impl SubstrateReader for Tampered {
 }
 
 /// Archive the frozen carrier through the wrapper into `inner`.
-fn archive_with(rig: &Rig, hold: &OwnHold<'_>, inner: &impl ShadowBackend) {
+pub(in crate::capture_recovery::archive) fn archive_with(
+    rig: &Rig,
+    hold: &OwnHold<'_>,
+    inner: &impl ShadowBackend,
+) {
     let carrier = carrier();
     let backend = RecoveryBackend::new(inner, hold, carrier.clone(), batch(rig, hold)).unwrap();
     let archive = archive_for(&carrier, backend.artifact());
@@ -59,7 +63,9 @@ fn archive_with(rig: &Rig, hold: &OwnHold<'_>, inner: &impl ShadowBackend) {
     ));
 }
 
-fn native(rig: &Rig) -> NativeBackend<rift_git::PlumbingGitWrite> {
+pub(in crate::capture_recovery::archive) fn native(
+    rig: &Rig,
+) -> NativeBackend<rift_git::PlumbingGitWrite> {
     let repo = rift_git::discover(&rig.fixture.work_tree).unwrap();
     NativeBackend::new(rift_git::PlumbingGitWrite::new(repo))
 }
