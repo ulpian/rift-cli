@@ -399,7 +399,37 @@ async fn append_serve_decision(
     // it exactly once — at this, the one place a `memd_audit_event` row is
     // ever written — rather than re-parsed by every future query.
     record_audit_citation_if_any(store, audit_id, payload.handle.as_deref()).await?;
+    record_would_save_if_any(store, audit_id, env).await?;
     record_pull_claim_if_any(store, audit_id, env).await
+}
+
+/// The companion write for an observing tool-output row: the bytes a hold or
+/// a fold would have spared, only when the payload carries the figure.
+///
+/// Keyed by the audit row's own key and insert-or-ignore, so the live write
+/// and a rebuild from the frozen line converge on one row. A missing or
+/// negative figure writes nothing rather than a zero that reads as measured.
+async fn record_would_save_if_any(
+    store: &impl rift_store::CanonicalStore,
+    audit_id: &str,
+    env: &serde_json::Value,
+) -> Result<()> {
+    use rift_store::Value;
+    let Some(bytes) = env
+        .pointer("/payload/would_save_bytes")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|bytes| *bytes >= 0)
+    else {
+        return Ok(());
+    };
+    store
+        .insert_or_ignore(
+            "memd_audit_would_save",
+            &["audit_id", "would_save_bytes", "schema_version"],
+            &[Value::text(audit_id), Value::Int(bytes), Value::Int(1)],
+        )
+        .await?;
+    Ok(())
 }
 
 /// The companion write for those columns: a row lands ONLY when `handle` is a
