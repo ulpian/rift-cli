@@ -17,6 +17,7 @@
 //! in the order the legs print.
 
 mod capture;
+mod checkouts;
 mod completeness;
 mod family;
 mod git_hooks;
@@ -121,6 +122,10 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("push_queue", doctor_push_queue(root, repair));
     report.leg("prunable_worktrees", doctor_prunable_worktrees(root, fix));
     report.leg("orphan_projections", doctor_orphan_projections(root));
+    report.leg(
+        "obsolete_checkouts",
+        checkouts::doctor_obsolete_checkouts(root, repair),
+    );
     report.leg("family_identity", doctor_family_identity(root));
     report.leg(
         "turn_boundaries",

@@ -327,6 +327,12 @@ pub(super) fn doctor_worktree_wiring(repo: &Path, fix: bool) -> (String, serde_j
         if let Some(previous) = &previous {
             line.push_str(&format!(" ({previous})"));
         }
+        // The exact command, per member: `--fix` runs this adoption and
+        // nothing past it, so the report names what a repair would do.
+        let command = format!("rift worktree adopt {}", member.work_tree.display());
+        if !fix {
+            line.push_str(&format!("\n      unwired; to wire it: {command}"));
+        }
         let mut outcome = None;
         if let (Some(machine), Some(intent)) = (machine.as_ref(), intent.as_ref()) {
             let report = adopt::adopt_member(&member.work_tree, machine, intent, hooks::now_ms());
@@ -340,6 +346,8 @@ pub(super) fn doctor_worktree_wiring(repo: &Path, fix: bool) -> (String, serde_j
         found.push(serde_json::json!({
             "name": member.name,
             "work_tree": member.work_tree.display().to_string(),
+            "state": "unwired",
+            "command": command,
             "previous_attempt": previous,
             "adopted": outcome,
         }));
@@ -454,6 +462,12 @@ mod tests {
         assert!(human.contains("member"), "{human}");
         assert!(human.contains("rift worktree adopt"), "{human}");
         assert_eq!(json["unwired"], 1);
+        assert_eq!(json["found"][0]["state"], "unwired");
+        let command = json["found"][0]["command"].as_str().unwrap();
+        assert!(
+            command.starts_with("rift worktree adopt ") && command.ends_with("member"),
+            "the report names the exact adoption a repair would run: {command}"
+        );
         assert_eq!(json["adopted"], 0, "a report is not a repair");
         assert!(
             !member.join(".rift").exists(),

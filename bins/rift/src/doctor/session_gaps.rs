@@ -4,7 +4,9 @@
 //! - `never-captured`: a session the run-state journal names has no session
 //!   row at all; the journal is the evidence that the session ran.
 //! - `boundary-missing`: a recorded turn has no boundary snapshot, so its
-//!   human and agent edit windows cannot be told apart.
+//!   human and agent edit windows cannot be told apart. A turn a published
+//!   boundary gap batch already names is covered: the recovery path has
+//!   recorded the hole, so it is not counted a second time here.
 //! - `usage-absent`: a recorded model call has no token counts.
 //! - `pricing-incomplete`: a call has counts and no cost fact, which is the
 //!   catalog's gap, not the capture's; kept apart from `usage-absent` so a low
@@ -84,10 +86,16 @@ impl SessionGaps {
     }
 }
 
-/// Turns with no boundary snapshot at either edge, per session row.
+/// Turns with no boundary snapshot at either edge, per session row, leaving
+/// out a turn a published gap batch already names. A ticket's session key is
+/// the session row id, so the match is exact; a ticket whose batch parent was
+/// never written is not yet published and does not cover its turn.
 const BOUNDARY_MISSING: &str = "SELECT t.session_id, COUNT(*) FROM turn t \
      WHERE NOT EXISTS (SELECT 1 FROM turn_boundary_snapshot b \
      WHERE b.session_id = t.session_id AND b.turn_ordinal = t.ordinal) \
+     AND NOT EXISTS (SELECT 1 FROM turn_boundary_gap_ticket g \
+     JOIN turn_boundary_gap_batch p ON p.gap_id = g.gap_id \
+     WHERE g.session_key = t.session_id AND g.turn_ordinal = t.ordinal) \
      GROUP BY t.session_id ORDER BY t.session_id";
 
 /// Model calls with no token counts, per session row.
@@ -351,6 +359,56 @@ mod tests {
             .block_on(store.query("SELECT COUNT(*) FROM session", &[]))
             .unwrap();
         assert_eq!(rows.first().unwrap().get_i64(0).unwrap(), 3);
+    }
+
+    /// One published gap ticket for `native`'s turn `ordinal`.
+    fn published_gap(native: &str, ordinal: u32) -> rift_core::boundary_gap::GapBatch {
+        use rift_core::boundary_gap::{
+            BoundaryEdge, ContextDigest, EvidenceDigest, GapBatch, GapTicket, GapTicketFields,
+            MemberKey, SessionKey, SourceKey, TicketDigest,
+        };
+        let row = rift_shadow::ids::session_row_id("claude-code", native);
+        let ticket = GapTicket::new(GapTicketFields {
+            source_key: SourceKey::parse_hex(&"21".repeat(32)).unwrap(),
+            context_digest: ContextDigest::parse_hex(&"22".repeat(32)).unwrap(),
+            ticket_digest: TicketDigest::parse_hex(&"23".repeat(32)).unwrap(),
+            session_key: SessionKey::parse_hex(&row).unwrap(),
+            turn_ordinal: ordinal,
+            boundary: BoundaryEdge::End,
+            head_oid: None,
+            captured_at: NOW,
+            queued_at: NOW,
+            attempts: 1,
+        })
+        .unwrap();
+        GapBatch::new(
+            rift_core::RepoId::new("repo-1").unwrap(),
+            MemberKey::parse_hex(&"11".repeat(32)).unwrap(),
+            EvidenceDigest::parse_hex(&"12".repeat(32)).unwrap(),
+            NOW,
+            vec![ticket],
+        )
+        .unwrap()
+    }
+
+    /// A missing boundary a published gap batch names is covered, not a gap:
+    /// of two unbounded turns only the uncovered one is counted, and a
+    /// session whose every hole is published prints nothing.
+    #[test]
+    fn a_boundary_a_published_gap_names_is_covered_not_counted_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = rift_store::open_capture_projection(tmp.path().join("p.db")).unwrap();
+        let rt = runtime().unwrap();
+        rt.block_on(seed(&store, "half", 2, Usage::Priced, false));
+        rt.block_on(seed(&store, "all", 1, Usage::Priced, false));
+        for batch in [published_gap("half", 1), published_gap("all", 1)] {
+            rt.block_on(rift_store::record_boundary_gap_batch(&store, &batch))
+                .unwrap();
+        }
+        let gaps = rt.block_on(session_gaps(&store, &[])).unwrap();
+        let half = rift_shadow::ids::session_row_id("claude-code", "half");
+        assert_eq!(gaps.len(), 1, "{}", render(&gaps).0);
+        assert_eq!(gaps.get(&half).unwrap().boundary_missing, 1);
     }
 
     /// A projection with no gap and an empty journal says nothing.
