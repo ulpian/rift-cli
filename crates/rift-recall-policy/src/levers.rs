@@ -277,8 +277,10 @@ pub struct InterceptionPolicy {
     /// window was pointed at those bytes, not handed them.
     pub inherit_by_name: Mode,
     /// Answering the first read of a large file in a window with the file's
-    /// bound outline, once. Never above the read lever, and `observe` until
-    /// its own pool and the paired evaluation say otherwise.
+    /// bound outline, once. Never above the read lever, and `enforce` by
+    /// default: its observe pool passed its flip gate (owner ruling
+    /// 2026-10-19), and a family whose channel no run confirmed still only
+    /// observes.
     pub first_contact: Mode,
     /// Declining the held part of a read that overlaps lines this window
     /// holds, asking for the unheld range only. Never above the read lever,
@@ -315,7 +317,7 @@ impl Default for InterceptionPolicy {
             recovery_budget: DEFAULT_RECOVERY_BUDGET,
             basis_ttl_days: DEFAULT_BASIS_TTL_DAYS,
             inherit_by_name: Mode::Observe,
-            first_contact: Mode::Observe,
+            first_contact: Mode::Enforce,
             narrow: Mode::Observe,
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,

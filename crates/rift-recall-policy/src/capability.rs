@@ -614,12 +614,12 @@ mod tests {
         assert_eq!(every_lever(&e), [Mode::Off; 5]);
     }
 
-    /// The first-contact lever ships at `observe` with its two floors, reads
+    /// The first-contact lever ships at `enforce` with its two floors, reads
     /// what is written, and is never above the read lever: a family whose
     /// channel no run confirmed, a repository at `off` and an unreadable file
     /// all hold it there or below, and a value it does not know shuts it.
     #[test]
-    fn the_first_contact_lever_ships_observing_and_is_never_above_the_read_lever() {
+    fn the_first_contact_lever_ships_enforcing_and_is_never_above_the_read_lever() {
         let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
         assert_eq!(
             (
@@ -627,7 +627,12 @@ mod tests {
                 shipped.first_contact_min_lines,
                 shipped.first_contact_min_bytes
             ),
-            (Mode::Observe, 400, 16_384)
+            (Mode::Enforce, 400, 16_384)
+        );
+        assert_eq!(
+            resolve(&ServePolicy::default(), "codex", NO_CHANNEL).first_contact,
+            Mode::Observe,
+            "the reason channel holds an unconfirmed family at observe"
         );
         let (written, _d) = load_src(
             "[interception]\nfirst_contact = \"enforce\"\nfirst_contact_min_lines = 600\n\
@@ -810,7 +815,7 @@ mod tests {
     #[test]
     fn a_per_lever_entry_enforces_one_lever_for_one_family_while_the_others_observe() {
         let (loaded, _d) = load_src(
-            "[interception]\nmode = \"enforce\"\n\n\
+            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\n\n\
              [interception.agents.claude-code]\nfirst_contact = \"enforce\"\n",
         );
         assert_eq!(loaded.source, ServePolicySource::Declared);
@@ -829,7 +834,7 @@ mod tests {
     #[test]
     fn a_per_lever_entry_overrides_the_family_wide_mode_for_that_lever_only() {
         let (loaded, _d) = load_src(
-            "[interception]\nmode = \"enforce\"\nnarrow = \"enforce\"\n\
+            "[interception]\nmode = \"enforce\"\nfirst_contact = \"observe\"\nnarrow = \"enforce\"\n\
              decline_family_held = \"enforce\"\n\n\
              [interception.agents.antigravity]\nmode = \"enforce\"\nnarrow = \"off\"\n",
         );
@@ -897,7 +902,8 @@ mod tests {
                 Some(Mode::Off)
             );
             let (table, _d) = load_src(&format!(
-                "[interception.agents.{family}]\nfirst_contact = \"enforce\"\n\
+                "[interception]\nfirst_contact = \"observe\"\n\n\
+                 [interception.agents.{family}]\nfirst_contact = \"enforce\"\n\
                  decline_family_held = \"enforce\"\ninherit_by_name = \"enforce\"\n\
                  narrow = \"enforce\"\n"
             ));

@@ -60,11 +60,13 @@ fn bind(work_tree: &std::path::Path) {
     write_outline_cache(&work_tree.join(".git"), &sha, &outline).unwrap();
 }
 
-/// The levers with the family-held decline at `mode` and every other lever
-/// enforcing.
+/// The levers with the family-held decline at `mode`, the first-contact
+/// lever observing so a first read reaches the family decision, and every
+/// other lever enforcing.
 fn family_at(mode: rift_recall_policy::Mode) -> rift_recall_policy::Effective {
     let mut effective = enforcing();
     effective.decline_family_held = mode;
+    effective.first_contact = rift_recall_policy::Mode::Observe;
     effective
 }
 

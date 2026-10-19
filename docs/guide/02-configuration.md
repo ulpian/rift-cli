@@ -203,7 +203,7 @@ The lever that declines a re-read of lines a context window already holds
 | `recovery_budget` | `800` | Tokens a post-compaction recovery map may cost. |
 | `basis_ttl_days` | `30` | How long `rift clean` keeps a basis snapshot. |
 | `inherit_by_name` | `observe` | Decline on lines a subagent inherited because its prompt named the path. |
-| `first_contact` | `observe` | Answer a window's first read of a large file once with its bound outline. |
+| `first_contact` | `enforce` | Answer a window's first read of a large file once with its bound outline. |
 | `first_contact_min_lines` / `_min_bytes` | `400` / `16384` | "Large": either floor is enough. |
 | `narrow` | `observe` | Decline the held part of a read that overlaps lines this window holds, asking for the unheld range only. |
 | `decline_family_held` | `observe` | Decline once a read of bytes another live window holds, offering a cheaper route. |
@@ -221,7 +221,7 @@ value for that family alone, and every lever it leaves out keeps it:
 codex = "observe"            # one mode for the whole family, as before
 
 [interception.agents.claude-code]
-first_contact = "enforce"    # this harness answers first reads; others observe
+first_contact = "observe"    # this harness only records first reads; others answer them
 ```
 
 A per-lever entry is still a request: it never resolves above the family's read
@@ -237,10 +237,11 @@ measurements; [07 §7.4](07-serving-and-injection.md#74-tier-three-the-decision-
 gives their reasons. The 1 MiB hash ceiling also bounds a basis snapshot: past it
 nothing is diffed, so keeping the bytes would buy no answer.
 
+`first_contact` answers the first read of a large file once with its bound
+outline ([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file))
+by default, capped by the family's mode and channel as they cap `mode` itself.
 At `observe`, `inherit_by_name` records lines a subagent was *pointed at*
 ([07 §7.3](07-serving-and-injection.md#what-a-subagents-window-inherits)),
-`first_contact` the first read of a large file with a bound outline
-([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)),
 `narrow` the held part of a partly held read it would have declined,
 `decline_family_held` the decline it would have made
 ([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)), and
