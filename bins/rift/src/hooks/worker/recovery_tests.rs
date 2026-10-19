@@ -460,3 +460,30 @@ fn an_unchanged_selected_physical_delivery_can_be_unlinked_without_changing_its_
         );
     }
 }
+
+#[test]
+fn a_repair_drain_leaves_the_tickets_recovery_classified_historical_and_drains_the_rest() {
+    let checkout = tempfile::tempdir().unwrap();
+    let root = checkout.path();
+    let (repo, owner, frozen) = prepared_checkout(root);
+    drop(owner);
+    let historical: BTreeSet<String> = frozen[..2]
+        .iter()
+        .map(|entry| entry.path.file_name().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    let left = super::leave_to_recovery(super::Historical::Named(historical));
+    let owner = crate::capture_queue::acquire_owner(&repo.git_dir).unwrap();
+    let timer = crate::hooktime::HookTimer::new("repair-skip-fixture", false);
+    let mut attempted = BTreeSet::new();
+    super::drain_locked(
+        &timer,
+        &repo.git_dir,
+        &owner,
+        &mut attempted,
+        super::DrainPolicy::Everything,
+    );
+    drop(left);
+    let observed = observe_after_drain(root, &repo.git_dir, &frozen);
+    assert_eq!(observed.preserved, [true, true, false]);
+    assert_eq!(observed.remaining, 2);
+}

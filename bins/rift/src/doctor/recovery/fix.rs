@@ -13,7 +13,8 @@ use rift_shadow::hooks::AdapterRegistry;
 use crate::capture_queue::QueueLock;
 use crate::capture_recovery::hold::{admit_own_hold, HOLD_NAME};
 use crate::capture_recovery::job::{begin, release, Job, Member};
-use crate::capture_recovery::runner::{recover, Context};
+use crate::capture_recovery::runner::{recover_naming_historical, Context, Recovered};
+use crate::hooks::Historical;
 
 /// The same words the walk ends with when its inventory is empty.
 const NOTHING_OWED: &str = "capture recovery: nothing to recover";
@@ -52,14 +53,21 @@ impl fmt::Display for Refusal {
     }
 }
 
-pub(super) fn run(root: &Path, repo: &rift_git::RepoPaths) -> Result<String, Refusal> {
+/// The walk's words and the boundary tickets the rest of the run leaves to it.
+pub(super) fn run(
+    root: &Path,
+    repo: &rift_git::RepoPaths,
+) -> Result<(String, Historical), Refusal> {
     if !crate::family::provisioned_here(root) {
         return Err(Refusal::NotSetUp);
     }
     let family = crate::family::resolve_at(root).map_err(|_| Refusal::NotSetUp)?;
     // A run with nothing owed writes nothing: no lock, no plan, no hold.
     if !owed(&repo.git_dir) {
-        return Ok(NOTHING_OWED.to_owned());
+        return Ok((
+            NOTHING_OWED.to_owned(),
+            Historical::Named(std::collections::BTreeSet::default()),
+        ));
     }
     let family_dir = family_dir(&family.family_id)?;
     let owner = crate::capture_queue::acquire_owner(&repo.git_dir).map_err(|_| Refusal::Busy)?;
@@ -73,7 +81,7 @@ pub(super) fn run(root: &Path, repo: &rift_git::RepoPaths) -> Result<String, Ref
     // The hold is released before any result is reported, refusal included.
     let walked = walk(root, repo, &owner, &job, now);
     release(&owner, &job).map_err(|_| Refusal::HoldKept)?;
-    walked
+    walked.map(|recovered| (recovered.words, recovered.historical))
 }
 
 /// Whether anything is owed, read without a lock or a write: a hold left
@@ -112,7 +120,7 @@ fn walk(
     owner: &QueueLock,
     job: &Job,
     now: i64,
-) -> Result<String, Refusal> {
+) -> Result<Recovered, Refusal> {
     let hold = admit_own_hold(owner, &job.evidence, &job.operation)
         .map_err(|_| Refusal::HoldUnadmitted)?;
     let store = crate::projection::open_projection(root).map_err(|_| Refusal::StoreUnavailable)?;
@@ -132,5 +140,5 @@ fn walk(
         reader: &reader,
         now,
     };
-    Ok(recover(cx, &hold))
+    Ok(recover_naming_historical(cx, &hold))
 }

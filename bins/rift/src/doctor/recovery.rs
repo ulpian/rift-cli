@@ -7,18 +7,35 @@ use std::path::Path;
 
 use serde_json::json;
 
-pub(super) fn doctor_capture_recovery(root: &Path, repair: bool) -> (String, serde_json::Value) {
+use crate::hooks::{leave_to_recovery, Historical, Leave};
+
+/// The leg's report, and under `--fix` the guard that keeps the boundary
+/// tickets recovery classified historical out of every later repair drain of
+/// this run. A refusal proves no ticket ordinary, so it leaves them all.
+pub(super) fn doctor_capture_recovery(
+    root: &Path,
+    repair: bool,
+) -> ((String, serde_json::Value), Option<Leave>) {
     let Ok(repo) = rift_git::discover(root) else {
-        return (String::new(), json!({"held": false}));
+        return ((String::new(), json!({"held": false})), None);
     };
     if repair {
-        let words = fix::run(root, &repo).unwrap_or_else(|refusal| refusal.to_string());
-        return (format!("{words}\n"), json!({"held": false, "fix": words}));
+        let (words, historical) = fix::run(root, &repo)
+            .unwrap_or_else(|refusal| (refusal.to_string(), Historical::Unclassified));
+        let left = leave_to_recovery(historical);
+        return (
+            (format!("\n  {words}"), json!({"held": false, "fix": words})),
+            Some(left),
+        );
     }
-    match held_words(&repo.git_dir) {
-        Some(words) => (format!("{words}\n"), json!({"held": true, "words": words})),
+    let report = match held_words(&repo.git_dir) {
+        Some(words) => (
+            format!("\n  {words}"),
+            json!({"held": true, "words": words}),
+        ),
         None => (String::new(), json!({"held": false})),
-    }
+    };
+    (report, None)
 }
 
 #[cfg(unix)]
@@ -39,7 +56,7 @@ mod fix {
     pub(super) fn run(
         _: &std::path::Path,
         _: &rift_git::RepoPaths,
-    ) -> Result<String, &'static str> {
+    ) -> Result<(String, crate::hooks::Historical), &'static str> {
         Err("capture recovery runs on unix only")
     }
 }

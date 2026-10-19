@@ -2,6 +2,8 @@
 //! point that already owns it. Nothing here decides a stage's outcome; it
 //! only hands over what the previous stage produced in this process, or, when
 //! a crash left it behind, rebuilds that from the stage's own durable record.
+use std::collections::BTreeSet;
+
 use rift_recall_substrate::SubstrateReader;
 use rift_shadow::backend::ShadowBackend;
 use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
@@ -26,6 +28,8 @@ use super::selection::intent::SelectionIntent;
 use super::selection::{select, Selected, INTENT_NAME};
 use rift_core::boundary_gap::GapBatch;
 
+use crate::hooks::Historical;
+
 /// A complete inventory with no historical member: nothing is owed.
 const NOTHING_TO_RECOVER: &str = "nothing-to-recover";
 const ABSENT: &str = "record-absent";
@@ -49,6 +53,9 @@ pub(crate) struct LiveStages<'a, B, R> {
     hold: &'a OwnHold<'a>,
     selected: Option<Selected>,
     pinned: Option<Pinned>,
+    /// The ticket names the selection classified historical, once a stage
+    /// has read them from this run's selection or the durable intent.
+    historical: Option<BTreeSet<String>>,
 }
 
 impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
@@ -58,7 +65,13 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
             hold,
             selected: None,
             pinned: None,
+            historical: None,
         }
+    }
+
+    fn note_historical(&mut self, intent: &SelectionIntent) {
+        let names = intent.historical.iter().map(|e| e.source_name.clone());
+        self.historical = Some(names.collect());
     }
 
     fn select(&mut self) -> Result<(), Refused> {
@@ -67,6 +80,7 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
             .rt
             .block_on(select(cx.store, self.hold, cx.registry))
             .map_err(|_| Refused("selection-owed"))?;
+        self.note_historical(&selected.intent);
         self.selected = Some(selected);
         Ok(())
     }
@@ -75,9 +89,12 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
     /// from the durable selection intent and validated again.
     fn pin(&mut self) -> Result<&Pinned, Refused> {
         if self.pinned.is_none() {
-            let pinned = match self.selected.take() {
-                Some(selected) => pin_all(self.hold, selected),
-                None => resume_pins(self.hold, &self.selection_intent()?),
+            let pinned = if let Some(selected) = self.selected.take() {
+                pin_all(self.hold, selected)
+            } else {
+                let intent = self.selection_intent()?;
+                self.note_historical(&intent);
+                resume_pins(self.hold, &intent)
             };
             self.pinned = Some(pinned.map_err(|_| Refused("cut-owed"))?);
         }
@@ -234,8 +251,43 @@ pub(crate) fn recover<B: ShadowBackend, R: SubstrateReader>(
     cx: Context<'_, B, R>,
     hold: &OwnHold<'_>,
 ) -> String {
+    recover_naming_historical(cx, hold).words
+}
+
+/// How one recovery walk ended, and the boundary tickets the rest of a
+/// `--fix` run must leave to it.
+pub(crate) struct Recovered {
+    pub(crate) words: String,
+    pub(crate) historical: Historical,
+}
+
+/// [`recover`], also naming what its selection classified historical. A walk
+/// that owed before any selection was read names nothing as proven ordinary.
+pub(crate) fn recover_naming_historical<B: ShadowBackend, R: SubstrateReader>(
+    cx: Context<'_, B, R>,
+    hold: &OwnHold<'_>,
+) -> Recovered {
     let mut stages = LiveStages::new(cx, hold);
-    match drive(&mut HoldProgress { hold }, &mut stages) {
+    let recovery = drive(&mut HoldProgress { hold }, &mut stages);
+    let historical = match (&recovery, stages.historical) {
+        (_, Some(names)) => Historical::Named(names),
+        (
+            Recovery::Owed {
+                reason: NOTHING_TO_RECOVER,
+                ..
+            },
+            None,
+        ) => Historical::Named(BTreeSet::new()),
+        (_, None) => Historical::Unclassified,
+    };
+    Recovered {
+        words: recovery_words(recovery),
+        historical,
+    }
+}
+
+fn recovery_words(recovery: Recovery) -> String {
+    match recovery {
         Recovery::Complete => {
             "capture recovery complete: the backlog is archived, its queue files retired and the current boundary collected"
                 .to_owned()

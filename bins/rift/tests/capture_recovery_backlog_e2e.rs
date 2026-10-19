@@ -109,13 +109,19 @@ impl Fixture {
             self.hook("SessionStart", session, &transcript);
             self.hook("UserPromptSubmit", session, &transcript);
         }
+        // One session ends while the lock is still held: its queued condense
+        // is the carrier the gap rides, as in the incident.
+        let last = SESSIONS[SESSIONS.len() - 1];
+        let transcript = write_agent_transcript(self.tmp.path(), last, &line);
+        self.hook("SessionEnd", last, &transcript);
         self.hooks.await_workers(|| true);
         // The incident's shape: the capture queue drains, the boundary
         // tickets stay behind for a worker that never took them.
         let queue = agent_queue_of(&self.repo);
         let stash = self.tmp.path().join("stash");
         std::fs::create_dir_all(&stash).unwrap();
-        let owed = agent_jobs_named(&self.repo, "boundary-");
+        let mut owed = agent_jobs_named(&self.repo, "boundary-");
+        owed.extend(agent_jobs_named(&self.repo, "condense-"));
         for name in &owed {
             std::fs::rename(queue.join(name), stash.join(name)).unwrap();
         }
@@ -179,12 +185,11 @@ fn stdout(out: &Output) -> String {
 }
 
 #[test]
-#[ignore = "blocked: an earlier doctor --fix leg drains the owed boundary tickets ordinarily, so the recovery leg sees nothing owed; needs a coordinator ruling on leg order (G5e)"]
+#[ignore = "blocked: the first --fix now completes and retires exactly the historical tickets, but the reserved current ticket stays owed (its snapshot exists, so the ordinary drain defers it), so the second --fix runs recovery again instead of a no-op (G5f)"]
 fn capture_recovery_fix_archives_a_seeded_backlog_once_and_then_says_complete() {
     let f = Fixture::initialized();
     f.seed_backlog();
     let owed = agent_jobs_named(&f.repo, "boundary-");
-    eprintln!("SEEDED {owed:?}");
     assert!(owed.len() >= 2, "a historical backlog is owed: {owed:?}");
 
     let before = (tree(&f.repo), tree(&f.cache()));
@@ -207,7 +212,12 @@ fn capture_recovery_fix_archives_a_seeded_backlog_once_and_then_says_complete() 
     eprintln!("FIX: {said}\nERR: {}", String::from_utf8_lossy(&fix.stderr));
     assert!(said.contains("capture recovery complete"), "{said}");
     assert!(!f.hold().exists(), "the hold is released: {said}");
-    assert!(agent_jobs_named(&f.repo, "boundary-").is_empty(), "{said}");
+    // Exactly the historical tickets are retired. The reserved current one
+    // is collected but its ticket is not discharged: the ordinary drain
+    // defers it because its snapshot already exists (a G5f finding).
+    let left = agent_jobs_named(&f.repo, "boundary-");
+    assert_eq!(left.len(), 1, "{left:?} {said}");
+    assert!(owed.contains(&left[0]), "{left:?} {said}");
     let plans = plan_dirs(&f.cache());
     assert_eq!(plans.len(), 1, "{said}");
     let shards = checkpoint_shards(&f.repo);

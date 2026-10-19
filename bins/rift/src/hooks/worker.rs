@@ -8,6 +8,7 @@ mod boundary;
 pub(in crate::hooks) mod linehash;
 mod ownership;
 mod reads;
+mod repair_skip;
 
 use std::path::Path;
 
@@ -18,6 +19,7 @@ use super::audit::{attribute_serve_job, serve_audit_job};
 use super::git::{capture_guarded, effective_config, state_from_token, strategy_kind};
 use super::recovery::hook_number;
 use super::{flag, now_ms, projection_db_at};
+pub(crate) use repair_skip::{leave_to_recovery, Historical, Leave};
 
 use self::reads::count_tool_result_tokens_job;
 pub(in crate::hooks) use self::reads::snapshot_basis_job;
@@ -63,7 +65,12 @@ impl DrainPolicy {
     ) -> Vec<(std::path::PathBuf, crate::agent_queue::AgentJob)> {
         match self {
             Self::Due => crate::agent_queue::jobs_due(git_dir, now),
-            Self::Everything => crate::agent_queue::jobs(git_dir),
+            // A repair road still passes by the boundary tickets a `--fix`
+            // run left to capture recovery.
+            Self::Everything => crate::agent_queue::jobs(git_dir)
+                .into_iter()
+                .filter(|(path, job)| !repair_skip::left_to_recovery(path, job))
+                .collect(),
         }
     }
 
