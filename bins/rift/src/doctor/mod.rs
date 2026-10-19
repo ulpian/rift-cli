@@ -141,6 +141,10 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("completeness", doctor_capture_completeness(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
+    // Every leg has read the said-once markers; only a repair run clears them.
+    if repair {
+        capture::consume_said_once_markers(root);
+    }
     report.json.insert("fix".to_owned(), serde_json::json!(fix));
     Outcome::ok(report.human, serde_json::Value::Object(report.json))
 }

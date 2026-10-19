@@ -90,8 +90,8 @@ pub(super) fn doctor_push_queue(repo: &Path, fix: bool) -> (String, serde_json::
 ///
 /// The said-once markers (a failed condense, a pack that will not compile, a
 /// turn-boundary snapshot that failed) are OBSERVED without consumption: the
-/// hook path is what says them once and clears them; doctor only reports, so
-/// running it twice reports twice.
+/// hook path, or doctor's `--fix`, is what says them once and clears them; a
+/// report-only doctor run twice reports twice.
 pub(super) fn doctor_capture_queue(repo: &Path, fix: bool) -> (String, serde_json::Value) {
     let Ok(paths) = rift_git::discover(repo) else {
         return (String::new(), serde_json::json!({ "readable": false }));
