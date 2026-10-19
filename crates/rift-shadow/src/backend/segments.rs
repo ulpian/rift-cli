@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 
 use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::parse::segments::{
-    segment_name, SEGMENT_PACKS_KEY, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_KEY,
+    compact_segment_name, join_compact_segments, segment_name, COMPACT_SEGMENTS_DIR,
+    COMPACT_SEGMENTS_KEY, SEGMENT_PACKS_KEY, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_DIR,
+    TRANSCRIPT_SEGMENTS_KEY,
 };
 use rift_recall_substrate::worktree::git_blob_oid;
-
-use super::TRANSCRIPT_FULL_NAME;
 
 /// The redacted full transcript as the shard stores it.
 ///
@@ -40,6 +40,17 @@ pub struct Segments {
     /// The fingerprint of the packs the sealed part ran under; `None` for a
     /// body built from parts alone, which a later turn never carries.
     packs: Option<String>,
+    /// Which transcript the parts make up; it names the tree and the members.
+    layout: Layout,
+}
+
+/// The two transcripts a shard can segment. They differ in how parts make
+/// the document: the full form concatenates, while a compact part may
+/// re-emit a record an earlier part holds, so the compact form joins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Full,
+    Compact,
 }
 
 /// One part of a segmented body.
@@ -125,6 +136,24 @@ impl Segments {
         })
     }
 
+    /// The compact transcript's parts: the earlier ones carried by oid, then
+    /// this turn's sealed part when the turn changed any record. The body
+    /// reads as their join, which is what every leaf is computed over.
+    ///
+    /// # Errors
+    /// As [`Segments::new`].
+    pub fn compact(earlier: Vec<CarriedPart>, new: Option<RedactedBytes>) -> Result<Self> {
+        let mut parts: Vec<SegmentPart> = earlier.into_iter().map(SegmentPart::Carried).collect();
+        parts.extend(new.map(SegmentPart::Sealed));
+        let of = Self::of(parts)?;
+        let pieces: Vec<Vec<u8>> = of.parts.iter().map(|p| p.as_slice().to_vec()).collect();
+        Ok(Self {
+            joined: join_compact_segments(&pieces),
+            layout: Layout::Compact,
+            ..of
+        })
+    }
+
     fn of(parts: Vec<SegmentPart>) -> Result<Self> {
         if parts.is_empty() {
             return Err(RiftError::validity("a segmented transcript has no parts"));
@@ -143,6 +172,7 @@ impl Segments {
             parts,
             joined,
             packs: None,
+            layout: Layout::Full,
         })
     }
 
@@ -156,6 +186,22 @@ impl Segments {
     #[must_use]
     pub fn parts(&self) -> &[SegmentPart] {
         &self.parts
+    }
+
+    /// The tree the parts are written under.
+    #[must_use]
+    pub fn dir(&self) -> &'static str {
+        match self.layout {
+            Layout::Full => TRANSCRIPT_SEGMENTS_DIR,
+            Layout::Compact => COMPACT_SEGMENTS_DIR,
+        }
+    }
+
+    fn part_name(&self, index: usize) -> String {
+        match self.layout {
+            Layout::Full => segment_name(index),
+            Layout::Compact => compact_segment_name(index),
+        }
     }
 
     /// Each part's line count, which `segment_raw_lines` records: the gate is
@@ -198,6 +244,12 @@ pub(super) fn insert_segment_members(
     let TranscriptBody::Segments(segments) = body else {
         return;
     };
+    if segments.layout == Layout::Compact {
+        // A compact part may re-emit a record, so its line count says nothing
+        // a reader can check; the count of parts is the whole layout.
+        obj.insert(COMPACT_SEGMENTS_KEY.into(), segments.parts.len().into());
+        return;
+    }
     obj.insert(TRANSCRIPT_SEGMENTS_KEY.into(), segments.parts.len().into());
     obj.insert(SEGMENT_RAW_LINES_KEY.into(), segments.raw_lines().into());
     if let Some(packs) = &segments.packs {
@@ -206,23 +258,22 @@ pub(super) fn insert_segment_members(
 }
 
 /// The artifact-map entries a body occupies under `dir` (`""` or
-/// `tasks/<id>/`), named exactly as `write_shard` names them.
+/// `tasks/<id>/`), named exactly as `write_shard` names them; `whole` is the
+/// blob's name when the body is not segmented.
 pub(super) fn insert_body_artifacts(
     out: &mut BTreeMap<String, Vec<u8>>,
     dir: &str,
+    whole: &str,
     body: &TranscriptBody,
 ) {
     match body {
-        TranscriptBody::Whole(whole) => {
-            out.insert(
-                format!("{dir}{TRANSCRIPT_FULL_NAME}"),
-                whole.as_slice().to_vec(),
-            );
+        TranscriptBody::Whole(blob) => {
+            out.insert(format!("{dir}{whole}"), blob.as_slice().to_vec());
         }
         TranscriptBody::Segments(segments) => {
             for (index, part) in segments.parts.iter().enumerate() {
                 out.insert(
-                    format!("{dir}{}", segment_name(index)),
+                    format!("{dir}{}", segments.part_name(index)),
                     part.as_slice().to_vec(),
                 );
             }

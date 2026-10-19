@@ -14,6 +14,7 @@ use super::{
     session_worktrees_jsonl_bytes, sessions_jsonl_bytes, shard_merkle_root, tool_calls_jsonl_bytes,
     tool_results_jsonl_bytes, usage_jsonl_bytes, window_journal_jsonl_bytes, ArchivedTask,
     ArchivedTranscript, CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME,
+    TRANSCRIPT_FULL_NAME,
 };
 use crate::sha256_hex;
 
@@ -436,11 +437,7 @@ impl CheckpointArchive {
             out.insert(SERVE_AUDIT_NAME.to_owned(), serve_audit.to_vec());
         }
         if let Some(t) = &self.transcript {
-            out.insert(
-                TRANSCRIPT_COMPACT_NAME.to_owned(),
-                t.compact.as_slice().to_vec(),
-            );
-            super::segments::insert_body_artifacts(&mut out, "", &t.full);
+            insert_pair_artifacts(&mut out, "", t);
         }
         self.insert_boundary_gap_artifact(&mut out);
         if let Some(usage) = self.usage_jsonl() {
@@ -475,11 +472,7 @@ impl CheckpointArchive {
             let id = &task.tool_use_id;
             out.insert(format!("tasks/{id}/metadata.json"), task.metadata_json());
             if let Some(t) = &task.transcript {
-                out.insert(
-                    format!("tasks/{id}/{TRANSCRIPT_COMPACT_NAME}"),
-                    t.compact.as_slice().to_vec(),
-                );
-                super::segments::insert_body_artifacts(&mut out, &format!("tasks/{id}/"), &t.full);
+                insert_pair_artifacts(&mut out, &format!("tasks/{id}/"), t);
             }
         }
         self.insert_spill_artifacts(&mut out);
@@ -627,6 +620,13 @@ pub(crate) fn rfc3339_utc_ms(ms: i64) -> String {
 /// Record a transcript pair's compact name and boundary on a metadata
 /// document — the parent's and every task's, in one spelling, so the two
 /// documents cannot record the pair two ways.
+/// A transcript pair's artifact-map entries under `dir`: each half's blob, or
+/// its segments, named as `write_shard` names them.
+fn insert_pair_artifacts(out: &mut BTreeMap<String, Vec<u8>>, dir: &str, t: &ArchivedTranscript) {
+    super::segments::insert_body_artifacts(out, dir, TRANSCRIPT_COMPACT_NAME, &t.compact);
+    super::segments::insert_body_artifacts(out, dir, TRANSCRIPT_FULL_NAME, &t.full);
+}
+
 pub(super) fn insert_compact_boundary(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     transcript: &ArchivedTranscript,
@@ -640,6 +640,7 @@ pub(super) fn insert_compact_boundary(
     super::originals::insert_original_manifest(obj, &transcript.originals);
     insert_fallback_counts(obj, transcript.redaction_fallback);
     super::segments::insert_segment_members(obj, &transcript.full);
+    super::segments::insert_segment_members(obj, &transcript.compact);
 }
 
 /// The same optional paired grammar in the bound report and metadata mirrors.

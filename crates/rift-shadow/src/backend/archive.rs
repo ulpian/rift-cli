@@ -281,7 +281,7 @@ pub struct ArchivedTranscript {
     pub full: super::TranscriptBody,
     /// `transcript.compact.jsonl` — the redacted deterministic compaction,
     /// also self-contained (a reader with one shard needs no other shard).
-    pub compact: RedactedBytes,
+    pub compact: super::TranscriptBody,
     /// The 0-based compact-line index where this checkpoint's slice begins
     /// ([`crate::transcript::CompactTranscript::compact_transcript_start`]);
     /// rounds toward inclusion, recorded in `metadata.json`.

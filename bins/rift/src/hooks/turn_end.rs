@@ -14,11 +14,14 @@ use std::path::Path;
 
 use rift_core::{Result, RiftError, SecretBytes};
 use rift_recall_substrate::parse::segments::{
-    declared_layout, segment_name, Declared, SEGMENT_PACKS_KEY,
+    compact_segment_name, declared_layout, segment_name, Declared, COMPACT_SEGMENTS_KEY,
+    SEGMENT_PACKS_KEY,
 };
 use rift_shadow::backend::ArchivedTranscript;
 use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
-use rift_shadow::turn_seal::{seal_turn, PriorChain, PriorPart, TurnSeal};
+use rift_shadow::turn_seal::{
+    seal_turn, seal_turn_compact, CompactCut, PriorChain, PriorPart, TurnSeal,
+};
 use rift_store::CanonicalStore as _;
 
 use crate::agent_queue::{AgentJob, SealTurn};
@@ -50,9 +53,11 @@ pub(super) fn turn_end_job(
     })
 }
 
-/// Replace `pair.full` with the turn's segmented seal and say what it read,
-/// for [`frontier::record`] once the shard lands. Whatever cannot be read
-/// leaves the whole seal the archive already holds and says nothing.
+/// Replace `pair.full` with the turn's segmented seal — and, when the turn
+/// appended a part, `pair.compact` with the compact form cut at the same
+/// line — and say what it read, for [`frontier::record`] once the shard lands.
+/// Whatever cannot be read leaves the whole seal the archive already holds
+/// and says nothing; a refused chain keeps the whole compact form too.
 pub(super) fn seal_turn_full(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
@@ -63,13 +68,39 @@ pub(super) fn seal_turn_full(
 ) -> Option<SealRead> {
     let raw = transcript_path(&repo.git_dir, session).and_then(|p| std::fs::read(p).ok())?;
     let read = raw.len();
-    let prior = rt
-        .block_on(last_checkpoint(store, session))
-        .and_then(|id| prior_chain(&repo.work_tree, &id));
-    let seal = seal_turn(&SecretBytes::new(raw), prior, packs).ok()?;
+    let raw = SecretBytes::new(raw);
+    let last = rt.block_on(last_checkpoint(store, session));
+    let prior = last
+        .as_deref()
+        .and_then(|id| prior_chain(&repo.work_tree, id));
+    let before = prior.as_ref().map_or(0, |c| c.raw_lines.iter().sum());
+    let seal = seal_turn(&raw, prior, packs).ok()?;
     let said = SealRead::of(read, &seal);
-    if let TurnSeal::Appended { body, .. } | TurnSeal::Whole { body, .. } = seal {
-        pair.full = body;
+    match seal {
+        TurnSeal::Appended {
+            body,
+            document_lines,
+            ..
+        } => {
+            let cut = CompactCut {
+                before,
+                now: document_lines,
+            };
+            let earlier = last
+                .as_deref()
+                .and_then(|id| prior_compact(&repo.work_tree, id));
+            if let Ok(compact) = seal_turn_compact(&raw, cut, earlier, packs) {
+                // The compact form now ends where the full parts do, so the
+                // slice start can be no later than its last record: rounding
+                // down keeps the slice's rule of erring toward inclusion.
+                let records = compact.as_slice().split_inclusive(|b| *b == b'\n').count();
+                pair.compact_start = pair.compact_start.min(records);
+                pair.compact = compact;
+            }
+            pair.full = body;
+        }
+        TurnSeal::Whole { body, .. } => pair.full = body,
+        TurnSeal::Unchanged => {}
     }
     Some(said)
 }
@@ -175,6 +206,27 @@ fn prior_chain(work_tree: &Path, checkpoint: &str) -> Option<PriorChain> {
         raw_lines,
         parts,
     })
+}
+
+/// The previous shard's compact parts, each with the oid its tree entry
+/// names; `None` for a whole compact form. A part the tree lacks reads as
+/// empty, which the compact seal refuses by its record count.
+fn prior_compact(work_tree: &Path, checkpoint: &str) -> Option<Vec<PriorPart>> {
+    let walker = rift_recall_substrate::ShardWalker::open(work_tree).ok()?;
+    let bytes = walker
+        .read_artifact_any(checkpoint, "metadata.json")
+        .ok()??;
+    let meta: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let count = usize::try_from(meta.get(COMPACT_SEGMENTS_KEY)?.as_u64()?).ok()?;
+    let parts = (0..count).map(|i| {
+        let (oid, bytes) = walker
+            .read_native_entry(checkpoint, &compact_segment_name(i))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        PriorPart { oid, bytes }
+    });
+    Some(parts.collect())
 }
 
 #[cfg(test)]

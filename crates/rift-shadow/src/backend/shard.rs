@@ -11,7 +11,6 @@ use super::{
     ArchivedTask, ArchivedTranscript, CheckpointArchive, NativeBackend, SegmentPart,
     TranscriptBody, NATIVE_CHECKPOINT_REF, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
-use rift_recall_substrate::parse::segments::TRANSCRIPT_SEGMENTS_DIR;
 
 impl<W: NativeGitWrite> NativeBackend<W> {
     /// Write the checkpoint shard: structural artifacts + the durable content blob,
@@ -148,17 +147,17 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         transcript: &ArchivedTranscript,
         entries: &mut Vec<TreeWriteEntry>,
     ) -> Result<()> {
-        entries.push(self.durable_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
-        entries.push(self.full_body_entry(&transcript.full)?);
+        entries.push(self.body_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
+        entries.push(self.body_entry(TRANSCRIPT_FULL_NAME, &transcript.full)?);
         self.push_original_tree(transcript, entries)?;
         self.push_spill_tree(transcript, entries)
     }
 
-    /// The full transcript's entry: its one blob, or the `transcript.segments`
-    /// tree of its parts — each part through the durable door like the blob.
-    fn full_body_entry(&self, body: &TranscriptBody) -> Result<TreeWriteEntry> {
+    /// A transcript's entry: its one blob `whole`, or the segments tree of its
+    /// parts — each part through the durable door like the blob.
+    fn body_entry(&self, whole: &str, body: &TranscriptBody) -> Result<TreeWriteEntry> {
         let segments = match body {
-            TranscriptBody::Whole(whole) => return self.durable_entry(TRANSCRIPT_FULL_NAME, whole),
+            TranscriptBody::Whole(blob) => return self.durable_entry(whole, blob),
             TranscriptBody::Segments(segments) => segments,
         };
         let mut parts = Vec::with_capacity(segments.parts().len());
@@ -175,7 +174,7 @@ impl<W: NativeGitWrite> NativeBackend<W> {
                 },
             });
         }
-        self.tree_entry(TRANSCRIPT_SEGMENTS_DIR.into(), &parts)
+        self.tree_entry(segments.dir().into(), &parts)
     }
 
     /// Write a transcript's sealed originals as the `tool-originals` tree

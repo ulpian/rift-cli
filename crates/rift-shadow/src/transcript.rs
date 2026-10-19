@@ -192,7 +192,7 @@ pub fn archived_transcript(
     Ok((
         ArchivedTranscript {
             full: full.redacted.into(),
-            compact: compact.redacted,
+            compact: compact.redacted.into(),
             compact_start: compacted.compact_transcript_start,
             spills: Vec::new(),
             originals: Vec::new(),
@@ -244,6 +244,14 @@ pub fn sealed_original(
         }
     }
     Ok(sealed)
+}
+
+/// Every compact record of `raw`, one canonical line each without its `\n`,
+/// in the order the compactor emits them: a record keeps the position its
+/// first fragment gave it, which is what lets a per-turn part name only the
+/// records a turn added or grew.
+pub(crate) fn compact_records(raw: &[u8]) -> Vec<Vec<u8>> {
+    compact_lines(raw, 0).lines
 }
 
 /// The compaction of one slice: its lines and what it could not read.
