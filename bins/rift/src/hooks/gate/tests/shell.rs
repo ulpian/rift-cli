@@ -424,3 +424,34 @@ fn a_lever_that_is_off_leaves_no_journal() {
     gate_under(&call, here, &off);
     assert!(lines_of(here, "s-off", None).is_empty());
 }
+
+/// ★ **A relative name read under a call's own outside `workdir` is that
+/// directory's file, never the held one of the same name.** The control
+/// without the field still resolves against the session and is declined, so
+/// the allow is the workdir's doing and not a cold window.
+#[test]
+fn a_relative_read_under_an_outside_workdir_is_never_declined_for_the_root_file() {
+    let shell = codex_shell();
+    let Some(name) = shell.file.file_name().and_then(|n| n.to_str()) else {
+        panic!("the fixture names a file");
+    };
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join(name), "EXTERNAL\n").unwrap();
+    assert_eq!(shell.deny_reason_for("s-wd", &shell.ranged(1, 40)), None);
+    let relative = format!("sed -n '1,40p' {name}");
+    let with = |workdir: Option<&Path>| {
+        let mut payload = shell_of(&relative);
+        payload["cwd"] = shell_spelling(shell.tmp.path()).into();
+        if let Some(dir) = workdir {
+            payload["tool_input"]["workdir"] = shell_spelling(dir).into();
+        }
+        gate_under(
+            &hook("codex", "PreToolUse", "s-wd", payload),
+            shell.tmp.path(),
+            &shell.enforce,
+        )
+        .deny_reason
+    };
+    assert_eq!(with(Some(outside.path())), None);
+    assert!(with(None).is_some(), "the session-relative control is held");
+}
