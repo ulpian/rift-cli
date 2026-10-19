@@ -145,19 +145,18 @@ fn a_miss_or_a_small_file_is_a_plain_read() {
     assert!(first_contact_rows(here).is_empty());
 }
 
-/// ★ Under the default policy an enforcing family's first read is only
-/// observed — the `first_contact` key is unwritten, so the family's mode
-/// alone answers nothing — and the identical repeat is no first contact: the
-/// window holds the file now, so the re-read lever decides it as it decides
-/// any repeat.
+/// ★ With `first_contact` written `observe` an enforcing family's first read
+/// is only observed — the family's mode alone answers nothing — and the
+/// identical repeat is no first contact: the window holds the file now, so
+/// the re-read lever decides it as it decides any repeat.
 #[test]
-fn under_the_default_policy_an_enforcing_family_only_observes_and_the_repeat_runs() {
+fn a_first_read_written_observe_is_only_observed_and_the_repeat_runs() {
     let (tmp, file) = checkout(900);
     let here = tmp.path();
     bind(here, "src.rs", 900);
-    let enforce = enforcing();
+    let mut enforce = enforcing();
     assert_eq!(enforce.read_deny, rift_recall_policy::Mode::Enforce);
-    assert_eq!(enforce.first_contact, rift_recall_policy::Mode::Observe);
+    enforce.first_contact = rift_recall_policy::Mode::Observe;
     let call = hook(
         "claude-code",
         "PreToolUse",
@@ -178,17 +177,17 @@ fn under_the_default_policy_an_enforcing_family_only_observes_and_the_repeat_run
     );
 }
 
-/// ★ With `first_contact` written `enforce` the first read is answered with
+/// ★ Under the default policy the first read is answered with
 /// the bound outline: the frame travels, the row it owes carries it, the
 /// window is credited with the outline and not the file, and the identical
 /// repeat runs — once answered, the request is honoured.
 #[test]
-fn a_first_read_is_answered_with_the_outline_once_first_contact_is_written_enforce() {
+fn under_the_default_policy_a_first_read_is_answered_with_the_outline_once() {
     let (tmp, file) = checkout(900);
     let here = tmp.path();
     bind(here, "src.rs", 900);
-    let mut written = enforcing();
-    written.first_contact = rift_recall_policy::Mode::Enforce;
+    let written = enforcing();
+    assert_eq!(written.first_contact, rift_recall_policy::Mode::Enforce);
     let call = hook(
         "claude-code",
         "PreToolUse",

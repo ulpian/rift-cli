@@ -476,13 +476,13 @@ mod tests {
         let (out, json) = status_policy(None);
         assert!(out.contains(".rift/policies/serve.toml: absent; defaults apply"));
         assert!(out.contains(
-            "interception  mode enforce  max_slice_bytes 98304  min_slice_lines 28  max_inline_hash_bytes 1048576  recovery_budget 800  inherit_by_name observe"
+            "interception  mode enforce  max_slice_bytes 98304  min_slice_lines 28  max_inline_hash_bytes 1048576  recovery_budget 800  inherit_by_name enforce"
         ));
         assert!(out.contains(
-            "first contact first_contact observe  first_contact_min_lines 400  first_contact_min_bytes 16384"
+            "first contact first_contact enforce  first_contact_min_lines 400  first_contact_min_bytes 16384"
         ));
-        assert!(out.contains("family held   decline_family_held observe"));
-        assert_eq!(json["interception"]["decline_family_held"], "observe");
+        assert!(out.contains("family held   decline_family_held enforce"));
+        assert_eq!(json["interception"]["decline_family_held"], "enforce");
         assert!(out.contains("output match  recognise_by_output observe"));
         assert_eq!(json["interception"]["recognise_by_output"], "observe");
         let (shut, shut_json) = status_policy(Some(

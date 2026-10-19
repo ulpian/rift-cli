@@ -16,14 +16,13 @@ use crate::respond::Channel;
 /// The mode the first-contact lever ships at: the documented default, which
 /// the repository's `first_contact` policy key stands in for.
 ///
-/// Observe: every first read the lever would answer is decided and recorded,
-/// and none is answered. Whether a model given the outline reads less, or
-/// simply repeats the call, is the figure the observe period publishes
-/// before any session meets the frame. The move to enforce is a line written
-/// in the policy, not a change here: this constant caps nothing, and the
+/// Enforce: enough live sessions carried candidate first reads, and one policy
+/// line turns it back to observe, so a first read the lever would answer is answered
+/// where the family's channel is confirmed. A repository that writes
+/// `observe` keeps the record without the answer; this constant caps nothing, and the
 /// mode [`decide_first_contact`] is handed is the mode it acts on, under the
 /// family's channel alone.
-pub const FIRST_CONTACT_MODE: Mode = Mode::Observe;
+pub const FIRST_CONTACT_MODE: Mode = Mode::Enforce;
 
 /// The size at which a file is large enough for its first read to be worth
 /// answering with an outline: either floor is enough.
@@ -127,10 +126,10 @@ mod tests {
     }
 
     /// ★ Under the default lever a first whole read and a first page of a
-    /// large file are outlined — observed, never answered.
+    /// large file are answered with the outline on a confirmed channel.
     #[test]
-    fn under_the_default_a_first_read_of_a_large_file_is_an_observed_outline() {
-        assert_eq!(FIRST_CONTACT_MODE, Mode::Observe, "the documented default");
+    fn under_the_default_a_first_read_of_a_large_file_is_answered_with_its_outline() {
+        assert_eq!(FIRST_CONTACT_MODE, Mode::Enforce, "the documented default");
         let empty = Journal::default();
         for (read, bytes) in [
             (whole(400), 9_000),
@@ -140,7 +139,7 @@ mod tests {
         ] {
             assert_eq!(
                 first(&read, &empty, FIRST_CONTACT_MODE, bytes),
-                Decision::Observe(DenyShape::Outlined),
+                Decision::Deny(DenyShape::Outlined),
                 "{read:?}"
             );
         }

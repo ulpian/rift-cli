@@ -169,7 +169,7 @@ over-budget content degrades to a handle ([8](08-cost-and-savings.md),
 shape a committed fixture pins and whose reason field a recorded run showed reaching
 the model, only when the window's own record proves the lines are held at the current
 hash, and once per key (the repeat runs). It acts at `enforce`; at `observe` (where
-`first_contact`, `decline_family_held`, `inherit_by_name` and the narrowing run) it
+the narrowing runs) it
 decides and records and the call runs as written. A family's `[interception.agents]`
 entry replaces the repository `mode` for that family, and the pinned reason channel
 still caps it. Any error or unknown yields the neutral response. **Why.**  A decline takes away something the agent asked for, so each clause is a way of not being wrong: no visible reason teaches nothing, an unconfirmed channel bets a turn on an unchecked schema, a repeat decline is a loop.

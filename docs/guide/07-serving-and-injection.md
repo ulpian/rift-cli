@@ -165,9 +165,8 @@ or **Decline**, once, with a reason the model reads.
 `[interception.agents]` entry replaces that `mode` for its family, and the
 family's pinned reason channel still caps the result (the per-client caps are in
 [10 §10.7](10-agent-integrations.md#107-deterministic-context-delivery)).
-`inherit_by_name`, `first_contact` and `decline_family_held` default to
-`observe` and never exceed the family's resolved mode; `first_contact` and the
-narrowing are also held at `observe` by the build. The table is in
+`first_contact`, `decline_family_held` and `inherit_by_name` default to
+`enforce`, and each never exceeds the family's resolved mode. The table is in
 [02 §2.6](02-configuration.md#the-read-gate-interception); `rift recall status`
 prints each lever's effective mode per family.
 
@@ -306,7 +305,9 @@ a miss records nothing. The frame, `[rift] Read outlined:`, names the costliest
 twelve definitions and costs 379 tokens at that cap, so the 95-line page floor is
 that cost at four tokens a line.
 
-**At observe**, where the build holds it, a qualifying read with a bound outline
+**At enforce**, the default, a qualifying read on a confirmed channel is
+answered with the frame once, and the identical repeat runs. **At observe**,
+where a repository writes it, a qualifying read with a bound outline
 runs, the window records its `read`, and the worker writes a row under
 `first_contact` with no frame and no claimed saving: the pool an outline would
 answer.
@@ -330,7 +331,9 @@ clause is paid for; else, if the others hold part of the request in at most
 sixteen runs, `[rift] Read held by another window:` names them; if they hold all
 of it, nothing is cheaper and the read runs. No frame names the holder.
 
-**At observe**, the default, the read runs and records its `read`; a `family`
+**At enforce**, the default, the route is served once on a confirmed
+channel. **At observe**, where a repository writes it, the read runs and
+records its `read`; a `family`
 line beside it records request, route, offered runs, frame size and
 `acted: false`, and keeps the decision once per revision; the worker books a row
 under `family_held:outline` or `family_held:held` with no claimed saving. An

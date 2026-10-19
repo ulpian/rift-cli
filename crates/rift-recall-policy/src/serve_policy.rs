@@ -31,12 +31,12 @@ min_slice_lines = 28           # under this a reason frame costs more than the r
 max_inline_hash_bytes = 1048576 # 1 MiB: larger files are never hashed on the gate path
 recovery_budget = 800          # tokens a post-compaction recovery map may cost
 basis_ttl_days = 30            # a read-time basis snapshot is collected after this
-inherit_by_name = "observe"    # a subagent's lines of a path its spawning prompt named; never above mode
-first_contact = "observe"      # a first read of a large file answered with its outline, once; never above mode
+inherit_by_name = "enforce"    # a subagent's lines of a path its spawning prompt named; never above mode
+first_contact = "enforce"      # a first read of a large file answered with its outline, once; never above mode
 first_contact_min_lines = 400  # a file this long, or
 first_contact_min_bytes = 16384 # this large, is large enough to outline
 narrow = "observe"             # the held part of a partly held read, declined for the unheld range; never above mode
-decline_family_held = "observe" # a read another live window holds, declined once with a cheaper route; never above mode
+decline_family_held = "enforce" # a read another live window holds, declined once with a cheaper route; never above mode
 recognise_by_output = "observe" # lines a command's output was matched to a file as carrying; never above mode
 
 # Per-family overrides. Each is capped by what that family's pinned rows allow:
