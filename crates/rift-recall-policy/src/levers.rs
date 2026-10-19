@@ -143,31 +143,115 @@ pub const DEFAULT_CONVERT_BUDGET_MS: u32 = 250;
 /// How long an unused sidecar is kept.
 pub const DEFAULT_DOC_TTL_DAYS: u32 = 30;
 
-/// Per-family interception overrides. The three families are named fields
-/// rather than a map so an unknown family is a policy that fails to load
-/// rather than a line that silently does nothing.
+/// One family's per-lever modes: `[interception.agents.<family>]`.
+///
+/// Every field is a request that replaces the repository's own value for this
+/// family alone; an absent field leaves it. `mode` is the family-wide key in
+/// table form, so a family can carry both without a second spelling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AgentLevers {
+    /// Replaces `[interception] mode`: the read lever for this family.
+    pub mode: Option<Mode>,
+    /// Replaces `[interception] first_contact` for this family.
+    pub first_contact: Option<Mode>,
+    /// Replaces `[interception] decline_family_held` for this family.
+    pub decline_family_held: Option<Mode>,
+    /// Replaces `[interception] inherit_by_name` for this family.
+    pub inherit_by_name: Option<Mode>,
+    /// Replaces `[interception] narrow` for this family.
+    pub narrow: Option<Mode>,
+}
+
+/// What a family's line under `[interception.agents]` may say: the one mode it
+/// always could, or a table of per-lever modes (Q88).
+///
+/// Untagged so the existing spelling keeps loading; a value that is neither a
+/// known mode nor a table of known levers matches no variant and fails the load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AgentEntry {
+    /// `family = "enforce"`: the family-wide read lever.
+    Mode(Mode),
+    /// `[interception.agents.family]`: per-lever modes.
+    Levers(AgentLevers),
+}
+
+impl AgentEntry {
+    /// The entry as per-lever modes; the one-mode spelling sets `mode` only.
+    #[must_use]
+    pub const fn levers(self) -> AgentLevers {
+        match self {
+            Self::Mode(mode) => AgentLevers {
+                mode: Some(mode),
+                first_contact: None,
+                decline_family_held: None,
+                inherit_by_name: None,
+                narrow: None,
+            },
+            Self::Levers(levers) => levers,
+        }
+    }
+}
+
+impl From<Mode> for AgentEntry {
+    fn from(mode: Mode) -> Self {
+        Self::Mode(mode)
+    }
+}
+
+/// Per-family interception overrides, one field per adapter in registry order.
+/// Named fields rather than a map so an unknown family is a policy that fails
+/// to load rather than a line that silently does nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AgentModes {
     /// Claude Code's override.
     #[serde(rename = "claude-code")]
-    pub claude_code: Option<Mode>,
+    pub claude_code: Option<AgentEntry>,
     /// Codex's override.
-    pub codex: Option<Mode>,
+    pub codex: Option<AgentEntry>,
+    /// Gemini CLI's override.
+    pub gemini: Option<AgentEntry>,
     /// Antigravity's override.
-    pub antigravity: Option<Mode>,
+    pub antigravity: Option<AgentEntry>,
+    /// Cursor's override.
+    pub cursor: Option<AgentEntry>,
+    /// Copilot CLI's override.
+    #[serde(rename = "copilot-cli")]
+    pub copilot_cli: Option<AgentEntry>,
+    /// OpenCode's override.
+    pub opencode: Option<AgentEntry>,
+    /// Factory Droid's override.
+    #[serde(rename = "factory-droid")]
+    pub factory_droid: Option<AgentEntry>,
+    /// Ollama's override.
+    pub ollama: Option<AgentEntry>,
 }
 
 impl AgentModes {
-    /// The override written for `family`, if any.
+    /// The family-wide mode written for `family`, if any.
     #[must_use]
     pub fn for_family(&self, family: &str) -> Option<Mode> {
-        match family {
+        self.levers_for(family).mode
+    }
+
+    /// Every per-lever mode written for `family`; all `None` when nothing is.
+    #[must_use]
+    pub fn levers_for(&self, family: &str) -> AgentLevers {
+        let entry = match family {
             "claude-code" => self.claude_code,
             "codex" => self.codex,
+            "gemini" => self.gemini,
             "antigravity" => self.antigravity,
+            "cursor" => self.cursor,
+            "copilot-cli" => self.copilot_cli,
+            "opencode" => self.opencode,
+            "factory-droid" => self.factory_droid,
+            "ollama" => self.ollama,
             _ => None,
-        }
+        };
+        entry.map(AgentEntry::levers).unwrap_or_default()
     }
 }
 

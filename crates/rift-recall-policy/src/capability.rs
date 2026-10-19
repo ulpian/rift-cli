@@ -171,8 +171,8 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
     let search = &policy.search;
     let doc = &policy.doc;
 
-    let override_mode = interception.agents.for_family(family);
-    let requested = override_mode.unwrap_or(interception.mode);
+    let own = interception.agents.levers_for(family);
+    let requested = own.mode.unwrap_or(interception.mode);
     let (read_deny, read_deny_cap) = cap_decline(requested, capability);
     let (search_answer, search_answer_cap) = cap_decline(search.mode, capability);
     let (doc_redirect, doc_redirect_cap) = cap_decline(doc.mode, capability);
@@ -211,12 +211,16 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         min_slice_lines: interception.min_slice_lines,
         max_inline_hash_bytes: interception.max_inline_hash_bytes,
         recovery_budget: interception.recovery_budget,
-        inherit_by_name: interception.inherit_by_name.min(read_deny),
-        first_contact: interception.first_contact.min(read_deny),
+        inherit_by_name: per_family(own.inherit_by_name, interception.inherit_by_name, read_deny),
+        first_contact: per_family(own.first_contact, interception.first_contact, read_deny),
         first_contact_min_lines: interception.first_contact_min_lines,
         first_contact_min_bytes: interception.first_contact_min_bytes,
-        narrow: interception.narrow.min(read_deny),
-        decline_family_held: interception.decline_family_held.min(read_deny),
+        narrow: per_family(own.narrow, interception.narrow, read_deny),
+        decline_family_held: per_family(
+            own.decline_family_held,
+            interception.decline_family_held,
+            read_deny,
+        ),
         recognise_by_output: interception.recognise_by_output.min(read_deny),
         grep_cap,
         grep_cap_off,
@@ -237,6 +241,13 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
         convert_budget_ms: doc.convert_budget_ms,
         ttl_days: doc.ttl_days,
     }
+}
+
+/// Q88: a family's own entry for a lever replaces the repository's value for
+/// that family alone, and the result is still never above the read lever it
+/// qualifies — which rule 2 has already capped by the reason channel.
+fn per_family(own: Option<Mode>, repository: Mode, read_deny: Mode) -> Mode {
+    own.unwrap_or(repository).min(read_deny)
 }
 
 /// Rules 1 and 2 for one lever that declines a call.
@@ -341,7 +352,7 @@ mod tests {
         for src in [
             "[interception]\nmode = \"enforce\"\nunknown_key = 1\n",
             "[interception]\nmode = \"aggressive\"\n",
-            "[interception.agents]\ncursor = \"enforce\"\n",
+            "[interception.agents]\nsome-editor = \"enforce\"\n",
             "[interception]\nmax_slice_bytes = 2097152\n", // exceeds the hash bound
             "[interception]\nmin_slice_lines = 0\n",       // a floor of zero is no floor
             "[interception]\nmin_slice_lines = -1\n",      // and a negative one is not a count
@@ -782,5 +793,145 @@ mod tests {
             resolve(&unknown.policy, "claude-code", FULL).inherit_by_name,
             Mode::Off
         );
+    }
+
+    /// The four per-lever modes one family resolved to, in a fixed order.
+    fn family_levers(e: &Effective) -> [Mode; 4] {
+        [
+            e.first_contact,
+            e.decline_family_held,
+            e.inherit_by_name,
+            e.narrow,
+        ]
+    }
+
+    /// Q88: one lever may enforce for one harness while every other harness
+    /// of the repository keeps observing it.
+    #[test]
+    fn a_per_lever_entry_enforces_one_lever_for_one_family_while_the_others_observe() {
+        let (loaded, _d) = load_src(
+            "[interception]\nmode = \"enforce\"\n\n\
+             [interception.agents.claude-code]\nfirst_contact = \"enforce\"\n",
+        );
+        assert_eq!(loaded.source, ServePolicySource::Declared);
+        let claude = resolve(&loaded.policy, "claude-code", FULL);
+        assert_eq!(claude.read_deny, Mode::Enforce);
+        assert_eq!(
+            family_levers(&claude),
+            [Mode::Enforce, Mode::Observe, Mode::Observe, Mode::Observe]
+        );
+        let other = resolve(&loaded.policy, "antigravity", CONFIRMED_ONLY);
+        assert_eq!(family_levers(&other), [Mode::Observe; 4]);
+    }
+
+    /// The family-wide key keeps its meaning inside a table as `mode`, and a
+    /// per-lever entry overrides the repository's lever for that lever only.
+    #[test]
+    fn a_per_lever_entry_overrides_the_family_wide_mode_for_that_lever_only() {
+        let (loaded, _d) = load_src(
+            "[interception]\nmode = \"enforce\"\nnarrow = \"enforce\"\n\
+             decline_family_held = \"enforce\"\n\n\
+             [interception.agents.antigravity]\nmode = \"enforce\"\nnarrow = \"off\"\n",
+        );
+        assert_eq!(loaded.source, ServePolicySource::Declared);
+        assert_eq!(
+            loaded.policy.interception.agents.for_family("antigravity"),
+            Some(Mode::Enforce)
+        );
+        let e = resolve(&loaded.policy, "antigravity", CONFIRMED_ONLY);
+        assert_eq!(e.read_deny, Mode::Enforce);
+        assert_eq!(
+            family_levers(&e),
+            [Mode::Observe, Mode::Enforce, Mode::Observe, Mode::Off],
+            "narrow is the family's own; the rest are the repository's"
+        );
+        assert_eq!(
+            resolve(&loaded.policy, "claude-code", FULL).narrow,
+            Mode::Enforce
+        );
+    }
+
+    /// A per-lever entry is still a request: it never rises above the read
+    /// lever, nor above what the family's reason channel allows.
+    #[test]
+    fn a_per_lever_entry_never_resolves_above_the_read_lever_or_the_reason_channel_cap() {
+        let all_enforce = "first_contact = \"enforce\"\ndecline_family_held = \"enforce\"\n\
+                           inherit_by_name = \"enforce\"\nnarrow = \"enforce\"\n";
+        let (lowered, _d) = load_src(&format!(
+            "[interception.agents.claude-code]\nmode = \"observe\"\n{all_enforce}"
+        ));
+        let e = resolve(&lowered.policy, "claude-code", FULL);
+        assert_eq!(e.read_deny, Mode::Observe);
+        assert_eq!(family_levers(&e), [Mode::Observe; 4]);
+
+        let (asked, _d) = load_src(&format!("[interception.agents.codex]\n{all_enforce}"));
+        let e = resolve(&asked.policy, "codex", NO_CHANNEL);
+        assert_eq!(e.read_deny_cap, Some(CapReason::UnconfirmedReasonChannel));
+        assert_eq!(
+            family_levers(&e),
+            [Mode::Observe; 4],
+            "asked for, not granted"
+        );
+    }
+
+    /// Every adapter in registry order takes both spellings, and an entry for
+    /// one family reaches that family alone.
+    #[test]
+    fn every_registry_family_takes_a_family_wide_mode_and_a_per_lever_table() {
+        let registry = [
+            "claude-code",
+            "codex",
+            "gemini",
+            "antigravity",
+            "cursor",
+            "copilot-cli",
+            "opencode",
+            "factory-droid",
+            "ollama",
+        ];
+        for family in registry {
+            let (wide, _d) = load_src(&format!("[interception.agents]\n{family} = \"off\"\n"));
+            assert_eq!(wide.source, ServePolicySource::Declared, "{family}");
+            assert_eq!(
+                wide.policy.interception.agents.for_family(family),
+                Some(Mode::Off)
+            );
+            let (table, _d) = load_src(&format!(
+                "[interception.agents.{family}]\nfirst_contact = \"enforce\"\n\
+                 decline_family_held = \"enforce\"\ninherit_by_name = \"enforce\"\n\
+                 narrow = \"enforce\"\n"
+            ));
+            assert_eq!(table.source, ServePolicySource::Declared, "{family}");
+            assert_eq!(table.policy.interception.agents.for_family(family), None);
+            let e = resolve(&table.policy, family, FULL);
+            assert_eq!(family_levers(&e), [Mode::Enforce; 4], "{family}");
+            for other in registry.iter().filter(|other| **other != family) {
+                let e = resolve(&table.policy, other, FULL);
+                assert_eq!(
+                    family_levers(&e),
+                    [Mode::Observe; 4],
+                    "{family} reached {other}"
+                );
+            }
+        }
+    }
+
+    /// A per-lever table is held to the same refusal as the rest of the file:
+    /// an unknown family, lever or value fails the load and every lever is off.
+    #[test]
+    fn an_unknown_family_lever_or_value_in_a_per_lever_table_fails_closed() {
+        for src in [
+            "[interception.agents]\nsome-editor = \"enforce\"\n",
+            "[interception.agents.some-editor]\nnarrow = \"enforce\"\n",
+            "[interception.agents.claude-code]\nfirst_contact = \"always\"\n",
+            "[interception.agents.claude-code]\nrecognise_by_output = \"enforce\"\n",
+            "[interception.agents]\nclaude-code = 1\n",
+        ] {
+            let (loaded, _d) = load_src(src);
+            assert_eq!(loaded.source, ServePolicySource::Invalid, "{src:?}");
+            let e = resolve(&loaded.policy, "claude-code", FULL);
+            assert_eq!(family_levers(&e), [Mode::Off; 4], "{src:?}");
+            assert_eq!(every_lever(&e), [Mode::Off; 5], "{src:?}");
+        }
     }
 }
