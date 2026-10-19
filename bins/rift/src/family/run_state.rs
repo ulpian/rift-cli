@@ -444,6 +444,32 @@ pub(crate) fn leftovers(git_dir: &Path) -> Option<Leftovers> {
     })
 }
 
+/// Every run-state root a member's git dir names that exists on this
+/// machine, old and moved alike, with the files each holds. Rift's own
+/// per-machine state only: never the family identity, never a store.
+pub(crate) fn member_roots(git_dir: &Path) -> Vec<(PathBuf, usize)> {
+    let key = rift_git::family::canonical_or_lexical(git_dir);
+    let mut roots: Vec<PathBuf> = RunRoot::ALL
+        .into_iter()
+        .map(|root| root.legacy_under(&key))
+        .collect();
+    if let Some(found) = locate(&key) {
+        roots.extend(
+            RunRoot::ALL
+                .into_iter()
+                .map(|root| root.under(&found.member)),
+        );
+    }
+    roots
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .map(|root| {
+            let files = count_files(&root);
+            (root, files)
+        })
+        .collect()
+}
+
 /// Move a member's old tree into its run directory, then mark it moved.
 ///
 /// Cheap when there is nothing to do: one `stat` of the marker and one of

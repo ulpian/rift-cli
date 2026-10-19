@@ -19,6 +19,7 @@
 mod capture;
 mod checkouts;
 mod completeness;
+mod compose;
 mod family;
 mod git_hooks;
 pub(crate) mod health;
@@ -136,6 +137,10 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("binary_of_record", doctor_binary_of_record(root));
     report.leg("integration_health", doctor_integration_health(root));
     report.leg("worktree_wiring", doctor_worktree_wiring(root, repair));
+    report.leg(
+        "hook_composition",
+        compose::doctor_hook_composition(root, repair),
+    );
     report.leg("window_journals", doctor_window_journals(root));
     report.leg("config_load", doctor_config_load(root));
     report.leg("retired_config_keys", doctor_retired_config_keys(root));
