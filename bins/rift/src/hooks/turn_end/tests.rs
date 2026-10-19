@@ -144,7 +144,10 @@ fn a_turn_end_records_the_frontier_it_sealed_and_a_long_lag_is_said() {
     let read = std::fs::metadata(&transcript).unwrap().len();
     assert_eq!(sealed.checkpoint, turn_checkpoints(checkout.path())[0]);
     assert_eq!((sealed.read_bytes, sealed.sealed_lines), (read, Some(2)));
-    assert_eq!(sealed.finding(sealed.lag_bytes(&repo.git_dir)), None);
+    assert_eq!(
+        sealed.finding(sealed.lag_bytes(&crate::family::run_state::sessions_dir(&repo.git_dir))),
+        None
+    );
     let grown = "x".repeat(usize::try_from(frontier::LAG_BOUND_BYTES).unwrap() + 1);
     std::fs::write(
         &transcript,
@@ -152,7 +155,7 @@ fn a_turn_end_records_the_frontier_it_sealed_and_a_long_lag_is_said() {
     )
     .unwrap();
     assert_eq!(
-        sealed.finding(sealed.lag_bytes(&repo.git_dir)),
+        sealed.finding(sealed.lag_bytes(&crate::family::run_state::sessions_dir(&repo.git_dir))),
         Some("lagging")
     );
 }

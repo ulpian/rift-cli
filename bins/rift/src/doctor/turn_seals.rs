@@ -34,7 +34,7 @@ fn turn_seal_leg(git_dir: &Path) -> (String, serde_json::Value) {
                 continue;
             }
         };
-        let lag = frontier.lag_bytes(git_dir);
+        let lag = frontier.lag_bytes(&sessions);
         let Some(word) = frontier.finding(lag) else {
             continue;
         };
