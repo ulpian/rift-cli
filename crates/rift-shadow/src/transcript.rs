@@ -246,12 +246,23 @@ pub fn sealed_original(
     Ok(sealed)
 }
 
-/// Every compact record of `raw`, one canonical line each without its `\n`,
-/// in the order the compactor emits them: a record keeps the position its
-/// first fragment gave it, which is what lets a per-turn part name only the
-/// records a turn added or grew.
-pub(crate) fn compact_records(raw: &[u8]) -> Vec<Vec<u8>> {
-    compact_lines(raw, 0).lines
+/// One raw line compacted alone: its record, with the schema version a
+/// record's first fragment gets, and the message id a later fragment merges
+/// by; `None` for a line the compactor skips. The carried compactor replays a
+/// record from its fragments with this and `merge_content`, so it emits the
+/// same bytes `compact_lines` does, each record keeping the position its first
+/// fragment gave it.
+pub(crate) fn compact_fragment(raw_line: &[u8]) -> Option<(Map<String, Value>, Option<String>)> {
+    let value = serde_json::from_slice::<Value>(raw_line).ok()?;
+    let (mut obj, _) = compact_record(value.as_object()?);
+    let id = obj.get("id").and_then(Value::as_str).map(str::to_owned);
+    obj.insert("v".to_owned(), COMPACT_SCHEMA_VERSION.into());
+    Some((obj, id))
+}
+
+/// One compact record's canonical line, without its `\n`.
+pub(crate) fn record_line(obj: Map<String, Value>) -> Vec<u8> {
+    canonical(&Value::Object(obj))
 }
 
 /// The compaction of one slice: its lines and what it could not read.
@@ -324,7 +335,7 @@ fn compact_lines(raw: &[u8], start_line: usize) -> Compacted {
 }
 
 /// Append `next`'s content blocks to the already-emitted `existing` record's.
-fn merge_content(existing: &mut Map<String, Value>, next: &Map<String, Value>) {
+pub(crate) fn merge_content(existing: &mut Map<String, Value>, next: &Map<String, Value>) {
     let Some(next_content) = next.get("content") else {
         return;
     };

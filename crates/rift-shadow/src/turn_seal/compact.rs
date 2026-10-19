@@ -11,20 +11,24 @@
 //! first fragment put it, so position alone says which records a turn changed.
 //!
 //! Earlier parts are carried by their checked blob oid and never pass the gate
-//! again. The records they cover are recounted from the raw prefix — a
-//! compaction, with no redaction — and a part off its oid, or a join whose
-//! record count is not that prefix's, reseals the compact form whole as one
-//! part. Recompacting the prefix each turn is O(prefix) parsing; carrying the
-//! still-open records forward would make it O(turn) at the cost of a sidecar
-//! the parts could disagree with.
+//! again. The compactor's own state is carried too ([`CompactCarry`], kept
+//! beside the turn-seal frontier), so a turn compacts only its new lines; a
+//! carry that is missing or does not fit the earlier cut is rebuilt from the
+//! raw prefix — a compaction, with no redaction. A part off its oid, or a join
+//! whose record count is not the carry's, reseals the compact form whole as
+//! one part.
 
-use rift_core::{Result, SecretBytes};
+mod carry;
+
+use rift_core::{Result, RiftError, SecretBytes};
 use rift_recall_substrate::parse::segments::join_compact_segments;
+use rift_recall_substrate::worktree::git_blob_oid;
 use rift_shadow_redact::RulePackSet;
 
+pub use carry::CompactCarry;
+
 use super::PriorPart;
-use crate::backend::{CarriedPart, Segments, TranscriptBody};
-use crate::transcript::compact_records;
+use crate::backend::{CarriedPart, SegmentPart, Segments, TranscriptBody};
 
 /// Where one turn's compact part begins and ends, in document lines: the
 /// lines the earlier full parts cover, and the lines they cover now.
@@ -36,42 +40,75 @@ pub struct CompactCut {
     pub now: u64,
 }
 
+/// One turn's compact seal and the compactor state the next turn starts from.
+pub struct CompactSeal {
+    /// The compact form: carried parts and this turn's, or one whole part.
+    pub body: TranscriptBody,
+    /// The state the next turn compacts from.
+    pub carry: CompactCarry,
+}
+
 /// Seal the compact form of `raw`'s first `cut.now` lines for one turn:
 /// `prior`'s parts carried and one new part, or the whole form as one part
-/// when the earlier parts cannot be trusted.
+/// when the earlier parts cannot be trusted. `carry` is the state the
+/// previous turn left; one that does not fit `cut.before` is rebuilt.
 ///
 /// # Errors
-/// [`rift_core::RiftError`] if the gate returns one, which it does for no input.
+/// [`rift_core::RiftError`] if the gate returns one, which it does for no
+/// input, or if a record cannot be rebuilt from its fragments.
 pub fn seal_turn_compact(
     raw: &SecretBytes,
     cut: CompactCut,
     prior: Option<Vec<PriorPart>>,
+    carry: Option<&CompactCarry>,
     packs: &RulePackSet,
-) -> Result<TranscriptBody> {
+) -> Result<CompactSeal> {
     let raw = raw.as_slice();
-    let earlier =
-        prior.and_then(|parts| carry(parts, compact_records(prefix(raw, cut.before)).len()));
-    let (earlier, new) = match earlier {
-        Some(earlier) => (earlier, compact_part(raw, cut.before, cut.now)),
-        None => (Vec::new(), compact_part(raw, 0, cut.now)),
+    let fitted = carry.filter(|c| c.fits(raw, cut.before));
+    let base = fitted
+        .cloned()
+        .unwrap_or_else(|| CompactCarry::rebuilt(raw, cut.before));
+    let earlier = prior.and_then(|parts| {
+        let vouched = fitted.is_some_and(|c| c.vouches_for(&parts));
+        carry_parts(parts, base.records(), vouched)
+    });
+    let base = if earlier.is_some() {
+        base
+    } else {
+        CompactCarry::default()
     };
+    // A line that grows a record the carry closed starts the turn over from
+    // the whole prefix, where every record is open.
+    let advanced = base
+        .advance(raw, cut.now)
+        .or_else(|| CompactCarry::rebuilt(raw, cut.before).advance(raw, cut.now));
+    let Some((new, carry)) = advanced else {
+        return Err(RiftError::Other(
+            "a compact record could not be rebuilt from its fragments".into(),
+        ));
+    };
+    let earlier = earlier.unwrap_or_default();
     let sealed = rift_shadow_redact::redact_with(&SecretBytes::new(new), packs)?.redacted;
     if earlier.is_empty() && sealed.as_slice().is_empty() {
-        return Ok(sealed.into());
+        return Ok(CompactSeal {
+            body: sealed.into(),
+            carry,
+        });
     }
     let new = (!sealed.as_slice().is_empty()).then_some(sealed);
-    Ok(TranscriptBody::Segments(Segments::compact(earlier, new)?))
+    let segments = Segments::compact(earlier, new)?;
+    let oids = segments.parts().iter().map(part_oid).collect();
+    Ok(CompactSeal {
+        body: TranscriptBody::Segments(segments),
+        carry: carry.with_parts(oids),
+    })
 }
 
 /// Admit every earlier part by its oid, and the set only if its join holds
-/// exactly the records the raw prefix compacts to.
-fn carry(parts: Vec<PriorPart>, records: usize) -> Option<Vec<CarriedPart>> {
-    if parts.is_empty() {
-        return None;
-    }
-    let pieces: Vec<Vec<u8>> = parts.iter().map(|p| p.bytes.clone()).collect();
-    let joined = join_compact_segments(&pieces);
-    if joined.split_inclusive(|b| *b == b'\n').count() != records {
+/// exactly the records the earlier lines compact to. Parts the carry vouches
+/// for by oid skip the recount, which parses the whole compact form.
+fn carry_parts(parts: Vec<PriorPart>, records: usize, vouched: bool) -> Option<Vec<CarriedPart>> {
+    if parts.is_empty() || !(vouched || joins_to(&parts, records)) {
         return None;
     }
     parts
@@ -80,37 +117,19 @@ fn carry(parts: Vec<PriorPart>, records: usize) -> Option<Vec<CarriedPart>> {
         .collect()
 }
 
-/// The raw part between two cuts: every record the lines `[before, now)`
-/// added, and every earlier record they grew, each on its own line.
-pub(super) fn compact_part(raw: &[u8], before: u64, now: u64) -> Vec<u8> {
-    let earlier = compact_records(prefix(raw, before));
-    let mut out = Vec::new();
-    for (at, record) in compact_records(prefix(raw, now)).iter().enumerate() {
-        if earlier.get(at) != Some(record) {
-            out.extend_from_slice(record);
-            out.push(b'\n');
-        }
-    }
-    out
+/// Whether the parts' join holds exactly `records` records.
+fn joins_to(parts: &[PriorPart], records: usize) -> bool {
+    let pieces: Vec<Vec<u8>> = parts.iter().map(|p| p.bytes.clone()).collect();
+    let joined = join_compact_segments(&pieces);
+    joined.split_inclusive(|b| *b == b'\n').count() == records
 }
 
-/// The bytes of `raw`'s first `lines` `\n`-terminated lines; a count past
-/// the end stops at the last complete line, never at a partial record.
-pub(super) fn prefix(raw: &[u8], lines: u64) -> &[u8] {
-    let Some(last) = usize::try_from(lines).ok().and_then(|n| n.checked_sub(1)) else {
-        return &[];
-    };
-    let mut ends = raw
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| **b == b'\n')
-        .map(|(at, _)| at + 1);
-    let end = ends
-        .clone()
-        .nth(last)
-        .or_else(|| ends.next_back())
-        .unwrap_or(0);
-    raw.get(..end).unwrap_or_default()
+/// The blob oid a part is, or will be, stored under.
+fn part_oid(part: &SegmentPart) -> String {
+    match part {
+        SegmentPart::Carried(c) => c.oid().to_owned(),
+        SegmentPart::Sealed(r) => git_blob_oid(r.as_slice()),
+    }
 }
 
 #[cfg(test)]

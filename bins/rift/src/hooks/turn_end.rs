@@ -75,7 +75,7 @@ pub(super) fn seal_turn_full(
         .and_then(|id| prior_chain(&repo.work_tree, id));
     let before = prior.as_ref().map_or(0, |c| c.raw_lines.iter().sum());
     let seal = seal_turn(&raw, prior, packs).ok()?;
-    let said = SealRead::of(read, &seal);
+    let mut said = SealRead::of(read, &seal);
     match seal {
         TurnSeal::Appended {
             body,
@@ -89,7 +89,12 @@ pub(super) fn seal_turn_full(
             let earlier = last
                 .as_deref()
                 .and_then(|id| prior_compact(&repo.work_tree, id));
-            if let Ok(compact) = seal_turn_compact(&raw, cut, earlier, packs) {
+            let carry = last
+                .as_deref()
+                .and_then(|id| frontier::carry_after(&repo.git_dir, session, id));
+            if let Ok(sealed) = seal_turn_compact(&raw, cut, earlier, carry.as_ref(), packs) {
+                let compact = sealed.body;
+                said.compact = Some(sealed.carry);
                 // The compact form now ends where the full parts do, so the
                 // slice start can be no later than its last record: rounding
                 // down keeps the slice's rule of erring toward inclusion.

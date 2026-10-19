@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rift_shadow::turn_seal::{ChainBreak, TurnSeal};
+use rift_shadow::turn_seal::{ChainBreak, CompactCarry, TurnSeal};
 use serde::{Deserialize, Serialize};
 
 /// Bytes the live transcript may run past the last seal before doctor names
@@ -48,14 +48,19 @@ pub(crate) struct TurnFrontier {
     pub(crate) sealed_lines: Option<u64>,
     pub(crate) fallback: Option<SealFallback>,
     pub(crate) sealed_at_ms: i64,
+    /// The compactor's state at this seal, so the next turn compacts only
+    /// its new lines; absent from a record an older binary wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compact: Option<CompactCarry>,
 }
 
 /// What a seal says before its checkpoint id is known.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct SealRead {
     read_bytes: u64,
     sealed_lines: Option<u64>,
     fallback: Option<SealFallback>,
+    pub(super) compact: Option<CompactCarry>,
 }
 
 /// One sidecar as doctor reads it.
@@ -96,6 +101,7 @@ impl SealRead {
             read_bytes: u64::try_from(read).unwrap_or(u64::MAX),
             sealed_lines,
             fallback,
+            compact: None,
         }
     }
 }
@@ -127,10 +133,21 @@ pub(crate) fn record(git_dir: &Path, session: &str, checkpoint: &str, read: Seal
         sealed_lines: read.sealed_lines,
         fallback: read.fallback,
         sealed_at_ms: now,
+        compact: read.compact,
     };
     let sessions = crate::family::run_state::sessions_dir(git_dir);
     if let Err(e) = write(&sessions, &frontier) {
         tracing::warn!(error = %e, "turn-seal frontier not recorded");
+    }
+}
+
+/// The compactor state the seal of `checkpoint` left for `session`; `None`
+/// when the sidecar is missing, unreadable, or names another checkpoint.
+pub(super) fn carry_after(git_dir: &Path, session: &str, checkpoint: &str) -> Option<CompactCarry> {
+    let sessions = crate::family::run_state::sessions_dir(git_dir);
+    match read_one(&sessions, session.to_owned()) {
+        Recorded::Frontier(f) if f.checkpoint == checkpoint => f.compact,
+        Recorded::Frontier(_) | Recorded::Unreadable(_) => None,
     }
 }
 

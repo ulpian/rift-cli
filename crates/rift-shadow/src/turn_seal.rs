@@ -27,7 +27,7 @@ use rift_shadow_redact::{RedactionOutput, RulePackSet};
 use crate::backend::{CarriedPart, RedactionFallback, Segments, TranscriptBody};
 
 mod compact;
-pub use compact::{seal_turn_compact, CompactCut};
+pub use compact::{seal_turn_compact, CompactCarry, CompactCut, CompactSeal};
 
 /// The finding a refused chain records, naming the checkpoint it read back.
 pub const SEGMENT_CHAIN_BROKEN: &str = "segment-chain-broken";

@@ -70,6 +70,7 @@ mod tests {
             sealed_lines: None,
             fallback,
             sealed_at_ms: 1,
+            compact: None,
         }
     }
 
