@@ -600,6 +600,24 @@ mod tests {
         assert!(outcome.json.get("git_hooks").is_none());
     }
 
+    /// The `post-checkout` hook fires in a member but runs as the family's
+    /// hook binary, so the record follows that binary before the hook wires
+    /// the member from the record (the self-heal order).
+    #[test]
+    fn post_checkout_in_a_member_moves_the_record_to_the_hook_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, member) = family_with_member(tmp.path());
+        let bin = binary_at(&tmp.path().join("opt/release"));
+        let paths = rift_git::discover(&member).unwrap();
+
+        let line = crate::hooks::follow_from_hook(&paths, &release(bin.clone())).unwrap();
+
+        let record = record_in(&main);
+        assert_eq!(record.path(), bin, "{line}");
+        let history: Vec<_> = record.history.iter().map(|r| r.rift_bin.as_str()).collect();
+        assert_eq!(history, vec!["/opt/rift/rift"]);
+    }
+
     /// The symmetry that rule requires: `disable` from ANY member removes the
     /// wiring from every member, so an agent cannot stay live in a worktree
     /// nobody is looking at.

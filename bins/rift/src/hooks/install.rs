@@ -230,6 +230,29 @@ pub(crate) fn follow_running_binary(work_tree: &Path, running: &RunningBinary) -
     if is_linked_member(&paths) {
         return None;
     }
+    follow_in_family(&paths, work_tree, running)
+}
+
+/// [`follow_running_binary`] for a git hook, which may fire in a linked member.
+///
+/// A member's own commands never move the record, because their build lives in
+/// a checkout `git worktree remove` deletes. A git hook is different: the
+/// binary it runs as is the family's hook binary, wherever the checkout is, so
+/// the record follows it before the hook wires the member from the record. The
+/// transient screen still refuses a binary that lives inside a member.
+pub(crate) fn follow_from_hook(
+    paths: &rift_git::RepoPaths,
+    running: &RunningBinary,
+) -> Option<String> {
+    follow_in_family(paths, &paths.work_tree, running)
+}
+
+/// The move itself, once the caller has decided this vantage may make it.
+fn follow_in_family(
+    paths: &rift_git::RepoPaths,
+    work_tree: &Path,
+    running: &RunningBinary,
+) -> Option<String> {
     let sites = family_sites(&paths.common_dir);
     let record = rift_shadow::hooks::read_binary_of_record(&sites.dir)?;
     let old = record.path();
@@ -284,7 +307,7 @@ fn never_of_record(running: &RunningBinary, sites: &FamilySites) -> Option<&'sta
 /// A binary cargo built in a debug profile (`target/debug/rift`, or
 /// `target/<triple>/debug/rift`). Its build dir is the one `cargo test`
 /// rewrites all day, so a family pointed at it breaks on the next edit.
-fn is_debug_build(path: &Path) -> bool {
+pub(crate) fn is_debug_build(path: &Path) -> bool {
     path.parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name == "debug")
