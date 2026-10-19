@@ -125,3 +125,49 @@ fn a_second_turn_end_carries_the_first_turns_segment_by_its_oid() {
     assert_eq!(carried.0, first.0, "part 0 carried by its blob oid");
     assert!(part(&ids[1], 1).is_some(), "the second turn appends part 1");
 }
+
+/// The session's frontier sidecar, as doctor reads it.
+fn recorded_frontier(repo: &rift_git::RepoPaths) -> frontier::TurnFrontier {
+    let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
+    match frontier::recorded(&sessions).pop() {
+        Some(frontier::Recorded::Frontier(f)) => f,
+        other => panic!("no frontier recorded: {other:?}"),
+    }
+}
+
+#[test]
+fn a_turn_end_records_the_frontier_it_sealed_and_a_long_lag_is_said() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    assert!(mint(checkout.path(), 60, 1_000));
+    let sealed = recorded_frontier(&repo);
+    let read = std::fs::metadata(&transcript).unwrap().len();
+    assert_eq!(sealed.checkpoint, turn_checkpoints(checkout.path())[0]);
+    assert_eq!((sealed.read_bytes, sealed.sealed_lines), (read, Some(2)));
+    assert_eq!(sealed.finding(sealed.lag_bytes(&repo.git_dir)), None);
+    let grown = "x".repeat(usize::try_from(frontier::LAG_BOUND_BYTES).unwrap() + 1);
+    std::fs::write(
+        &transcript,
+        format!("{}{grown}", std::fs::read_to_string(&transcript).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        sealed.finding(sealed.lag_bytes(&repo.git_dir)),
+        Some("lagging")
+    );
+}
+
+#[test]
+fn a_truncated_transcript_reseals_whole_and_the_frontier_names_the_broken_chain() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    assert!(mint(checkout.path(), 60, 1_000));
+    write_lines(&transcript, 1);
+    assert!(mint(checkout.path(), 20, 2_000));
+    let sealed = recorded_frontier(&repo);
+    assert_eq!(
+        sealed.fallback,
+        Some(frontier::SealFallback::SegmentChainBroken)
+    );
+    assert_eq!(sealed.finding(None), Some("segment-chain-broken"));
+}

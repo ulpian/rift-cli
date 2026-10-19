@@ -8,6 +8,8 @@
 //! the commit the previous checkpoint already anchors to (Q10). No turn end is
 //! ever synthesised (Q11).
 
+pub(crate) mod frontier;
+
 use std::path::Path;
 
 use rift_core::{Result, RiftError, SecretBytes};
@@ -20,6 +22,7 @@ use rift_shadow::turn_seal::{seal_turn, PriorChain, PriorPart, TurnSeal};
 use rift_store::CanonicalStore as _;
 
 use crate::agent_queue::{AgentJob, SealTurn};
+use frontier::SealRead;
 
 /// The transcript's length now, or `None` with no transcript on record: the
 /// hook's frontier, read by one stat and no store.
@@ -47,8 +50,9 @@ pub(super) fn turn_end_job(
     })
 }
 
-/// Replace `pair.full` with the turn's segmented seal. Whatever cannot be
-/// read leaves the whole seal the archive already holds.
+/// Replace `pair.full` with the turn's segmented seal and say what it read,
+/// for [`frontier::record`] once the shard lands. Whatever cannot be read
+/// leaves the whole seal the archive already holds and says nothing.
 pub(super) fn seal_turn_full(
     rt: &tokio::runtime::Runtime,
     store: &rift_store::SqliteStore,
@@ -56,18 +60,18 @@ pub(super) fn seal_turn_full(
     session: &str,
     packs: &rift_shadow::redact::RulePackSet,
     pair: &mut ArchivedTranscript,
-) {
-    let Some(raw) = transcript_path(&repo.git_dir, session).and_then(|p| std::fs::read(p).ok())
-    else {
-        return;
-    };
+) -> Option<SealRead> {
+    let raw = transcript_path(&repo.git_dir, session).and_then(|p| std::fs::read(p).ok())?;
+    let read = raw.len();
     let prior = rt
         .block_on(last_checkpoint(store, session))
         .and_then(|id| prior_chain(&repo.work_tree, &id));
-    match seal_turn(&SecretBytes::new(raw), prior, packs) {
-        Ok(TurnSeal::Appended { body, .. } | TurnSeal::Whole { body, .. }) => pair.full = body,
-        Ok(TurnSeal::Unchanged) | Err(_) => {}
+    let seal = seal_turn(&SecretBytes::new(raw), prior, packs).ok()?;
+    let said = SealRead::of(read, &seal);
+    if let TurnSeal::Appended { body, .. } | TurnSeal::Whole { body, .. } = seal {
+        pair.full = body;
     }
+    Some(said)
 }
 
 /// [`turn_end_job`]'s work: the anchor, then the archive the interval road runs.
