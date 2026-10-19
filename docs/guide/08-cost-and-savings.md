@@ -343,6 +343,17 @@ focused opens the same breakdown ([Chapter 11](11-canopy-tour.md) walks the pane
   `first contact:` and `family held:`, tags read back out of the audit relation so a
   lever can be taken out of the totals (a family-held net includes what was read of
   those bytes afterwards, as tokens returned, never a negative saving).
+- `tool_output` in `rift savings --json` carries two classes, `tool_output_held` and
+  `tool_output_folded`.
+  Each splits into `would_save`, the results the class only observed, and
+  `realised`, the results it acted on.
+  `would_save` is beside the share and never added to it; its bytes read `null`,
+  because the audit relation keeps the row but not the byte figure.
+  `realised` tokens are already inside the share, so the key names which part of it
+  the class is and adds nothing.
+  The Canopy savings modal draws the same two classes under the share, and
+  `xtask replay-savings` reports the held class as the same-window repeats it would
+  hold and the folded class as not replayed.
 - `--since <rfc3339|epoch-ms>` and `--last 24h|7d|30d|all`: one window per call,
   mutually exclusive, composed with the boundary marker (the later cut) so `[7d]` on
   the card and `--last 7d` are one window; an unknown spelling is refused. Neither

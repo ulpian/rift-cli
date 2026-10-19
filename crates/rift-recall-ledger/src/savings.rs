@@ -59,6 +59,7 @@
 //!   counted into [`Savings::reads_unmeasured`] and published, never imputed.
 
 mod queries;
+mod tool_output;
 
 use std::collections::BTreeMap;
 
@@ -70,6 +71,10 @@ pub use self::queries::{
     audit_totals, decisions_by_family, family_held_totals, first_contact_totals, reads_by_family,
     reads_by_family_and_tool, tool_results_by_family, AuditTotals, Decisions, FamilyDecisions,
     FamilyHeldTags, FamilyHeldTotals, FamilyReads, FirstContactTotals,
+};
+pub use self::tool_output::{
+    tool_output_totals, ToolOutputClass, ToolOutputTotals, VERB_TOOL_OUTPUT_FOLDED,
+    VERB_TOOL_OUTPUT_HELD,
 };
 
 /// The audit verb a **prevented** read is booked under — a read Rift caused

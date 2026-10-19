@@ -48,6 +48,15 @@ pub(super) fn output_recognition_rows(report: &Report) -> String {
     out.push_str(&line("    first sight in this window", rows.first_sight));
     out.push_str(&line("    same-window repeat", rows.same_window));
     out.push_str(&line("    sibling re-read", rows.sibling));
+    out.push_str(
+        "  the tool-output classes (would save; beside the share):
+",
+    );
+    out.push_str(&line(
+        "    tool_output_held (same-window repeat)",
+        rows.same_window,
+    ));
+    out.push_str("    tool_output_folded                                      not replayed\n");
     out
 }
 
@@ -82,6 +91,16 @@ pub(super) fn output_recognition_json(report: &Report) -> Value {
     map.insert("first_sight".to_owned(), tally(rows.first_sight));
     map.insert("same_window".to_owned(), tally(rows.same_window));
     map.insert("sibling".to_owned(), tally(rows.sibling));
+    // The live classes by their savings names. The held class holds exactly
+    // a same-window repeat; folding is not replayed, so it is `null`, never a
+    // zero that would read as a measurement.
+    map.insert(
+        "tool_output_classes".to_owned(),
+        json!({
+            "tool_output_held": tally(rows.same_window),
+            "tool_output_folded": Value::Null,
+        }),
+    );
     Value::Object(map)
 }
 
@@ -99,4 +118,29 @@ fn class_rows(rows: &OutputRecognition) -> [(&'static str, [Tally; 2]); 4] {
         ),
         ("  shell reads the grammar recognises", rows.recognised),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_replay_reports_the_tool_output_classes_by_their_savings_names() {
+        let mut report = Report::default();
+        report.output_recognition.same_window = Tally {
+            calls: 2,
+            tokens: 300,
+        };
+        let json = output_recognition_json(&report);
+        let classes = &json["tool_output_classes"];
+        assert_eq!(classes["tool_output_held"]["calls"], 2);
+        assert_eq!(classes["tool_output_held"]["tokens"], 300);
+        assert!(classes["tool_output_folded"].is_null());
+        let table = output_recognition_rows(&report);
+        assert!(
+            table.contains("tool_output_held (same-window repeat)"),
+            "{table}"
+        );
+        assert!(table.contains("tool_output_folded"), "{table}");
+    }
 }
