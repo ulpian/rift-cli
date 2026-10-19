@@ -34,6 +34,7 @@ pub(super) fn transcript_of(raw: &[u8]) -> ArchivedTranscript {
         spills: Vec::new(),
         originals: Vec::new(),
         redaction_fallback: super::RedactionFallback::default(),
+        reconciliation: None,
     }
 }
 

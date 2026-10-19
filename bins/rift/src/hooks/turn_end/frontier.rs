@@ -39,6 +39,7 @@ pub(crate) struct SealRead {
 fn fallback_of(broken: ChainBreak) -> SealFallback {
     match broken {
         ChainBreak::PacksChanged => SealFallback::PacksChanged,
+        ChainBreak::SegmentMismatch => SealFallback::SegmentMismatch,
         ChainBreak::LineCount
         | ChainBreak::LeafMismatch
         | ChainBreak::Truncated

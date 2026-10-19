@@ -216,6 +216,7 @@ pub fn archived_transcript(
             spills: Vec::new(),
             originals: Vec::new(),
             redaction_fallback: RedactionFallback::of(&[&full.report, &compact.report]),
+            reconciliation: None,
         },
         compacted.raw_lines,
     ))

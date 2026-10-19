@@ -341,6 +341,7 @@ fn a_session_end_with_no_turn_end_seal_is_sealed_whole_as_before() {
         .read_native_entry(&end, &segment_name(0))
         .unwrap()
         .is_none());
+    assert!(metadata_of(&repo, &end).get("reconciled").is_none());
 }
 
 #[test]
@@ -358,6 +359,69 @@ fn a_session_end_over_a_transcript_shorter_than_its_frontier_reseals_whole_and_s
     let sealed = recorded_frontier(&repo);
     assert_eq!(sealed.checkpoint, end);
     assert_eq!(sealed.finding(None), Some("segment-chain-broken"));
+}
+
+/// The final shard's metadata document.
+fn metadata_of(repo: &rift_git::RepoPaths, checkpoint: &str) -> serde_json::Value {
+    let walker = rift_recall_substrate::ShardWalker::open(&repo.work_tree).unwrap();
+    let (_, bytes) = walker
+        .read_native_entry(checkpoint, "metadata.json")
+        .unwrap()
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn a_session_end_whose_parts_match_the_whole_seal_records_reconciled() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    assert!(mint(checkout.path(), 60, 1_000));
+    write_lines(&transcript, 7);
+    let end = end_session(checkout.path(), 2_000);
+    let meta = metadata_of(&repo, &end);
+    assert_eq!(meta["reconciled"], true);
+    assert!(meta.get("supersedes_segments").is_none());
+    assert_eq!(recorded_frontier(&repo).finding(None), None);
+}
+
+#[test]
+fn a_session_end_with_a_divergent_part_writes_the_whole_seal_and_names_the_mismatch() {
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, transcript) = live_session(checkout.path(), 3);
+    assert!(mint(checkout.path(), 60, 1_000));
+    write_lines(&transcript, 7);
+    let (rt, store, packs) = archive_inputs(checkout.path());
+    let inputs = TurnInputs {
+        rt: &rt,
+        store: &store,
+        repo: &repo,
+        session: "s-turn",
+        packs: &packs,
+        end: SealEnd::Session,
+    };
+    // The tail is sealed from other bytes, as a gate gone wrong would.
+    let mut planted = |bytes: &SecretBytes, first_line: usize| {
+        let other = String::from_utf8(bytes.as_slice().to_vec()).unwrap();
+        let other = SecretBytes::new(other.replace("\"n\"", "\"m\"").into_bytes());
+        rift_shadow::redact::redact_with_at(&other, &packs, first_line)
+    };
+    let raw = SecretBytes::new(std::fs::read(&transcript).unwrap());
+    let (pair, _, read) = seal_turn_pair_through(&inputs, &raw, 0, &mut planted).unwrap();
+    let (whole, _) = rift_shadow::archived_transcript(&raw, 0, &packs).unwrap();
+    assert!(matches!(
+        pair.full,
+        rift_shadow::backend::TranscriptBody::Whole(_)
+    ));
+    assert_eq!(pair.full.as_slice(), whole.full.as_slice());
+    assert_eq!(
+        pair.reconciliation,
+        Some(rift_shadow::backend::Reconciliation::Superseded)
+    );
+    frontier::record(&repo.git_dir, "s-turn", "cp-end", read, 2_000);
+    assert_eq!(
+        recorded_frontier(&repo).finding(None),
+        Some("segment-mismatch")
+    );
 }
 
 /// Append `lines` assistant records of about 1 KB each, numbered from `from`.

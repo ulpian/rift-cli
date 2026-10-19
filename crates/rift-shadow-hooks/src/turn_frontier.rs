@@ -41,6 +41,9 @@ pub enum SealFallback {
     /// The rule packs changed since the earlier parts, so the file was
     /// resealed whole.
     PacksChanged,
+    /// At a session end, the whole file sealed once differed from the turn
+    /// parts, so the whole seal was written in their place (design §3.4).
+    SegmentMismatch,
 }
 
 /// What one turn's seal covered: the frontier the worker read. `C` is the
@@ -119,6 +122,7 @@ impl SealFallback {
         match self {
             Self::SegmentChainBroken => "segment-chain-broken",
             Self::PacksChanged => "packs-changed",
+            Self::SegmentMismatch => "segment-mismatch",
         }
     }
 }

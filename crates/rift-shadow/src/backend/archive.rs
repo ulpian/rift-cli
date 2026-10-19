@@ -308,6 +308,20 @@ pub struct ArchivedTranscript {
     /// fallback, summed over both artifacts; recorded on the metadata
     /// document beside the pair only when non-zero.
     pub redaction_fallback: RedactionFallback,
+    /// How a session end's whole seal compared with the turn-end parts
+    /// (design §3.4); `None` on every other archive, which writes nothing.
+    pub reconciliation: Option<Reconciliation>,
+}
+
+/// The session-end comparison's outcome, recorded on the final shard's
+/// metadata as `reconciled` and, for a difference, `supersedes_segments`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reconciliation {
+    /// The parts equal the whole seal and stand as the final body.
+    Matched,
+    /// The parts differ; the whole seal is the body and supersedes them,
+    /// while the earlier checkpoints stay as written.
+    Superseded,
 }
 
 /// What the redaction gate's per-line fallback cost one transcript pair: the

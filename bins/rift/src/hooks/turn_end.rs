@@ -17,11 +17,11 @@ use rift_recall_substrate::parse::segments::{
     compact_segment_name, declared_layout, segment_name, Declared, COMPACT_SEGMENTS_KEY,
     SEGMENT_PACKS_KEY,
 };
-use rift_shadow::backend::{ArchivedTranscript, RedactionFallback};
+use rift_shadow::backend::{ArchivedTranscript, Reconciliation, RedactionFallback};
 use rift_shadow::hooks::strategy::{ArchiveDecision, ArchiveReason, StrategyKind};
 use rift_shadow::turn_seal::{
-    seal_session_end_through, seal_turn_compact, seal_turn_through, CompactCut, PriorChain,
-    PriorPart, TurnSeal,
+    reconcile_session_end, seal_session_end_through, seal_turn_compact, seal_turn_through,
+    ChainBreak, CompactCut, PriorChain, PriorPart, TurnSeal,
 };
 use rift_store::CanonicalStore as _;
 
@@ -114,16 +114,9 @@ fn seal_turn_pair_through(
         .unwrap_or_default();
     let seal = match inputs.end {
         SealEnd::Turn => seal_turn_through(raw, prior, inputs.packs, gate).ok()?,
-        SealEnd::Session => {
-            // A session that never sealed a turn, or whose file ends inside a
-            // record the parts cannot hold, is sealed whole by the caller.
-            let ends_on_line = raw.as_slice().last().is_none_or(|b| *b == b'\n');
-            let (Some(prior), true) = (prior, ends_on_line) else {
-                return None;
-            };
-            seal_session_end_through(raw, Some(prior), inputs.packs, gate).ok()?
-        }
+        SealEnd::Session => seal_session_end(inputs, raw, prior, gate)?,
     };
+    let reconciliation = reconciliation_of(inputs.end, &seal);
     let mut said = SealRead::of(raw.as_slice().len(), &seal);
     let (full, fallback, cut) = match seal {
         TurnSeal::Appended {
@@ -170,8 +163,44 @@ fn seal_turn_pair_through(
         spills: Vec::new(),
         originals: Vec::new(),
         redaction_fallback,
+        reconciliation,
     };
     Some((pair, raw_lines, said))
+}
+
+/// A session end's seal: the tail past the last turn-end part, then the
+/// comparison with the whole file sealed once (design §3.4), so a difference
+/// leaves the whole seal as the final body. `None` sends the caller to its
+/// whole seal: a session that never sealed a turn, or whose file ends inside
+/// a record the parts cannot hold.
+fn seal_session_end(
+    inputs: &TurnInputs<'_>,
+    raw: &SecretBytes,
+    prior: Option<PriorChain>,
+    gate: &mut rift_shadow::turn_seal::Gate<'_>,
+) -> Option<TurnSeal> {
+    let ends_on_line = raw.as_slice().last().is_none_or(|b| *b == b'\n');
+    let (Some(prior), true) = (prior, ends_on_line) else {
+        return None;
+    };
+    let seal = seal_session_end_through(raw, Some(prior), inputs.packs, gate).ok()?;
+    reconcile_session_end(raw, seal, inputs.packs).ok()
+}
+
+/// What the final shard records of the comparison: only a session end that
+/// kept its parts or had them superseded ran it.
+fn reconciliation_of(end: SealEnd, seal: &TurnSeal) -> Option<Reconciliation> {
+    match (end, seal) {
+        (SealEnd::Session, TurnSeal::Appended { .. }) => Some(Reconciliation::Matched),
+        (
+            _,
+            TurnSeal::Whole {
+                broken: ChainBreak::SegmentMismatch,
+                ..
+            },
+        ) => Some(Reconciliation::Superseded),
+        _ => None,
+    }
 }
 
 /// The compact form cut where the full parts end, the earlier compact parts

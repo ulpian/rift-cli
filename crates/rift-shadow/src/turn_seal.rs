@@ -32,6 +32,10 @@ pub use compact::{seal_turn_compact, CompactCarry, CompactCut, CompactSeal};
 /// The finding a refused chain records, naming the checkpoint it read back.
 pub const SEGMENT_CHAIN_BROKEN: &str = "segment-chain-broken";
 
+/// The finding a session end records when its whole seal differs from the
+/// turn-end parts, so the whole seal was written in their place.
+pub const SEGMENT_MISMATCH: &str = "segment-mismatch";
+
 /// What the previous checkpoint recorded of its full transcript, read back
 /// from its shard tree.
 pub struct PriorChain {
@@ -73,13 +77,23 @@ pub enum ChainBreak {
     /// The parts were sealed under another pack set, or name none: carrying
     /// them would keep bytes the current rules never produced.
     PacksChanged,
+    /// At a session end, the parts' concatenation differs from the whole file
+    /// sealed once (design §3.4): the whole seal supersedes them.
+    SegmentMismatch,
 }
 
 impl ChainBreak {
     /// The doctor finding's name; the reason is the variant, never bytes.
     #[must_use]
     pub fn finding(self) -> &'static str {
-        SEGMENT_CHAIN_BROKEN
+        match self {
+            Self::SegmentMismatch => SEGMENT_MISMATCH,
+            Self::LineCount
+            | Self::LeafMismatch
+            | Self::Truncated
+            | Self::OidMismatch
+            | Self::PacksChanged => SEGMENT_CHAIN_BROKEN,
+        }
     }
 }
 
@@ -157,6 +171,34 @@ pub fn seal_session_end_through(
     gate: &mut Gate<'_>,
 ) -> Result<TurnSeal> {
     seal_through(raw, prior, packs, gate, Cut::EndOfFile)
+}
+
+/// Check a session end's parts against the whole file sealed once through
+/// the gate (design §3.4), paid once per session. Equal bytes keep the parts;
+/// any difference returns the whole seal in their place, named
+/// [`ChainBreak::SegmentMismatch`], so the final checkpoint holds what the
+/// whole file seals to and the earlier checkpoints stay as written. A seal
+/// that wrote no parts, or already resealed whole, is returned as it came.
+///
+/// # Errors
+/// [`rift_core::RiftError`] if the gate returns one.
+pub fn reconcile_session_end(
+    raw: &SecretBytes,
+    seal: TurnSeal,
+    packs: &RulePackSet,
+) -> Result<TurnSeal> {
+    let TurnSeal::Appended { body, .. } = &seal else {
+        return Ok(seal);
+    };
+    let whole = rift_shadow_redact::redact_with(raw, packs)?;
+    if whole.redacted.as_slice() == body.as_slice() {
+        return Ok(seal);
+    }
+    Ok(TurnSeal::Whole {
+        fallback: RedactionFallback::of(&[&whole.report]),
+        body: TranscriptBody::Whole(whole.redacted),
+        broken: ChainBreak::SegmentMismatch,
+    })
 }
 
 /// Where the new part ends.

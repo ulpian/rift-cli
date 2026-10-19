@@ -4,8 +4,8 @@ use rift_shadow_redact::RulePackSet;
 use rift_recall_substrate::worktree::git_blob_oid;
 
 use super::{
-    seal_session_end_through, seal_turn, seal_turn_through, ChainBreak, PriorChain, PriorPart,
-    TurnSeal,
+    reconcile_session_end, seal_session_end_through, seal_turn, seal_turn_through, ChainBreak,
+    PriorChain, PriorPart, TurnSeal,
 };
 use crate::backend::{RedactionFallback, SegmentPart, TranscriptBody};
 
@@ -340,4 +340,37 @@ fn a_session_end_over_a_truncated_transcript_reseals_whole() {
         }
     ));
     assert_eq!(calls, vec![0]);
+}
+
+#[test]
+fn a_session_end_whose_parts_match_the_whole_seal_keeps_its_parts() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let raw = doc(&records(0..6));
+    let end = session_end(&raw, Some(chain_of(&first)), &mut Vec::new());
+    let reconciled = reconcile_session_end(&raw, end, &packs()).unwrap();
+    assert!(matches!(reconciled, TurnSeal::Appended { .. }));
+}
+
+#[test]
+fn a_session_end_whose_tail_part_differs_is_superseded_by_the_whole_seal() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let raw = doc(&records(0..6));
+    let packs = packs();
+    // A gate that seals the tail under another rule set: its part is valid
+    // gate output, but not what the whole file seals to.
+    let mut planted = |bytes: &SecretBytes, first_line: usize| {
+        let other = String::from_utf8(bytes.as_slice().to_vec()).unwrap();
+        let other = SecretBytes::new(other.replace("turn line", "turn row").into_bytes());
+        rift_shadow_redact::redact_with_at(&other, &packs, first_line)
+    };
+    let end = seal_session_end_through(&raw, Some(chain_of(&first)), &packs, &mut planted).unwrap();
+    let reconciled = reconcile_session_end(&raw, end, &packs).unwrap();
+    let TurnSeal::Whole { body, broken, .. } = reconciled else {
+        panic!("the whole seal supersedes the parts");
+    };
+    assert_eq!(broken, ChainBreak::SegmentMismatch);
+    assert_eq!(broken.finding(), "segment-mismatch");
+    let whole = rift_shadow_redact::redact_with(&raw, &packs).unwrap();
+    assert!(matches!(body, TranscriptBody::Whole(_)));
+    assert_eq!(body.as_slice(), whole.redacted.as_slice());
 }

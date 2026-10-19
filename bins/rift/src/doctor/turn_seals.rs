@@ -4,7 +4,7 @@
 //! Each turn-end checkpoint records the frontier it sealed in the session's
 //! `turn-seal` sidecar; this leg reads those files and the transcript's
 //! length, one closed word per named session (`segment-chain-broken`,
-//! `packs-changed`, `lagging`, `unreadable`). Report only: it opens no store
+//! `packs-changed`, `segment-mismatch`, `lagging`, `unreadable`). Report only: it opens no store
 //! and writes nothing, so `--fix` changes nothing here.
 
 use std::path::Path;
@@ -94,15 +94,25 @@ mod tests {
             &frontier("s-packs", Some(SealFallback::PacksChanged)),
         )
         .unwrap();
+        write(
+            &sessions,
+            &frontier("s-split", Some(SealFallback::SegmentMismatch)),
+        )
+        .unwrap();
         std::fs::write(sessions.join("s-torn.turn-seal"), b"{").unwrap();
         let (human, json) = turn_seal_leg(&git_dir);
         assert!(
             human.contains("session s-packs packs-changed at checkpoint cp-s-packs"),
             "{human}"
         );
+        assert!(
+            human.contains("session s-split segment-mismatch at checkpoint cp-s-split"),
+            "{human}"
+        );
         assert!(human.contains("session s-torn unreadable"), "{human}");
         assert!(!human.contains("s-clean"), "{human}");
         assert_eq!(json["sessions"][0]["finding"], "packs-changed");
-        assert_eq!(json["sessions"][1]["finding"], "unreadable");
+        assert_eq!(json["sessions"][1]["finding"], "segment-mismatch");
+        assert_eq!(json["sessions"][2]["finding"], "unreadable");
     }
 }

@@ -132,6 +132,7 @@ impl CarriedSubagent {
             spills: Vec::new(),
             originals: Vec::new(),
             redaction_fallback: self.fallback,
+            reconciliation: None,
         }
     }
 }

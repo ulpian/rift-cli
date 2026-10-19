@@ -43,7 +43,7 @@ use rift_git::{GitIdent, MemoryGitWrite, NativeGitWrite};
 pub use archive::{
     sessions_jsonl_bytes, tool_calls_jsonl_bytes, usage_jsonl_bytes, ArchivedEvent,
     ArchivedReadFact, ArchivedTask, ArchivedTranscript, ArchivedUsageFact, CheckpointArchive,
-    RedactionFallback, RedactionReportView, WorktreeLabel, SESSIONS_SCHEMA_VERSION,
+    Reconciliation, RedactionFallback, RedactionReportView, WorktreeLabel, SESSIONS_SCHEMA_VERSION,
     USAGE_SCHEMA_VERSION,
 };
 // The bridge's round-trip test pins `parse(format(ms)) == ms`; nothing else

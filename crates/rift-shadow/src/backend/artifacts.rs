@@ -642,6 +642,7 @@ pub(super) fn insert_compact_boundary(
     super::spills::insert_spill_manifest(obj, &transcript.spills);
     super::originals::insert_original_manifest(obj, &transcript.originals);
     insert_fallback_counts(obj, transcript.redaction_fallback);
+    insert_reconciliation(obj, transcript.reconciliation);
     super::segments::insert_segment_members(obj, &transcript.full);
     super::segments::insert_segment_members(obj, &transcript.compact);
 }
@@ -657,6 +658,21 @@ fn insert_fallback_counts(
             "redaction_fallback_placeholders".into(),
             fallback.placeholders.into(),
         );
+    }
+}
+
+/// The session-end comparison's members; none when it never ran (shard bytes kept).
+fn insert_reconciliation(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    reconciliation: Option<super::Reconciliation>,
+) {
+    let Some(outcome) = reconciliation else {
+        return;
+    };
+    let superseded = outcome == super::Reconciliation::Superseded;
+    obj.insert("reconciled".into(), (!superseded).into());
+    if superseded {
+        obj.insert("supersedes_segments".into(), true.into());
     }
 }
 
