@@ -218,6 +218,21 @@ impl Built {
         );
     }
 
+    /// Push an `n_checkpoint_observed_head` payload row: the `HEAD` an
+    /// anchorless turn-end seal saw, mirrored from `metadata.observed_head`.
+    /// A fact about the moment of sealing, never an anchor.
+    pub fn checkpoint_observed_head(&mut self, id: &str, oid: &str) {
+        self.raw(
+            "n_checkpoint_observed_head",
+            vec!["node_id", "observed_head", "schema_version"],
+            vec![
+                Value::text(id),
+                Value::text(oid),
+                Value::Int(SCHEMA_VERSION),
+            ],
+        );
+    }
+
     /// Push an `n_checkpoint_worktree` payload row: the member
     /// this shard was **archived in** (the stated semantics — the
     /// first archiver, not "where the session worked").

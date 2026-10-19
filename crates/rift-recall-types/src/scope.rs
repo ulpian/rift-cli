@@ -239,14 +239,15 @@ pub struct Scope {
     pub checkpoints: CheckpointWindow,
     /// Cross-scope grant (none by default).
     pub cross: CrossScopeGrant,
-    /// The caller's own member and the branch its `HEAD` names when that
-    /// branch has no commit yet. Read only when `head` is `None`: an unborn
-    /// caller is then served the checkpoints this member archived on this
-    /// branch, and nothing a sibling member or another branch wrote.
-    pub unborn: Option<SameMember>,
+    /// The caller's own member and the branch its `HEAD` names. On an unborn
+    /// branch the caller is served the checkpoints this member archived on
+    /// that branch. On a born branch it admits only this member's anchorless
+    /// seals on that branch whose observed head is in the caller's history.
+    /// Nothing a sibling member or another branch wrote passes through it.
+    pub member: Option<SameMember>,
 }
 
-/// One member on one branch: the route an unborn caller is served through.
+/// One member on one branch: the route an anchorless seal is served through.
 ///
 /// A turn-end checkpoint sealed before the first commit has no anchor, so the
 /// ancestry route can never admit it. The name `HEAD` points at still exists,
@@ -281,7 +282,7 @@ impl Scope {
             developer: DeveloperScope::CurrentOnly,
             checkpoints: CheckpointWindow::LastN(last_n),
             cross: CrossScopeGrant::none(),
-            unborn: None,
+            member: None,
         }
     }
 
@@ -330,15 +331,15 @@ impl Scope {
             developer: DeveloperScope::CurrentOnly,
             checkpoints: CheckpointWindow::All,
             cross: CrossScopeGrant::none(),
-            unborn: None,
+            member: None,
         }
     }
 
-    /// The same scope, naming the member and branch an unborn `HEAD` points
-    /// at. A born `HEAD` keeps the ancestry route, so the pair is ignored.
+    /// The same scope, naming the caller's member and the branch its `HEAD`
+    /// points at, born or unborn.
     #[must_use]
-    pub fn with_unborn(mut self, member: SameMember) -> Self {
-        self.unborn = Some(member);
+    pub fn with_member(mut self, member: SameMember) -> Self {
+        self.member = Some(member);
         self
     }
 }

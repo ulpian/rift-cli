@@ -27,10 +27,11 @@
 //! [`ScopeSet::omitted_out_of_branch`], so the caller can say how many rather
 //! than pretend there were none.
 //!
-//! One narrow route exists for a caller whose branch has no commit yet: its
-//! turn-end seals have no anchor, yet the branch has a name. When the scope
-//! carries that name and the caller's member token, the checkpoints this
-//! member archived on that branch are admitted, and nothing else is.
+//! One narrow route exists for turn-end seals, which have no anchor. When the
+//! scope carries the caller's member token and branch name, an unborn caller
+//! is served the checkpoints this member archived on that branch. A born
+//! caller is served this member's anchorless seals on that branch whose
+//! observed head is in its history; a rewound branch drops them again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,8 +112,9 @@ impl ScopeSet {
 enum BranchVerdict {
     /// Everything passes: [`BranchScope::Unbounded`], or a cross-branch grant.
     Open,
-    /// The ancestry of a known `HEAD`.
-    Ancestry(AncestorSet),
+    /// The ancestry of a known `HEAD`, and the caller's own member when the
+    /// scope named it, for its anchorless seals.
+    Ancestry(AncestorSet, Option<SameMember>),
     /// One named branch, matched against the archiving member's branch.
     Named(String),
     /// An unborn caller: its own member's checkpoints on the branch its
@@ -133,13 +135,15 @@ fn branch_verdict(scope: &Scope, ancestry: &dyn AncestryOracle) -> BranchVerdict
         BranchScope::CurrentAndAncestry => {
             let Some(head) = scope.head.as_deref() else {
                 return scope
-                    .unborn
+                    .member
                     .clone()
                     .map_or(BranchVerdict::Unknown, BranchVerdict::SameMember);
             };
             ancestry
                 .ancestors_of(head, ANCESTRY_WALK_CAP)
-                .map_or(BranchVerdict::Unknown, BranchVerdict::Ancestry)
+                .map_or(BranchVerdict::Unknown, |set| {
+                    BranchVerdict::Ancestry(set, scope.member.clone())
+                })
         }
     }
 }
@@ -155,26 +159,46 @@ fn developer_in_scope(scope: &Scope, dev: Option<&str>) -> bool {
     }
 }
 
+/// The recorded facts the branch axis decides one checkpoint by.
+#[derive(Default)]
+struct BranchFacts {
+    anchors: BTreeMap<String, String>,
+    members: BTreeMap<String, Member>,
+    observed: BTreeMap<String, String>,
+}
+
+impl BranchFacts {
+    /// Whether `id` was archived by `want`'s member on `want`'s branch.
+    fn same_member(&self, id: &str, want: &SameMember) -> bool {
+        self.members.get(id).is_some_and(|m| {
+            m.token == want.token && m.branch.as_deref() == Some(want.branch.as_str())
+        })
+    }
+}
+
 /// Whether the branch axis admits one checkpoint.
-fn branch_admits(
-    verdict: &BranchVerdict,
-    id: &str,
-    anchors: &BTreeMap<String, String>,
-    members: &BTreeMap<String, Member>,
-) -> bool {
+fn branch_admits(verdict: &BranchVerdict, id: &str, facts: &BranchFacts) -> bool {
     match verdict {
         BranchVerdict::Open => true,
         BranchVerdict::Unknown => false,
-        // No anchor commit is the same answer as an anchor off the line: this
-        // checkpoint cannot be shown to belong to the caller's history.
-        BranchVerdict::Ancestry(set) => anchors.get(id).is_some_and(|oid| set.contains(oid)),
-        BranchVerdict::Named(name) => members
+        BranchVerdict::Ancestry(set, member) => {
+            if let Some(oid) = facts.anchors.get(id) {
+                return set.contains(oid);
+            }
+            // An anchorless seal belongs to the caller's history only when its
+            // own member wrote it on this branch and the head it saw is still
+            // in that history. Anything else stays out, as an unknown anchor.
+            let Some(want) = member else {
+                return false;
+            };
+            facts.same_member(id, want) && facts.observed.get(id).is_some_and(|o| set.contains(o))
+        }
+        BranchVerdict::Named(name) => facts
+            .members
             .get(id)
             .and_then(|m| m.branch.as_deref())
             .is_some_and(|b| b == name),
-        BranchVerdict::SameMember(want) => members.get(id).is_some_and(|m| {
-            m.token == want.token && m.branch.as_deref() == Some(want.branch.as_str())
-        }),
+        BranchVerdict::SameMember(want) => facts.same_member(id, want),
     }
 }
 
@@ -182,6 +206,57 @@ fn branch_admits(
 struct Member {
     token: String,
     branch: Option<String>,
+}
+
+/// Two-column rows of one relation, keyed by the first column.
+async fn pairs(store: &impl CanonicalStore, sql: &str) -> Result<BTreeMap<String, String>> {
+    Ok(store
+        .query(sql, &[])
+        .await?
+        .iter()
+        .filter_map(|r| Some((r.get_text(0).ok()?, r.get_text(1).ok()?)))
+        .collect())
+}
+
+/// Load only the facts this verdict consults: an accounting pass over the
+/// whole store reads none of the three relations.
+async fn branch_facts(store: &impl CanonicalStore, verdict: &BranchVerdict) -> Result<BranchFacts> {
+    let mut facts = BranchFacts::default();
+    let names_member = match verdict {
+        BranchVerdict::Ancestry(_, member) => {
+            facts.anchors =
+                pairs(store, "SELECT node_id, commit_oid FROM n_checkpoint_commit").await?;
+            member.is_some()
+        }
+        BranchVerdict::Named(_) | BranchVerdict::SameMember(_) => true,
+        BranchVerdict::Open | BranchVerdict::Unknown => false,
+    };
+    if !names_member {
+        return Ok(facts);
+    }
+    if matches!(verdict, BranchVerdict::Ancestry(..)) {
+        facts.observed = pairs(
+            store,
+            "SELECT node_id, observed_head FROM n_checkpoint_observed_head",
+        )
+        .await?;
+    }
+    facts.members = store
+        .query(
+            "SELECT node_id, worktree_token, branch FROM n_checkpoint_worktree",
+            &[],
+        )
+        .await?
+        .iter()
+        .filter_map(|r| {
+            let member = Member {
+                token: r.get_text(1).ok()?,
+                branch: r.get_opt_text(2).ok()?,
+            };
+            Some((r.get_text(0).ok()?, member))
+        })
+        .collect();
+    Ok(facts)
 }
 
 /// Resolve a [`Scope`] to its in-scope checkpoint set — the one membership
@@ -200,43 +275,7 @@ pub async fn in_scope_nodes(
     ancestry: &dyn AncestryOracle,
 ) -> Result<ScopeSet> {
     let verdict = branch_verdict(scope, ancestry);
-    // Only load the facts this verdict actually consults: an accounting pass
-    // over the whole store reads neither relation.
-    let anchors: BTreeMap<String, String> = if matches!(verdict, BranchVerdict::Ancestry(_)) {
-        store
-            .query("SELECT node_id, commit_oid FROM n_checkpoint_commit", &[])
-            .await?
-            .iter()
-            .filter_map(|r| Some((r.get_text(0).ok()?, r.get_text(1).ok()?)))
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
-    // The branch each checkpoint's archiving member was on, as the projection
-    // recorded it — read only when the branch axis names one.
-    let names_member = matches!(
-        verdict,
-        BranchVerdict::Named(_) | BranchVerdict::SameMember(_)
-    );
-    let members: BTreeMap<String, Member> = if names_member {
-        store
-            .query(
-                "SELECT node_id, worktree_token, branch FROM n_checkpoint_worktree",
-                &[],
-            )
-            .await?
-            .iter()
-            .filter_map(|r| {
-                let member = Member {
-                    token: r.get_text(1).ok()?,
-                    branch: r.get_opt_text(2).ok()?,
-                };
-                Some((r.get_text(0).ok()?, member))
-            })
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
+    let facts = branch_facts(store, &verdict).await?;
 
     let rows = store
         .query(
@@ -253,7 +292,7 @@ pub async fn in_scope_nodes(
         if !developer_in_scope(scope, developer.as_deref()) {
             continue;
         }
-        if !branch_admits(&verdict, &id, &anchors, &members) {
+        if !branch_admits(&verdict, &id, &facts) {
             omitted_out_of_branch += 1;
             continue;
         }
@@ -414,6 +453,15 @@ mod tests {
         .unwrap();
     }
 
+    fn put_observed(store: &SqliteStore, id: &str, oid: &str) {
+        block(store.insert_or_ignore(
+            "n_checkpoint_observed_head",
+            &["node_id", "observed_head", "schema_version"],
+            &[Value::text(id), Value::text(oid), Value::Int(1)],
+        ))
+        .unwrap();
+    }
+
     fn put_member(store: &SqliteStore, id: &str, token: &str, name: &str, branch: Option<&str>) {
         block(store.insert_or_ignore(
             "n_checkpoint_worktree",
@@ -515,22 +563,22 @@ mod tests {
         put_member(&store, "sibling", "bbbbbbbbbbbb", "wt", Some("main"));
         put_member(&store, "elsewhere", "aaaaaaaaaaaa", "main", Some("other"));
         let scope = Scope::for_worktree("repo", u32::MAX, None, WorktreeScope::Any)
-            .with_unborn(here_on_main());
+            .with_member(here_on_main());
         let set = block(in_scope_nodes(&store, &scope, &NoAncestry)).unwrap();
         assert_eq!(set.checkpoint_ids().iter().collect::<Vec<_>>(), ["mine"]);
         assert!(!set.unknown_head(), "a named unborn branch is decided");
         assert_eq!(set.omitted_out_of_branch(), 2);
     }
 
-    /// A born HEAD keeps the ancestry route: the unborn pair cannot widen it
-    /// to anchorless rows.
+    /// A born HEAD admits an anchorless row only by its observed head: a seal
+    /// that recorded none stays out, whoever wrote it.
     #[test]
-    fn a_born_head_ignores_the_unborn_route() {
+    fn a_born_head_never_admits_an_anchorless_row_with_no_observed_head() {
         let store = recall_store();
         put_checkpoint(&store, "mine", 1, None);
         put_member(&store, "mine", "aaaaaaaaaaaa", "main", Some("main"));
         let scope = Scope::for_worktree("repo", u32::MAX, Some("head".into()), WorktreeScope::Any)
-            .with_unborn(here_on_main());
+            .with_member(here_on_main());
         let oracle = MemoryAncestry::new().with_ancestry("head", ["head"]);
         let set = block(in_scope_nodes(&store, &scope, &oracle)).unwrap();
         assert!(set.is_empty());
@@ -730,5 +778,54 @@ mod tests {
         put_anchor(&store, "ours", "beefee");
         let after_ancestry = block(scoped_stamp(&store, &scope, &oracle)).unwrap();
         assert_ne!(after_ancestry, before);
+    }
+
+    /// One anchorless seal per case, all seen at `seen` on `main`: the
+    /// caller's member after one more commit, a sibling member, another
+    /// branch, and a seal whose seen head the caller has rewound past.
+    fn seals_seen_at(store: &SqliteStore) {
+        for ((id, token, branch, seen), ordinal) in [
+            ("mine", "aaaaaaaaaaaa", "main", "seen"),
+            ("sibling", "bbbbbbbbbbbb", "main", "seen"),
+            ("other_branch", "aaaaaaaaaaaa", "other", "seen"),
+            ("rewound", "aaaaaaaaaaaa", "main", "dropped"),
+        ]
+        .into_iter()
+        .zip(1i64..)
+        {
+            put_checkpoint(store, id, ordinal, None);
+            put_member(store, id, token, "main", Some(branch));
+            put_observed(store, id, seen);
+        }
+    }
+
+    /// The scope on a born branch serves this member's own anchorless seal
+    /// once HEAD has moved past the head it saw, and nobody else's.
+    #[test]
+    fn a_born_head_scope_serves_its_own_seal_whose_observed_head_it_contains() {
+        let store = recall_store();
+        seals_seen_at(&store);
+        put_checkpoint(&store, "anchored", 5, None);
+        put_anchor(&store, "anchored", "seen");
+        let scope = Scope::for_worktree("repo", u32::MAX, Some("next".into()), WorktreeScope::Any)
+            .with_member(here_on_main());
+        let oracle = MemoryAncestry::new().with_ancestry("next", ["next", "seen"]);
+        let set = block(in_scope_nodes(&store, &scope, &oracle)).unwrap();
+        let ids: Vec<&String> = set.checkpoint_ids().iter().collect();
+        assert_eq!(ids, ["anchored", "mine"]);
+        assert_eq!(set.omitted_out_of_branch(), 3);
+    }
+
+    /// Without a named member the born route is the anchor route alone, as
+    /// before: every anchorless seal stays out.
+    #[test]
+    fn a_born_head_scope_without_a_member_keeps_the_anchor_route_only() {
+        let store = recall_store();
+        seals_seen_at(&store);
+        let scope = Scope::for_worktree("repo", u32::MAX, Some("next".into()), WorktreeScope::Any);
+        let oracle = MemoryAncestry::new().with_ancestry("next", ["next", "seen"]);
+        let set = block(in_scope_nodes(&store, &scope, &oracle)).unwrap();
+        assert!(set.is_empty());
+        assert_eq!(set.omitted_out_of_branch(), 4);
     }
 }

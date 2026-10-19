@@ -42,6 +42,11 @@ pub struct CheckpointMetadata {
     /// canonicalization and the two epochs coexist.
     #[serde(default)]
     pub canon_version: Option<u32>,
+    /// The `HEAD` oid a turn-end seal saw, when it saw one. Never an anchor:
+    /// the anchor stays one checkpoint per commit. Recall reads it only to
+    /// serve an anchorless seal to the member that wrote it.
+    #[serde(default)]
+    pub observed_head: Option<String>,
     /// The **hashed** developer id this checkpoint's sessions belong to, when
     /// the capture side records it (never a raw name/email — the identity plane
     /// persists salted hashes only). Populates the developer scope axis at

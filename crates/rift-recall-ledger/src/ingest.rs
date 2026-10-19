@@ -304,12 +304,18 @@ fn screened_commit_oid(commit: Option<&str>) -> Option<String> {
         .then(|| oid.to_ascii_lowercase())
 }
 
-/// Push whichever of the two containment rows this header supports.
-/// Neither is invented: a header with no `commit` gets no anchor row, and a
-/// shard with no `worktree` member gets no member row.
+/// Push whichever containment rows this header supports. None is invented:
+/// a header with no `commit` gets no anchor row, a shard with no `worktree`
+/// member gets no member row, and only an anchorless seal gets an observed
+/// head row, so an anchor and a seen head never stand side by side.
 fn push_containment_rows(b: &mut Built, cid: &str, meta: &CheckpointMetadata) {
-    if let Some(oid) = screened_commit_oid(meta.commit.as_deref()) {
-        b.checkpoint_commit(cid, &oid);
+    match screened_commit_oid(meta.commit.as_deref()) {
+        Some(oid) => b.checkpoint_commit(cid, &oid),
+        None => {
+            if let Some(oid) = screened_commit_oid(meta.observed_head.as_deref()) {
+                b.checkpoint_observed_head(cid, &oid);
+            }
+        }
     }
     if let Some(member) = meta.worktree.as_ref() {
         b.checkpoint_worktree(cid, member);
@@ -1333,5 +1339,30 @@ mod tests {
         );
         assert_eq!(count(&store, "n_checkpoint_commit"), 0);
         assert_eq!(count(&store, "n_checkpoint_worktree"), 0);
+    }
+
+    /// An anchorless turn-end seal's observed head is mirrored beside its
+    /// member; an anchored shard keeps its anchor alone, whatever else its
+    /// header says.
+    #[test]
+    fn an_ingested_anchorless_seal_records_its_observed_head_and_an_anchored_one_does_not() {
+        let seal = br#"{"observed_head":"DDEE","worktree":{"name":"main","token":"0123456789ab","linked":false,"branch":"main"}}"#;
+        let anchored = br#"{"commit":"aabb","observed_head":"ccdd"}"#;
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_shard(shard("c2", 2))
+            .with_artifact("c1", "metadata.json", seal)
+            .with_artifact("c2", "metadata.json", anchored);
+        let store = recall_store();
+        block(ingest(&store, &sub)).unwrap();
+        let rows = block(store.query(
+            "SELECT node_id, observed_head FROM n_checkpoint_observed_head",
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 1, "an anchored shard gets no observed head row");
+        assert_eq!(rows[0].get_text(0).unwrap(), "c1");
+        assert_eq!(rows[0].get_text(1).unwrap(), "ddee");
+        assert_eq!(count(&store, "n_checkpoint_commit"), 1);
     }
 }
