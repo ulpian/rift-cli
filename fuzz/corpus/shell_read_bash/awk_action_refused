@@ -1,0 +1,1 @@
+awk 'NR>=1 && NR<=5 {print NR": "$0}' src/lib.rs x=1

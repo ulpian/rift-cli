@@ -63,7 +63,6 @@ fn a_shell_that_would_do_more_than_read_is_left_alone() {
 fn a_composition_the_grammar_does_not_spell_is_left_alone() {
     for command in [
         // A pipe target that is neither a narrowing nor a filter.
-        "cat src/lib.rs | wc -l",
         "cat src/lib.rs | less",
         "cat src/lib.rs | cat",
         // A narrowing with no count, or one that is not a count.

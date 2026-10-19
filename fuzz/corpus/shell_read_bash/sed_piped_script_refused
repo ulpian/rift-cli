@@ -1,0 +1,1 @@
+cat src/lib.rs | sed -n '1,5p;9p' src/main.rs

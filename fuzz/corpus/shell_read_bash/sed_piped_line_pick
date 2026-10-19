@@ -1,0 +1,1 @@
+cd crates && echo '== a ==' && sed -n '100,200p' src/lib.rs | sed -n '1,10p'
