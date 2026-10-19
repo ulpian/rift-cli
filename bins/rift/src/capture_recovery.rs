@@ -28,6 +28,8 @@ pub(crate) mod hold;
 #[cfg(unix)]
 mod inventory;
 #[cfg(unix)]
+pub(crate) mod job;
+#[cfg(unix)]
 mod observation;
 pub(crate) mod pins;
 pub(crate) mod plan;
