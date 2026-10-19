@@ -134,11 +134,10 @@ pub(super) fn archive_in_git_hook(
     // A turn-end shard replaces only the full body with the segmented seal;
     // the originals the assembly attached are untouched, so the order is free.
     let turn_end = decision.reason == rift_shadow::hooks::strategy::ArchiveReason::TurnEnd;
-    if turn_end {
-        if let Some(pair) = transcript.as_mut() {
-            super::turn_end::seal_turn_full(rt, store, &repo, session, &packs, pair);
-        }
-    }
+    let sealed = transcript
+        .as_mut()
+        .filter(|_| turn_end)
+        .and_then(|pair| super::turn_end::seal_turn_full(rt, store, &repo, session, &packs, pair));
 
     let archived = rt.block_on(rift_shadow::run_decision(
         &native, store, work_tree, session, &raw, decision, commit, now, facts, &packs, transcript,
@@ -151,6 +150,9 @@ pub(super) fn archive_in_git_hook(
     // one-commit-per-checkpoint anchor dropped the new commit's binding.
     if let (false, Ok(Some(_)), Some(lines)) = (turn_end, &archived, transcript_raw_lines) {
         record_transcript_progress(&repo.git_dir, session, lines, now);
+    }
+    if let (Some(read), Ok(Some(id))) = (sealed, &archived) {
+        super::turn_end::frontier::record(&repo.git_dir, session, id.as_str(), read, now);
     }
     // The shard is in git; its POSITION is not, until this runs — the same
     // discipline the post-commit worker keeps. Before this call existed the two

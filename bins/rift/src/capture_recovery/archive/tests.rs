@@ -17,7 +17,7 @@ use crate::capture_recovery::gap::{publish_gap, GapOutcome};
 use crate::capture_recovery::inventory::tests::enqueue;
 use crate::capture_recovery::selection::select;
 
-const AGENT: &str = "claude-code";
+pub(super) const AGENT: &str = "claude-code";
 
 /// Delegates to the in-memory native backend and records whether the intent
 /// was already on disk when the delegation arrived.
@@ -46,7 +46,7 @@ fn spy(rig: &Rig) -> Spy {
 }
 
 /// Two historical boundaries pinned, cut and published as one batch.
-fn batch(rig: &Rig, hold: &OwnHold<'_>) -> GapBatch {
+pub(super) fn batch(rig: &Rig, hold: &OwnHold<'_>) -> GapBatch {
     enqueue(&rig.fixture, "old-a", 1, Start);
     enqueue(&rig.fixture, "old-b", 2, End);
     rift_shadow::hooks::run_state::create_private_dir(&rig.sessions_dir).unwrap();
@@ -63,7 +63,7 @@ fn batch(rig: &Rig, hold: &OwnHold<'_>) -> GapBatch {
 }
 
 /// The ordinary audit fixture re-carried by `carrier` and re-derived.
-fn archive_for(carrier: &Carrier, frozen: &FrozenBoundaryGaps) -> CheckpointArchive {
+pub(super) fn archive_for(carrier: &Carrier, frozen: &FrozenBoundaryGaps) -> CheckpointArchive {
     let mut archive = rift_shadow::parity::boundary_gap_fixture_archive().unwrap();
     archive.boundary_gaps = Some(frozen.clone());
     archive.checkpoint_id = archive.derived_checkpoint_id().unwrap();
@@ -71,7 +71,7 @@ fn archive_for(carrier: &Carrier, frozen: &FrozenBoundaryGaps) -> CheckpointArch
     archive
 }
 
-fn carrier() -> Carrier {
+pub(super) fn carrier() -> Carrier {
     let fixture = rift_shadow::parity::boundary_gap_fixture_archive().unwrap();
     let native = fixture.sessions.first().unwrap().clone();
     Carrier::new(AGENT, &native, &"a1".repeat(32), &"b2".repeat(32)).unwrap()

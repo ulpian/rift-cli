@@ -7,6 +7,7 @@
 //! authenticate the native tree instead of archiving again. Nothing here
 //! admits the carrier, assembles the session, settles usage, writes progress,
 //! a marker or a cache, or consumes the carrier's ticket.
+pub(crate) mod resume;
 pub(crate) mod run;
 #[cfg(test)]
 mod tests;
