@@ -318,7 +318,16 @@ async fn record_proof(
     for (path, hashes) in left_over {
         for hash in hashes {
             let id = proof_id(head, path, hash);
-            crate::ingest::record_watermark(store, &id, PROOF_BRANCH, head).await?;
+            // A proof row records no walk position, so readiness never reads
+            // its time; the fixed value keeps the bridge's rows stable.
+            crate::ingest::record_watermark(
+                store,
+                &id,
+                PROOF_BRANCH,
+                head,
+                crate::graph::INGEST_TS,
+            )
+            .await?;
         }
     }
     Ok(())

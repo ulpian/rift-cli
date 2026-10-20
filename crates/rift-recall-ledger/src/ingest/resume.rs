@@ -108,6 +108,7 @@ pub(super) async fn record_resume_points(
     store: &impl CanonicalStore,
     shards: &[CheckpointShard],
     tips: &BTreeMap<&'static str, (u64, String)>,
+    now_ms: i64,
 ) -> Result<()> {
     let streams = dialect_streams(shards);
     for (branch, (_, tip)) in tips {
@@ -117,7 +118,7 @@ pub(super) async fn record_resume_points(
         // Content-addressed on (branch, tip), so a re-run at the same tip
         // dedupes.
         let wid = sha256_id("rift.wm.v1", &[branch.as_bytes(), tip.as_bytes()]);
-        record_watermark(store, &wid, branch, tip).await?;
+        record_watermark(store, &wid, branch, tip, now_ms).await?;
         let position = streams
             .get(branch)
             .and_then(|stream| rift_store::cursor_of(stream, tip, |shard| shard_id(shard)));

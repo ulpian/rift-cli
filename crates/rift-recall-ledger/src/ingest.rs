@@ -22,7 +22,7 @@ use rift_recall_substrate::{CheckpointShard, SubstrateReader};
 use rift_recall_types::checkpoint::{CheckpointMetadata, CostEstimate, ToolCallRecord};
 use rift_store::{CanonicalStore, Value};
 
-use crate::graph::{file_read_id, file_revision_id, sha256_id, Built, INGEST_TS};
+use crate::graph::{file_read_id, file_revision_id, sha256_id, Built};
 use crate::FileRead;
 use resume::{record_resume_points, resume_frontier, ResumeFrontier};
 
@@ -232,6 +232,11 @@ pub struct IngestOptions {
     /// no entry ingests as 0 tokens plus a counted
     /// `IssueKind::TokenUnresolved` — measured or absent, never a guess.
     pub token_estimate_by_hash: BTreeMap<String, u32>,
+    /// When this pass ran, in epoch milliseconds: the time each watermark
+    /// row records, which is when the checkpoints it reached became
+    /// queryable. Production passes the system clock; the default 0 is the
+    /// fixed time tests and rebuild comparisons use, so their rows match.
+    pub now_ms: i64,
 }
 
 /// What every read row of one checkpoint shares: the shard, whose ordinal
@@ -707,14 +712,15 @@ pub(crate) async fn ingest_planned(
 
     // Durable incremental-ingest evidence: one append-only row per dialect,
     // and the stream position its tip held.
-    record_resume_points(store, &plan.shards, &tips).await?;
+    record_resume_points(store, &plan.shards, &tips, opts.now_ms).await?;
 
     // Changed hunks between consecutive revisions of each read path.
     report.hunks = persist_read_hunks(store, reader).await?;
     Ok(report)
 }
 
-/// Append one `ingest_watermark` row; a row already there is kept.
+/// Append one `ingest_watermark` row stamped `ingested_at`; a row already
+/// there is kept, so its first time stands.
 ///
 /// # Errors
 /// Propagates store write errors.
@@ -723,6 +729,7 @@ pub(crate) async fn record_watermark(
     watermark_id: &str,
     branch: &str,
     tip: &str,
+    ingested_at: i64,
 ) -> Result<()> {
     store
         .insert_or_ignore(
@@ -738,7 +745,7 @@ pub(crate) async fn record_watermark(
                 Value::text(watermark_id),
                 Value::text(branch),
                 Value::text(tip),
-                Value::Int(INGEST_TS),
+                Value::Int(ingested_at),
                 Value::Int(1),
             ],
         )
@@ -1104,6 +1111,7 @@ mod tests {
             .collect(),
             default_developer: Some("dev_default".to_string()),
             token_estimate_by_hash: BTreeMap::new(),
+            now_ms: 0,
         };
         block(ingest_with(&store, &sub, &opts)).unwrap();
         let dev_of = |cid: &str| {
