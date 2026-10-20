@@ -142,3 +142,68 @@ fn exact_condense_context_redelivery_uses_its_existing_checkpoint_proof() {
         .unwrap();
     assert_eq!(rt.block_on(store.count("checkpoint")).unwrap(), 1);
 }
+
+/// The ordinary worker spawned with only work it cannot finish now: an
+/// unproved historical condense (a legacy done marker proves nothing, so it
+/// stays owed) and an interval archive whose publication is blocked. The
+/// drain must end in bounded time and give the queue lock back, so recovery
+/// and the next spawn can run; it must never sit on the lock re-selecting
+/// the same jobs.
+#[test]
+fn a_worker_left_only_unprovable_and_failing_work_exits_and_frees_the_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, _job, archive) = owed_interval(tmp.path());
+    let obstruction = repo.common_dir.join("refs/heads/rift/checkpoints/v1.lock");
+    std::fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
+    std::fs::write(&obstruction, b"publication-obstruction").unwrap();
+    let (_, condense) = super::tests::queue_session_end(tmp.path(), "unproved-end");
+    crate::agent_queue::mark_condensed(&repo.git_dir, "unproved-end");
+    let git_dir = repo.git_dir.to_str().unwrap().to_owned();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = drain_queues(Some(&git_dir), LockWait::Brief);
+        let _ = done.send(());
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .is_ok(),
+        "the worker kept the queue lock with nothing it could finish"
+    );
+    assert!(crate::capture_queue::acquire_owner(&repo.git_dir).is_ok());
+    assert!(archive.exists(), "the failing job is kept, backed off");
+    assert!(
+        condense.exists(),
+        "the unproved job stays owed for recovery"
+    );
+}
+
+/// Live 2026-10-20: a worker that condensed once went on re-walking the whole
+/// checkpoint branch after every later pass, each one opened by a job an
+/// agent had just enqueued, so it never let go of the lock. A pass that
+/// wrote no checkpoint must not level the projection.
+#[test]
+fn a_later_pass_that_writes_no_checkpoint_does_not_level_the_projection_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, condense) = super::tests::queue_session_end(tmp.path(), "levels-once");
+    let (git_dir, work_tree) = (repo.git_dir.clone(), tmp.path().to_owned());
+    let _pause = super::run_state_tests::before_release(move || {
+        assert!(owe_search_index(&git_dir, &work_tree));
+    });
+    LEVELS.with(|levels| levels.set(0));
+
+    let condensed = drain_queues(repo.git_dir.to_str(), LockWait::None).unwrap();
+
+    assert_eq!(condensed.len(), 1);
+    assert!(!condense.exists());
+    assert_eq!(
+        crate::agent_queue::job_file_count(&repo.git_dir),
+        0,
+        "the job that arrived between passes ran in a second pass"
+    );
+    assert_eq!(
+        LEVELS.with(std::cell::Cell::get),
+        1,
+        "only the pass that condensed levels"
+    );
+}
