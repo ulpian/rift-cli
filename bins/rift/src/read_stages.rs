@@ -146,7 +146,8 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 /// The receipts and call facts in the shape the store reader takes. The call
-/// id is never known here, since the hook receipt rows carry none.
+/// id is known only where the window's answer line and call sidecar tie a
+/// read to one emitted call.
 fn stage_inputs(live: &LiveReads) -> (Vec<ReadReceipt<'_>>, Vec<CallEmission<'_>>) {
     let receipts = live
         .reads
@@ -156,7 +157,7 @@ fn stage_inputs(live: &LiveReads) -> (Vec<ReadReceipt<'_>>, Vec<CallEmission<'_>
             path: &r.path,
             content_sha256: &r.content_sha256,
             received_at: r.received_at,
-            invocation_id: None,
+            invocation_id: r.invocation_id.as_deref(),
         })
         .collect();
     let calls = live
