@@ -22,7 +22,7 @@ use super::{flag, now_ms, projection_db_at};
 pub(crate) use repair_skip::{leave_to_recovery, Historical, Leave};
 
 use self::reads::count_tool_result_tokens_job;
-pub(in crate::hooks) use self::reads::snapshot_basis_job;
+pub(in crate::hooks) use self::reads::{snapshot_basis_job, BasisSnapshot};
 
 /// `rift hooks worker --git-dir <dir>`: drain the capture queue. Diverges — the
 /// worker is off git's critical path but it is still capture, so it keeps the
@@ -431,6 +431,20 @@ fn run_agent_job(
     }
 }
 
+/// Record a basis snapshot that completed `unavailable` before the drain
+/// removes its job file, so a completion that found the bytes gone is never
+/// mistaken for one that kept them.
+fn basis_landed(
+    owner: &crate::capture_queue::QueueLock,
+    job: &crate::agent_queue::AgentJob,
+    outcome: &BasisSnapshot,
+) -> Landed {
+    if *outcome == BasisSnapshot::Unavailable {
+        crate::agent_queue::record_unavailable(owner.git_dir(), job);
+    }
+    Landed::Nothing
+}
+
 /// The move a hook asked for. The drain already moved before it listed this
 /// job; moving again takes whatever an older binary wrote since, and costs a
 /// `stat` otherwise.
@@ -502,9 +516,8 @@ fn run_job_kind(
             rel_path,
             content_sha256,
             blob_oid,
-        } => {
-            snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid).map(|()| Landed::Nothing)
-        }
+        } => snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid)
+            .map(|outcome| basis_landed(owner, job, &outcome)),
         JobKind::ToolResultTokens {
             tool_result_id,
             session_id,
