@@ -146,7 +146,8 @@ fn a_signal_a_family_does_not_publish_empties_nothing() {
 /// A client too old to act on the channel a decision was sent on runs the
 /// call anyway, and its *result* arrives for a call the journal declined.
 /// The bytes reached the model, so the window is recorded as holding them,
-/// and the result is joined to the decline by the call's own id.
+/// and the result is joined to the decline by the call's own id in the
+/// window's call sidecar, never in its journal.
 #[test]
 fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
     let (tmp, file) = checkout(40);
@@ -162,6 +163,7 @@ fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
             at_ms: 1,
         })
         .expect("a decline");
+    let calls = crate::window_journal::CallSidecar::open(here, "s-6", None);
     for fact in [
         CallFact::Planned,
         CallFact::Emitted {
@@ -169,7 +171,7 @@ fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
             exit: 0,
         },
     ] {
-        window
+        calls
             .append(&Line::Call {
                 turn: 1,
                 call: Some("toolu_6".to_owned()),
@@ -190,11 +192,11 @@ fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
     let lines = lines_of(here, "s-6", None);
     assert_eq!(
         lines.iter().map(Line::kind).collect::<Vec<_>>(),
-        vec!["deny", "call", "call", "call", "read"],
-        "the decline stands, the result is joined to it, and the read is beside it"
+        vec!["deny", "read"],
+        "the decline stands and the read that happened is beside it"
     );
     assert_eq!(
-        crate::window_journal::ineffective_denies(&window.load().journal).ineffective,
+        crate::window_journal::ineffective_denies(&calls.load()).ineffective,
         1,
         "and the joined call is what a diagnostic counts"
     );
@@ -202,7 +204,8 @@ fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
     // A second result for the same lines adds nothing: the decline has
     // been answered, so there is no longer a decline to contradict.
     gate_observing(&hook("claude-code", "PostToolUse", "s-6", payload), here);
-    assert_eq!(lines_of(here, "s-6", None).len(), 5);
+    assert_eq!(lines_of(here, "s-6", None).len(), 2);
+    assert_eq!(calls.load().lines().len(), 3, "the result is joined once");
 }
 
 /// The ordinary result — of a read nobody declined — leaves the journal
@@ -225,7 +228,9 @@ fn a_result_for_a_read_nobody_declined_records_nothing() {
         vec!["read"]
     );
     assert_eq!(
-        crate::window_journal::ineffective_denies(&lines_journal(here, "s-7")),
+        crate::window_journal::ineffective_denies(
+            &crate::window_journal::CallSidecar::open(here, "s-7", None).load()
+        ),
         crate::window_journal::DeclineCalls::default()
     );
 }

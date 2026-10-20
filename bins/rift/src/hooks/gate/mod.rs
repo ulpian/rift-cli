@@ -307,7 +307,7 @@ pub(in crate::hooks) fn read_gate(
     let journaled = gate_record_members(git_dir, work_tree, raw, &members, &pass);
     let receipt = deny_reason
         .is_some()
-        .then(|| calls::plan_decline(&window, &journal, &raw.payload));
+        .then(|| calls::plan_decline(&window, &raw.payload));
     GateOutcome {
         journaled,
         deny_reason,
@@ -340,7 +340,7 @@ fn cross_check_step(
     };
     let held = journal.load().journal;
     if matches!(step, GateStep::CrossCheck) {
-        calls::record_applied(window, journal, &held, &raw.payload);
+        calls::record_applied(window, &raw.payload);
     }
     if cross_check_is_idle(step, stated, &held) {
         return None;

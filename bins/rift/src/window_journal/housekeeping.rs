@@ -7,7 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{ineffective_denies, is_journal_key, journal_dir, WindowJournal};
+use super::calls::CALLS_SUFFIX;
+use super::{ineffective_denies, is_journal_key, journal_dir, CallSidecar, WindowJournal};
 
 /// What one checkout's window journals amount to, for the operator diagnostic.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -24,11 +25,12 @@ pub(crate) struct Survey {
     pub(crate) calls: super::DeclineCalls,
 }
 
-/// Which of this module's three file shapes a name is.
+/// Which of this module's four file shapes a name is.
 enum Kind {
     Live,
     Rolled,
     Snapshot,
+    Calls,
 }
 
 /// Count this checkout's window journals and the rows that did not parse.
@@ -59,12 +61,14 @@ pub(crate) fn survey(work_tree: &Path) -> Survey {
     for key in keys {
         let loaded = WindowJournal {
             dir: root.clone(),
-            key,
+            key: key.clone(),
         }
         .load();
         survey.lines += loaded.journal.lines().len();
         survey.dropped += loaded.dropped;
-        survey.calls.add(&ineffective_denies(&loaded.journal));
+        survey.calls.add(&ineffective_denies(
+            &CallSidecar::at(root.clone(), key).load(),
+        ));
     }
     survey
 }
@@ -127,6 +131,9 @@ fn entries(work_tree: &Path) -> Vec<(String, PathBuf)> {
 /// The window a file belongs to and its shape, or `None` for a name this
 /// module did not write — the screen that keeps the sweep to its own files.
 fn classify(name: &str) -> Option<(String, Kind)> {
+    if let Some(key) = name.strip_suffix(CALLS_SUFFIX) {
+        return is_journal_key(key).then(|| (key.to_owned(), Kind::Calls));
+    }
     if let Some(stem) = name.strip_suffix(".jsonl") {
         if is_journal_key(stem) {
             return Some((stem.to_owned(), Kind::Live));
