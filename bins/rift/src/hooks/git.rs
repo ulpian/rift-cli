@@ -151,6 +151,12 @@ fn post_checkout_adopt(fwd: &[String]) -> Result<()> {
     if crate::adopt::marker_reason(&member).is_some() {
         return Ok(());
     }
+    // The self-heal order: the record follows the binary this hook runs as
+    // before the member's manifests are wired from the record. A refusal
+    // leaves the record alone and is not this hook's to report.
+    if let Ok(running) = super::RunningBinary::current() {
+        t.phase("record", || super::follow_from_hook(&paths, &running));
+    }
     let machine = crate::adopt::machine_for(&paths)?;
     let intent = t.phase("intent", || {
         crate::family::projection_db(&member).map_or_else(

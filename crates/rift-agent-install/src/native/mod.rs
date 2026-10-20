@@ -13,6 +13,7 @@ mod antigravity;
 pub(crate) mod codex_client;
 mod codex_identity;
 mod codex_trust;
+mod compose;
 mod descriptor;
 #[cfg(test)]
 mod fixtures;
@@ -38,6 +39,7 @@ pub use codex_trust::{
     codex_home_from_process, codex_hook_trust, codex_trust, CodexClient, CodexHookTrust,
     CodexHookVerdict, CodexSurface, CodexTrust,
 };
+pub use compose::{hook_composition, HookComposition};
 pub use hooks::{hook_file, installed_hook_binary};
 pub use lifecycle::{disable, disable_for_adoption, enable, enable_for_adoption};
 pub use skill::{install_recall_skill, recall_skill_present, remove_recall_skill, skill_region};

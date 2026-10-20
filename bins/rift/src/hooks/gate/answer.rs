@@ -16,6 +16,8 @@ pub(in crate::hooks) struct GateOutcome {
     /// The rendered explanation this call is declined with — `None` for the
     /// overwhelming majority of calls, which run exactly as they were written.
     pub(super) deny_reason: Option<String>,
+    /// Where the decline's emission is recorded, keyed by the native call.
+    pub(super) receipt: Option<super::calls::CallReceipt>,
 }
 
 /// A source of per-decision accounting ids, process-wide for the reason

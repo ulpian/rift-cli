@@ -407,7 +407,7 @@ pub(super) fn doctor_soak(repo: &Path, strict_read_only: bool) -> (String, serde
             serde_json::json!({ "readable": false }),
         );
     };
-    let markers = pending_markers(repo, strict_read_only);
+    let markers = pending_markers(repo);
     let mut human = soak_headline(&ev);
     if !ev.corpus_divergence_free() {
         human.push_str(&format!(
@@ -427,23 +427,31 @@ pub(super) fn doctor_soak(repo: &Path, strict_read_only: bool) -> (String, serde
     (human, soak_json(&ev, &markers, last.as_ref()))
 }
 
-/// Any pending capture-queue markers, said by the soak leg and CONSUMED by it.
+/// Any pending capture-queue markers, read and left in place.
 ///
 /// A developer looking at a reset streak was previously shown the counter and
 /// not the reason: the marker is written by the detached worker and read only
 /// by the *next hook*, so someone diagnosing between commits saw "0/20" with
-/// no explanation available anywhere. Doctor takes them for the same reason
-/// the hook does — a marker that survived being reported would print forever,
-/// and a warning that always fires is one nobody reads. The viewer tier only
-/// peeks.
-fn pending_markers(repo: &Path, strict_read_only: bool) -> Vec<String> {
+/// no explanation available anywhere. Every doctor leg reads the markers
+/// through this one accessor and none takes them: a report that consumed a
+/// note would hide it from the next report and from the hook that owes it to
+/// the developer (CFX-7). Only `--fix` clears them, in
+/// [`consume_said_once_markers`], after every leg has said them.
+fn pending_markers(repo: &Path) -> Vec<String> {
     let Ok(paths) = rift_git::discover(repo) else {
         return Vec::new();
     };
-    if strict_read_only {
-        return capture_queue::peek_errors(&paths.git_dir);
-    }
-    capture_queue::take_errors(&paths.git_dir)
+    capture_queue::peek_errors(&paths.git_dir)
+}
+
+/// The one place doctor consumes the said-once markers: a `--fix` run, after
+/// its report has printed them. The report-only and viewer runs never reach
+/// it, so running doctor twice without `--fix` prints the same notes twice.
+pub(super) fn consume_said_once_markers(repo: &Path) {
+    let Ok(paths) = rift_git::discover(repo) else {
+        return;
+    };
+    capture_queue::take_errors(&paths.git_dir);
 }
 
 /// The counter's line. BOTH conjuncts, always, so a reader can see which one

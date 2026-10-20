@@ -134,23 +134,7 @@ impl WindowJournal {
         }
         std::fs::create_dir_all(&self.dir)?;
         self.fold_if_full();
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(self.live_path())?;
-        // One `write`, not `write_all`: the atomicity that keeps two appending
-        // processes from interleaving belongs to the single call. A short
-        // write is reported rather than continued, because continuing is
-        // exactly how a row gets torn in half by someone else's.
-        let written = file.write(row.as_bytes())?;
-        if written == row.len() {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "a journal row was written in part",
-            ))
-        }
+        write_row(&self.live_path(), &row)
     }
 
     /// Fold when the live file has reached the cap, and never mind if it
@@ -338,6 +322,28 @@ impl WindowJournal {
             file.write_all(body.as_bytes())?;
         }
         std::fs::rename(&tmp, self.snapshot_path(ordinal))
+    }
+}
+
+/// Append one finished row to `path` in a single write.
+///
+/// One `write`, not `write_all`: the atomicity that keeps two appending
+/// processes from interleaving belongs to the single call. A short write is
+/// reported rather than continued, because continuing is exactly how a row
+/// gets torn in half by someone else's.
+pub(super) fn write_row(path: &Path, row: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    let written = file.write(row.as_bytes())?;
+    if written == row.len() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "a journal row was written in part",
+        ))
     }
 }
 

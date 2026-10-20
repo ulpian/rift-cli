@@ -31,6 +31,7 @@
 //! .rift/state/reads/<key>.jsonl                 the live file: appended to
 //! .rift/state/reads/<key>.<n>.rolled.jsonl      a live file that filled up
 //! .rift/state/reads/<key>.<n>.snapshot.json     the state of everything ≤ n
+//! .rift/state/reads/<key>.calls.jsonl           the window's declined calls
 //! ```
 //!
 //! `<key>` is one **context window**, not one session: a subagent runs under
@@ -88,6 +89,7 @@
 //! which other windows of the family are live, read for the one decline that
 //! may rest on what they hold.
 
+mod calls;
 mod coordinator;
 mod denies;
 mod edits;
@@ -100,8 +102,9 @@ mod seen;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use calls::{is_call_sidecar, CallSidecar};
 pub(crate) use coordinator::{coordinator_reads, CoordinatorRead};
-pub(crate) use denies::{deny_stands, ineffective_denies};
+pub(crate) use denies::{deny_stands, ineffective_denies, DeclineCalls};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};
 pub(crate) use family::{live_sibling_journals, FamilyQuery};
 pub(crate) use frozen::session_window_facts;

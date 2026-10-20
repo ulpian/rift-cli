@@ -745,40 +745,101 @@ fn init_registry_lines(added: &Added, name: &str, registered: &Path, reg_path: &
 /// policy an `init` in any member re-pointed every member's hooks at whatever
 /// binary that process happened to be — the side effect that left this
 /// repository's six hooks dangling at a deleted `/tmp` binary for four days.
+/// The one exception is the ruled move: `init` run from a release binary other
+/// than the family's record moves hooks and record together, in the main work
+/// tree only, and a debug or throwaway build never does.
 ///
 /// **Best-effort, and now honestly so**: reading this process's own path used
 /// to be fatal to `init` (`current_exe()?`), directly under a comment promising
 /// it never would be. Nothing here can fail the initialization of a repository;
 /// what it cannot do, it says.
 fn init_git_hooks(canon: &Path) -> String {
+    let Ok(running) = hooks::RunningBinary::current() else {
+        return "git hooks: skipped (this binary cannot read its own path)\n".to_owned();
+    };
+    init_git_hooks_as(canon, &running)
+}
+
+/// [`init_git_hooks`] as `running`.
+fn init_git_hooks_as(canon: &Path, running: &hooks::RunningBinary) -> String {
     let Ok(git_dir) = rift_git::discover(canon).map(|paths| paths.common_dir) else {
         return "git hooks: skipped (not a git repo)\n".to_owned();
     };
-    let Ok(rift_bin) = std::env::current_exe() else {
-        return "git hooks: skipped (this binary cannot read its own path)\n".to_owned();
-    };
-    match hooks::install_family_hooks(
+    let moved = hooks::follow_running_binary(canon, running);
+    let installed = hooks::install_family_hooks(
         &git_dir,
         canon,
         None,
-        rift_bin,
+        running.path.clone(),
         rift_shadow::hooks::HookInstallPolicy::KeepIfHealthy {
             allow_transient: false,
         },
         rift_shadow::hooks::RecordedBy::Init,
-    ) {
-        Ok(report) => {
-            let mut lines = hooks::report_lines(&report).join("\n");
-            lines.push('\n');
-            lines
-        }
-        Err(error) => format!("git hooks: skipped ({error})\n"),
+    );
+    let mut lines: Vec<String> = moved.into_iter().collect();
+    match installed {
+        Ok(report) => lines.extend(hooks::report_lines(&report)),
+        Err(error) => lines.push(format!("git hooks: skipped ({error})")),
     }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn never_transient(
+        _: &Path,
+        _: &rift_shadow::hooks::FamilySites,
+    ) -> Option<rift_shadow::hooks::TransientReason> {
+        None
+    }
+
+    /// `init` from a release binary other than the record's moves hooks and
+    /// record together, and a later `init` from a throwaway build (this test
+    /// binary) keeps the new record instead of undoing the move.
+    #[cfg(unix)]
+    #[test]
+    fn init_moves_the_family_to_a_new_release_binary_and_a_later_init_keeps_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let main_git = rift_git::test_support::fake_repo(&main).unwrap();
+        let family = main_git.join("rift-family");
+        rift_shadow::hooks::record_binary_of_record(
+            &family,
+            Path::new("/opt/rift/rift"),
+            rift_shadow::hooks::RecordedBy::Init,
+        )
+        .unwrap();
+        let bin = tmp.path().join("opt/rift");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let running = hooks::RunningBinary {
+            path: bin.clone(),
+            screen: never_transient,
+        };
+
+        let first = init_git_hooks_as(&main, &running);
+        let again = init_git_hooks(&main);
+
+        let record = rift_shadow::hooks::read_binary_of_record(&family).unwrap();
+        assert_eq!(record.path(), bin, "{first}\n{again}");
+        assert_eq!(record.history.len(), 1, "{again}");
+        assert!(first.contains("moved from /opt/rift/rift"), "{first}");
+        assert!(
+            again.contains("never becomes the binary of record"),
+            "{again}"
+        );
+        assert_eq!(
+            std::fs::read_link(main_git.join("hooks/post-commit")).unwrap(),
+            bin
+        );
+    }
 
     /// The refusal `init` owes an unsupported explicit selection: a
     /// PRECONDITION, naming every offender, and silent when there is nothing to

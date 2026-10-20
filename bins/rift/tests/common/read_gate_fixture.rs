@@ -252,6 +252,10 @@ pub(crate) fn numbered(lines: u32, extra: Option<&str>) -> String {
     body
 }
 
+/// The suffix of a window's call sidecar, which sits beside its journal and
+/// is not one.
+const CALLS_SIDECAR: &str = ".calls.jsonl";
+
 /// The names of the journal files one repository holds — one per context
 /// window, named for the window rather than for the order a directory lists.
 pub(crate) fn windows(repo: &Path) -> Vec<String> {
@@ -262,6 +266,7 @@ pub(crate) fn windows(repo: &Path) -> Vec<String> {
     let mut names: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with(CALLS_SIDECAR))
         .collect();
     names.sort();
     names

@@ -128,7 +128,8 @@ fn a_miss_or_a_small_file_is_a_plain_read() {
         outcome,
         crate::hooks::gate::GateOutcome {
             journaled: false,
-            deny_reason: None
+            deny_reason: None,
+            receipt: None,
         }
     );
     let small = beside(here, "small.rs", 120);

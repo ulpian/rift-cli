@@ -12,6 +12,20 @@ use super::{
     TranscriptBody, NATIVE_CHECKPOINT_REF, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
 
+impl CheckpointArchive {
+    /// The `content_hash.txt` bytes over metadata already rendered, so a
+    /// writer that also writes `metadata.json` derives the root once.
+    pub(super) fn content_hash_over(&self, metadata: &[u8]) -> Vec<u8> {
+        let report = self.redaction_report_json();
+        let full = self.full_jsonl();
+        let mut parts: Vec<&[u8]> = vec![metadata, &report];
+        parts.extend(full.as_deref());
+        let mut hex = crate::sha256_hex(&parts);
+        hex.push('\n');
+        hex.into_bytes()
+    }
+}
+
 impl<W: NativeGitWrite> NativeBackend<W> {
     /// Write the checkpoint shard: structural artifacts + the durable content blob,
     /// assembled into a leaf tree grafted onto the orphan branch. Idempotent (the
@@ -44,10 +58,13 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     /// the redaction wall — then the Rift-authored structural artifacts, then
     /// the optional ones a shard carries only when it has them.
     fn write_top_level_blobs(&self, archive: &CheckpointArchive) -> Result<Vec<TreeWriteEntry>> {
+        // The metadata records the Merkle root, which hashes every transcript
+        // byte: render it once and hash the content address over that copy.
+        let metadata = archive.metadata_json();
         let mut entries = vec![
             self.durable_entry("content.redacted", &archive.content)?,
-            self.structural_entry("content_hash.txt", &archive.content_hash_txt())?,
-            self.structural_entry("metadata.json", &archive.metadata_json())?,
+            self.structural_entry("content_hash.txt", &archive.content_hash_over(&metadata))?,
+            self.structural_entry("metadata.json", &metadata)?,
             self.structural_entry("redaction_report.json", &archive.redaction_report_json())?,
         ];
         if let Some(full) = archive.full_jsonl() {

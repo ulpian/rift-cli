@@ -16,7 +16,6 @@ use super::{
     ArchivedTranscript, CheckpointArchive, NATIVE_CANON_VERSION, TRANSCRIPT_COMPACT_NAME,
     TRANSCRIPT_FULL_NAME,
 };
-use crate::sha256_hex;
 
 /// The shard name of the frozen serve envelopes. It sorts after
 /// `redaction_report.json` (`r` < `s`) and before `sessions/` (`r` < `s` at the
@@ -487,14 +486,7 @@ impl CheckpointArchive {
     /// artifacts (metadata ‖ report ‖ full), lowercase hex + trailing newline.
     #[must_use]
     pub fn content_hash_txt(&self) -> Vec<u8> {
-        let mut parts: Vec<Vec<u8>> = vec![self.metadata_json(), self.redaction_report_json()];
-        if let Some(full) = self.full_jsonl() {
-            parts.push(full);
-        }
-        let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-        let mut hex = sha256_hex(&refs);
-        hex.push('\n');
-        hex.into_bytes()
+        self.content_hash_over(&self.metadata_json())
     }
 
     /// The capture event's own recorded time. Present only when the
@@ -690,6 +682,7 @@ mod tests {
         WorktreeLabel, ROOT_BOUND_ID_MIN_CANON_VERSION, STRICT_MERKLE_MIN_CANON_VERSION,
     };
     use super::*;
+    use crate::sha256_hex;
     use rift_core::SecretBytes;
 
     /// **The sequence `content_hash.txt` digests, pinned by arithmetic rather

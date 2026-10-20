@@ -330,9 +330,11 @@ fn clean_prunes_transients_and_never_touches_canonical_refs() {
 /// A developer diagnosing a reset soak streak must be shown the REASON, not
 /// only the counter. The marker is written by the detached worker and was read
 /// only by the next hook, so between commits the explanation existed on disk
-/// and nothing would print it.
+/// and nothing would print it. A report-only doctor reads it without taking
+/// it (CFX-7): a second report prints the same reason, and only `--fix`
+/// consumes it, exactly once.
 #[test]
-fn doctor_says_and_consumes_a_pending_capture_marker() {
+fn report_only_doctor_says_a_pending_marker_every_run_and_fix_consumes_it_once() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     let cache = tmp.path().join("cache");
@@ -345,50 +347,54 @@ fn doctor_says_and_consumes_a_pending_capture_marker() {
     // A marker left behind exactly as the worker leaves one.
     let queue = common::capture_queue_dir(&repo.join(".git"), &cache);
     std::fs::create_dir_all(&queue).unwrap();
-    std::fs::write(
-        queue.join("stale-entry.error"),
-        "soak verify is not clean: tamper",
-    )
-    .unwrap();
-
-    let (code, first) = run_rift_capture_in(&repo, &["doctor", "--json"], "", &env);
-    assert_eq!(code, 0, "doctor: {first}");
-    let v: serde_json::Value = serde_json::from_str(&first).expect("doctor emits json");
-    let pending = v["soak"]["pending_markers"]
-        .as_array()
-        .expect("pending_markers is an array");
-    assert!(
-        pending.iter().any(|m| m
-            .as_str()
-            .is_some_and(|s| s.contains("soak verify is not clean"))),
-        "doctor must say WHY the streak reset: {first}"
-    );
-
-    // …and consumes it, so a warning that always fires never happens.
-    let (code, second) = run_rift_capture_in(&repo, &["doctor", "--json"], "", &env);
-    assert_eq!(code, 0, "doctor: {second}");
-    let v2: serde_json::Value = serde_json::from_str(&second).expect("doctor emits json");
-    assert!(
-        v2["soak"]["pending_markers"]
+    let marker = queue.join("stale-entry.error");
+    std::fs::write(&marker, "soak verify is not clean: tamper").unwrap();
+    let soak_markers = |args: &[&str]| {
+        let (code, out) = run_rift_capture_in(&repo, args, "", &env);
+        assert_eq!(code, 0, "doctor: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("doctor emits json");
+        v["soak"]["pending_markers"]
             .as_array()
-            .is_some_and(std::vec::Vec::is_empty),
-        "the marker is reported exactly once: {second}"
+            .expect("pending_markers is an array")
+            .clone()
+    };
+    let says_reason = |markers: &[serde_json::Value]| {
+        markers.iter().any(|m| {
+            m.as_str()
+                .is_some_and(|s| s.contains("soak verify is not clean"))
+        })
+    };
+
+    for run in ["first", "second"] {
+        let markers = soak_markers(&["doctor", "--json"]);
+        assert!(
+            says_reason(&markers),
+            "{run} report must say why: {markers:?}"
+        );
+        assert!(
+            marker.exists(),
+            "a report consumed the marker on its {run} run"
+        );
+    }
+
+    let fixed = soak_markers(&["doctor", "--fix", "--json"]);
+    assert!(
+        says_reason(&fixed),
+        "the fix run says it once more: {fixed:?}"
     );
-    assert!(!queue.join("stale-entry.error").exists());
+    assert!(!marker.exists(), "--fix consumes the said-once marker");
+    let after = soak_markers(&["doctor", "--json"]);
+    assert!(after.is_empty(), "consumed exactly once: {after:?}");
 }
 
-/// **A planted capture note is reported by doctor as a finding, and said
-/// once** (cause E of `turn_boundary`'s register, 2026-08-29). The
-/// `capture_queue` leg OBSERVES the note channel (`peek_errors`) and reports
-/// every marker under `capture_queue.notes` — the finding class — before any
-/// leg that might clear it. What clears it is the soak leg's existing,
-/// deliberate contract ("said here and CONSUMED here": a marker that survived
-/// being reported would print forever), so the SECOND run reports nothing and
-/// the marker is gone. Only the read-only viewer doctor (Canopy `/doctor`)
-/// peeks throughout; it has no CLI entry, so the CLI pin is: reported as a
-/// finding on the run it is found, exactly once.
+/// **A planted capture note is reported by doctor as a finding on every
+/// report** (cause E of `turn_boundary`'s register, 2026-08-29). The
+/// `capture_queue` leg and the soak leg both read the note channel through
+/// `peek_errors`; a report-only doctor consumes nothing (CFX-7), so a second
+/// report reads the same finding. Saying it once is the hook's job and
+/// `--fix`'s, never a report's.
 #[test]
-fn a_planted_capture_note_is_reported_by_doctor_as_a_finding_and_said_once() {
+fn a_planted_capture_note_is_reported_by_every_report_only_doctor_run() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = seed_live_session_repo(tmp.path());
     std::fs::create_dir_all(repo.join(".rift")).unwrap();
@@ -414,16 +420,17 @@ fn a_planted_capture_note_is_reported_by_doctor_as_a_finding_and_said_once() {
         notes.iter().any(|n| n == body),
         "the planted note is not a finding: {d}"
     );
-    assert!(
-        !marker.exists(),
-        "the soak leg's said-once contract must have consumed the marker"
-    );
+    assert!(marker.exists(), "a report-only doctor consumed the note");
 
     let (code, out) = run_rift_stdout(&repo, &["doctor", "--json"], &env);
     assert_eq!(code, 0, "{out}");
     let d: serde_json::Value = serde_json::from_slice(out.as_bytes()).unwrap();
     assert!(
-        d["capture_queue"]["notes"].as_array().unwrap().is_empty(),
-        "said once, not twice: {d}"
+        d["capture_queue"]["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n == body),
+        "the second report must read the same note: {d}"
     );
 }

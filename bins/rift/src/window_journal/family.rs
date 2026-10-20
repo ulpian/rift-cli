@@ -165,6 +165,9 @@ fn recent_journals(at: usize, checkout: &Checkout, query: &FamilyQuery<'_>) -> V
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        if super::calls::is_call_sidecar(&name) {
+            continue;
+        }
         let Some((window, rest)) = name.split_once('.') else {
             continue;
         };

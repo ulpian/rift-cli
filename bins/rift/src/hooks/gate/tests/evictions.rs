@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use rift_agent::window_journal::{Interval, Line};
+use rift_agent::window_journal::{CallFact, Interval, Line};
 
 use super::fixtures::*;
 use crate::hooks::gate::members::deny_channel;
@@ -145,8 +145,9 @@ fn a_signal_a_family_does_not_publish_empties_nothing() {
 
 /// A client too old to act on the channel a decision was sent on runs the
 /// call anyway, and its *result* arrives for a call the journal declined.
-/// The bytes reached the model, so the window is recorded as holding them
-/// — and the pair of lines is what says the decision went unheeded.
+/// The bytes reached the model, so the window is recorded as holding them,
+/// and the result is joined to the decline by the call's own id in the
+/// window's call sidecar, never in its journal.
 #[test]
 fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
     let (tmp, file) = checkout(40);
@@ -162,9 +163,27 @@ fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
             at_ms: 1,
         })
         .expect("a decline");
+    let calls = crate::window_journal::CallSidecar::open(here, "s-6", None);
+    for fact in [
+        CallFact::Planned,
+        CallFact::Emitted {
+            wrote: true,
+            exit: 0,
+        },
+    ] {
+        calls
+            .append(&Line::Call {
+                turn: 1,
+                call: Some("toolu_6".to_owned()),
+                fact,
+                at_ms: 1,
+            })
+            .expect("a call fact");
+    }
 
     let mut payload = read_call(&file, None, Some(10));
     payload["tool_response"] = serde_json::json!({ "type": "text" });
+    payload["tool_use_id"] = serde_json::json!("toolu_6");
     gate_observing(
         &hook("claude-code", "PostToolUse", "s-6", payload.clone()),
         here,
@@ -177,15 +196,16 @@ fn a_result_for_a_declined_read_records_the_read_and_leaves_the_pair() {
         "the decline stands and the read that happened is beside it"
     );
     assert_eq!(
-        crate::window_journal::ineffective_denies(&window.load().journal),
+        crate::window_journal::ineffective_denies(&calls.load()).ineffective,
         1,
-        "and the pair is what a diagnostic counts"
+        "and the joined call is what a diagnostic counts"
     );
 
     // A second result for the same lines adds nothing: the decline has
     // been answered, so there is no longer a decline to contradict.
     gate_observing(&hook("claude-code", "PostToolUse", "s-6", payload), here);
     assert_eq!(lines_of(here, "s-6", None).len(), 2);
+    assert_eq!(calls.load().lines().len(), 3, "the result is joined once");
 }
 
 /// The ordinary result — of a read nobody declined — leaves the journal
@@ -208,8 +228,10 @@ fn a_result_for_a_read_nobody_declined_records_nothing() {
         vec!["read"]
     );
     assert_eq!(
-        crate::window_journal::ineffective_denies(&lines_journal(here, "s-7")),
-        0
+        crate::window_journal::ineffective_denies(
+            &crate::window_journal::CallSidecar::open(here, "s-7", None).load()
+        ),
+        crate::window_journal::DeclineCalls::default()
     );
 }
 
