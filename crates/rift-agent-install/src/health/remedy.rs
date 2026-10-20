@@ -66,6 +66,10 @@ pub fn remedy(finding: &Finding, surface: Surface, codex_trust: Option<&CodexTru
             format!("{name}: hook trust unverifiable"),
             codex_trust_unverifiable(&finding.detail, surface),
         ),
+        Reason::CodexVersionUnsupported => (
+            format!("{name}: client version unsupported"),
+            codex_version_unsupported(&finding.detail, surface),
+        ),
         Reason::LifecycleHooksMissing => (
             format!("{name}: no session start or prompt arriving"),
             lifecycle_hooks_missing(&finding.agent, name, surface),
@@ -188,13 +192,43 @@ fn codex_hooks_skipped(
 fn codex_trust_unverifiable(detail: &str, surface: Surface) -> String {
     let mut sentence = format!(
         "Capture is not being lost as far as Rift can see, but Rift cannot tell whether \
-         Codex runs its hooks ({detail}). In a terminal in this repository run `codex`, type \
-         `/hooks`, and check that Rift's hooks are trusted."
+         Codex runs its hooks ({detail})."
+    );
+    push_codex_hooks_check(&mut sentence, surface);
+    sentence
+}
+
+/// A Codex newer than every pin: the shared sentence first, word for word as
+/// the status row prints it, then where the user can read Codex's own answer.
+fn codex_version_unsupported(detail: &str, surface: Surface) -> String {
+    let version = detail.strip_prefix("codex ").unwrap_or(detail);
+    let mut sentence = format!(
+        "{}. Capture is not being lost as far as Rift can see.",
+        codex_unsupported_version_sentence(version)
+    );
+    push_codex_hooks_check(&mut sentence, surface);
+    sentence
+}
+
+/// The one sentence for a Codex newer than every version the trust check is
+/// proven against. Status, doctor and Canopy all print it, so it is written
+/// once, here, and never says "untrusted": a client update withdraws nothing.
+pub(crate) fn codex_unsupported_version_sentence(version: &str) -> String {
+    format!(
+        "Codex {version} is newer than {}, the newest Codex version Rift's hook-trust check \
+         is proven against, so Rift cannot tell whether Codex runs its hooks",
+        crate::native::newest_proven_codex_version()
+    )
+}
+
+fn push_codex_hooks_check(sentence: &mut String, surface: Surface) {
+    sentence.push_str(
+        " In a terminal in this repository run `codex`, type `/hooks`, and check that Rift's \
+         hooks are trusted.",
     );
     if let Surface::Ide(host) = surface {
         sentence.push_str(&format!(" Then reload the {} window.", host.display_name()));
     }
-    sentence
 }
 
 /// Tool calls arriving without the session and prompt around them: a restart

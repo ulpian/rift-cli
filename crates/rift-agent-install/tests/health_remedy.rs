@@ -46,7 +46,10 @@ fn finding(reason: Reason) -> Finding {
     match reason {
         Reason::CodexHooksSkipped => Finding::new(reason, "codex", None, "Event0".to_owned()),
         Reason::CodexTrustUnverifiable => {
-            Finding::new(reason, "codex", None, "codex 0.160.0".to_owned())
+            Finding::new(reason, "codex", None, "codex 0.156.0".to_owned())
+        }
+        Reason::CodexVersionUnsupported => {
+            Finding::new(reason, "codex", None, "codex 0.164.0".to_owned())
         }
         Reason::LifecycleHooksMissing => Finding::new(
             reason,
@@ -167,8 +170,12 @@ fn the_codex_sentence_is_the_trust_rows_own_word_for_word() {
 }
 
 #[test]
-fn the_two_warnings_say_capture_is_not_being_lost() {
-    for reason in [Reason::CodexTrustUnverifiable, Reason::HookBinaryDisagrees] {
+fn the_warnings_say_capture_is_not_being_lost() {
+    for reason in [
+        Reason::CodexTrustUnverifiable,
+        Reason::CodexVersionUnsupported,
+        Reason::HookBinaryDisagrees,
+    ] {
         assert_eq!(reason.severity(), Severity::Warning);
         for surface in SURFACES {
             let sentence = remedy_on(reason, surface).sentence;
