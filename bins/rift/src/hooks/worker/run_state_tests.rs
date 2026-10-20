@@ -284,3 +284,46 @@ fn globally_unready_migration_skips_the_actual_worker_outer_tail() {
         b"legacy-ownership-unresolved"
     );
 }
+
+/// A job published while a worker drains, with recovery asking for the
+/// queue: the worker lets go at the pass boundary instead of taking the new
+/// job, recovery takes the owner lock, and once recovery releases it the
+/// next drain takes the job.
+#[test]
+fn a_draining_worker_yields_to_a_recovery_request_and_the_next_drain_takes_what_arrived() {
+    let (checkout, git_dir) = checkout();
+    let first = crate::agent_queue::enqueue(&git_dir, &refused_job(checkout.path())).unwrap();
+    let delivered = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed = delivered.clone();
+    let held_dir = git_dir.clone();
+    let root = checkout.path().to_owned();
+    let pause = before_release(move || {
+        let mut late = refused_job(&root);
+        late.queued_at_ms = 2;
+        if let JobKind::ToolResultTokens { tool_result_id, .. } = &mut late.kind {
+            *tool_result_id = "e".repeat(64);
+        }
+        *observed.borrow_mut() = Some(crate::agent_queue::enqueue(&held_dir, &late).unwrap());
+        let request = crate::capture_queue::request::request_path(&held_dir);
+        std::fs::write(request, b"1").unwrap();
+    });
+    super::drain_jobs(git_dir.to_str(), super::LockWait::None);
+    drop(pause);
+    assert!(!first.exists(), "the pass in flight finished its job");
+    let late = delivered.borrow().clone().unwrap();
+    assert!(late.exists(), "the worker let go before the next pass");
+
+    let recovery = crate::capture_queue::acquire_owner(&git_dir).unwrap();
+    std::fs::remove_file(crate::capture_queue::request::request_path(&git_dir)).unwrap();
+    super::drain_jobs(git_dir.to_str(), super::LockWait::None);
+    assert!(
+        late.exists(),
+        "no drain runs while recovery holds the queue"
+    );
+    drop(recovery);
+    super::drain_jobs(git_dir.to_str(), super::LockWait::None);
+    assert!(
+        !late.exists(),
+        "the drain after recovery takes what arrived"
+    );
+}

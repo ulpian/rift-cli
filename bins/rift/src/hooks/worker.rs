@@ -261,13 +261,26 @@ fn drain_locked(
                 }
             }
         }
+        if recovery_requested(git_dir) {
+            return drained;
+        }
     }
+}
+
+/// Whether `rift doctor --fix` waits for the queue: a worker then lets go at
+/// the next pass boundary, never inside a job.
+fn recovery_requested(git_dir: &Path) -> bool {
+    crate::capture_queue::request::requested(git_dir, std::time::SystemTime::now())
 }
 
 /// Recheck after releasing ownership so a producer that saw the old owner
 /// busy still gets a pass. Already attempted paths never trigger reacquisition.
 fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: DrainPolicy) -> Drained {
     let mut all = Drained::default();
+    // A worker started under a request leaves the lock to recovery.
+    if recovery_requested(git_dir) {
+        return all;
+    }
     let Some(mut owner) = acquire_queue_lock(git_dir, wait) else {
         return all;
     };
@@ -300,6 +313,9 @@ fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: Drain
         #[cfg(test)]
         run_state_tests::pause_before_owner_release();
         drop(owner);
+        if recovery_requested(git_dir) {
+            return all;
+        }
         // A not-due or parked job is not pending for a `Due` drain: a worker
         // never spins on a delivery its policy would not run.
         let now = now_ms();

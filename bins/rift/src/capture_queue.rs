@@ -19,6 +19,7 @@
 //! durable across power loss.
 
 pub(crate) mod delivery;
+pub(crate) mod request;
 
 use std::path::{Path, PathBuf};
 
