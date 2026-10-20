@@ -657,6 +657,11 @@ pub(super) fn capture_sync_note() -> String {
 /// A spawn failure is silent by design: the entry is already durable, so the
 /// work is deferred to the next hook, never lost.
 pub(crate) fn spawn_capture_worker(git_dir: &Path) {
+    // While `rift doctor --fix` asks for the queue, the entry stays queued
+    // and no new drain starts; the drain after recovery takes it.
+    if crate::capture_queue::request::requested(git_dir, std::time::SystemTime::now()) {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };

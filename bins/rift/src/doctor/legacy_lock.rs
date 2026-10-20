@@ -27,7 +27,15 @@ pub(super) fn doctor_legacy_queue_lock(root: &Path, repair: bool) -> (String, se
         return (String::new(), json!({ "present": false }));
     };
     if !repair {
-        return report(&repo.git_dir);
+        let (mut line, mut value) = report(&repo.git_dir);
+        let request = &crate::capture_queue::request::stale_line;
+        if let Some(stale) = request(&repo.git_dir, SystemTime::now(), rift_process_ages) {
+            line.push_str(&stale);
+            if let Some(fields) = value.as_object_mut() {
+                fields.insert("stale_recovery_request".to_owned(), json!(true));
+            }
+        }
+        return (line, value);
     }
     match retire(&repo.git_dir, SystemTime::now(), rift_process_ages) {
         Retirement::Absent => (String::new(), json!({ "present": false })),

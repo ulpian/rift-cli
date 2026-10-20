@@ -2,15 +2,23 @@
 //! resume the job, admit its hold, drive the stages, and release the hold on
 //! every exit. The plan directory and every stage record stay behind as the
 //! receipt; a later run takes a new hold and the stages recheck what changed.
+//!
+//! The owner lock is taken under a recovery request: a draining worker lets
+//! go at its next pass boundary and hooks only enqueue, so recovery runs on
+//! a machine whose agents keep the queue busy.
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use rift_recall_substrate::GixSubstrate;
 use rift_shadow::backend::NativeBackend;
 use rift_shadow::hooks::AdapterRegistry;
 
-use crate::capture_queue::QueueLock;
+use crate::capture_queue::request::{
+    acquire_owner_within, Request, RECOVERY_WAIT, RECOVERY_WAIT_PAUSE,
+};
+use crate::capture_queue::{OwnerBlock, QueueLock};
 use crate::capture_recovery::hold::{admit_own_hold, HOLD_NAME};
 use crate::capture_recovery::job::{begin, release, Job, Member};
 use crate::capture_recovery::runner::{recover_naming_historical, Context, Recovered};
@@ -23,7 +31,11 @@ const NOTHING_OWED: &str = "capture recovery: nothing to recover";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Refusal {
     NotSetUp,
-    Busy,
+    /// A worker kept the owner lock through the whole wait.
+    Busy {
+        waited_secs: u64,
+    },
+    OwnerUnavailable,
     LegacyBarrier,
     PlanUnwritten,
     HoldUnadmitted,
@@ -34,9 +46,19 @@ pub(super) enum Refusal {
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Refusal::Busy { waited_secs } = self {
+            return write!(
+                f,
+                "capture recovery not run: waited {waited_secs} s and a capture worker was still \
+                 mid-pass on the queue; it lets go between passes, so retry"
+            );
+        }
         f.write_str(match self {
             Refusal::NotSetUp => "capture recovery not run: this repository is not set up here",
-            Refusal::Busy => "capture recovery not run: another capture holds the queue; retry",
+            Refusal::Busy { .. } => "",
+            Refusal::OwnerUnavailable => {
+                "capture recovery not run: the capture owner lock could not be opened"
+            }
             Refusal::LegacyBarrier => {
                 "capture recovery not run: an old-format capture-queue lock still blocks the \
                  queue; `rift doctor` names it, and `--fix` moves it aside once no Rift process \
@@ -76,7 +98,7 @@ pub(super) fn run(
         ));
     }
     let family_dir = family_dir(&family.family_id)?;
-    let owner = crate::capture_queue::acquire_owner(&repo.git_dir).map_err(refusal_for)?;
+    let owner = owner_on_request(&repo.git_dir, RECOVERY_WAIT, RECOVERY_WAIT_PAUSE)?;
     let member = Member {
         repo_id: &family.family_id,
         work_tree: &repo.work_tree,
@@ -90,13 +112,25 @@ pub(super) fn run(
     walked.map(|recovered| (recovered.words, recovered.historical))
 }
 
+/// The owner lock, taken under a recovery request. The request is removed
+/// before this returns, lock or refusal: once the lock is held no worker can
+/// drain anyway, and a refusal leaves nothing asking the workers to yield.
+fn owner_on_request(git_dir: &Path, wait: Duration, pause: Duration) -> Result<QueueLock, Refusal> {
+    let request = Request::place(git_dir, SystemTime::now());
+    let owner = acquire_owner_within(git_dir, wait, pause);
+    drop(request);
+    owner.map_err(|block| refusal_for(block, wait))
+}
+
 /// An old-format marker is not another capture: it gets its own reason, so
 /// the operator is not told to retry against a file nothing will remove.
-fn refusal_for(block: crate::capture_queue::OwnerBlock) -> Refusal {
+fn refusal_for(block: OwnerBlock, waited: Duration) -> Refusal {
     match block {
-        crate::capture_queue::OwnerBlock::LegacyBarrier => Refusal::LegacyBarrier,
-        crate::capture_queue::OwnerBlock::ActiveOwner
-        | crate::capture_queue::OwnerBlock::Unavailable => Refusal::Busy,
+        OwnerBlock::LegacyBarrier => Refusal::LegacyBarrier,
+        OwnerBlock::ActiveOwner => Refusal::Busy {
+            waited_secs: waited.as_secs(),
+        },
+        OwnerBlock::Unavailable => Refusal::OwnerUnavailable,
     }
 }
 
@@ -162,13 +196,49 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture_queue::OwnerBlock;
+    use crate::capture_queue::request::request_path;
 
     #[test]
     fn doctor_recovery_names_a_legacy_barrier_apart_from_a_busy_queue() {
-        let legacy = refusal_for(OwnerBlock::LegacyBarrier).to_string();
+        let legacy = refusal_for(OwnerBlock::LegacyBarrier, RECOVERY_WAIT).to_string();
         assert!(legacy.contains("old-format capture-queue lock"), "{legacy}");
-        assert!(!legacy.contains("another capture"), "{legacy}");
-        assert_eq!(refusal_for(OwnerBlock::ActiveOwner), Refusal::Busy);
+        assert!(!legacy.contains("mid-pass"), "{legacy}");
+        assert_eq!(
+            refusal_for(OwnerBlock::ActiveOwner, RECOVERY_WAIT),
+            Refusal::Busy { waited_secs: 120 }
+        );
+    }
+
+    #[test]
+    fn doctor_recovery_timeout_says_how_long_it_waited_and_that_a_worker_is_mid_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = crate::capture_queue::acquire_owner(dir.path()).unwrap();
+        let pause = Duration::from_millis(1);
+        let refused = owner_on_request(dir.path(), Duration::from_secs(1), Duration::from_secs(1))
+            .err()
+            .unwrap();
+        let words = refused.to_string();
+        assert!(words.contains("waited 1 s"), "{words}");
+        assert!(
+            words.contains("capture worker was still mid-pass"),
+            "{words}"
+        );
+        assert!(!words.contains("another capture holds"), "{words}");
+        assert!(!request_path(dir.path()).exists(), "removed on refusal");
+        drop(worker);
+        assert!(owner_on_request(dir.path(), Duration::ZERO, pause).is_ok());
+        assert!(!request_path(dir.path()).exists(), "removed on success");
+    }
+
+    #[test]
+    fn doctor_recovery_request_is_removed_when_the_queue_cannot_be_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = crate::capture_queue::legacy_queue_lock(dir.path());
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"1").unwrap();
+        let pause = Duration::from_millis(1);
+        let refused = owner_on_request(dir.path(), Duration::ZERO, pause).err();
+        assert_eq!(refused, Some(Refusal::LegacyBarrier));
+        assert!(!request_path(dir.path()).exists(), "removed on error");
     }
 }
