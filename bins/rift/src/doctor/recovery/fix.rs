@@ -24,6 +24,7 @@ const NOTHING_OWED: &str = "capture recovery: nothing to recover";
 pub(super) enum Refusal {
     NotSetUp,
     Busy,
+    LegacyBarrier,
     PlanUnwritten,
     HoldUnadmitted,
     StoreUnavailable,
@@ -36,6 +37,11 @@ impl fmt::Display for Refusal {
         f.write_str(match self {
             Refusal::NotSetUp => "capture recovery not run: this repository is not set up here",
             Refusal::Busy => "capture recovery not run: another capture holds the queue; retry",
+            Refusal::LegacyBarrier => {
+                "capture recovery not run: an old-format capture-queue lock still blocks the \
+                 queue; `rift doctor` names it, and `--fix` moves it aside once no Rift process \
+                 older than it runs"
+            }
             Refusal::PlanUnwritten => {
                 "capture recovery not run: the recovery plan could not be written"
             }
@@ -70,7 +76,7 @@ pub(super) fn run(
         ));
     }
     let family_dir = family_dir(&family.family_id)?;
-    let owner = crate::capture_queue::acquire_owner(&repo.git_dir).map_err(|_| Refusal::Busy)?;
+    let owner = crate::capture_queue::acquire_owner(&repo.git_dir).map_err(refusal_for)?;
     let member = Member {
         repo_id: &family.family_id,
         work_tree: &repo.work_tree,
@@ -82,6 +88,16 @@ pub(super) fn run(
     let walked = walk(root, repo, &owner, &job, now);
     release(&owner, &job).map_err(|_| Refusal::HoldKept)?;
     walked.map(|recovered| (recovered.words, recovered.historical))
+}
+
+/// An old-format marker is not another capture: it gets its own reason, so
+/// the operator is not told to retry against a file nothing will remove.
+fn refusal_for(block: crate::capture_queue::OwnerBlock) -> Refusal {
+    match block {
+        crate::capture_queue::OwnerBlock::LegacyBarrier => Refusal::LegacyBarrier,
+        crate::capture_queue::OwnerBlock::ActiveOwner
+        | crate::capture_queue::OwnerBlock::Unavailable => Refusal::Busy,
+    }
 }
 
 /// Whether anything is owed, read without a lock or a write: a hold left
@@ -141,4 +157,18 @@ fn walk(
         now,
     };
     Ok(recover_naming_historical(cx, &hold))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture_queue::OwnerBlock;
+
+    #[test]
+    fn doctor_recovery_names_a_legacy_barrier_apart_from_a_busy_queue() {
+        let legacy = refusal_for(OwnerBlock::LegacyBarrier).to_string();
+        assert!(legacy.contains("old-format capture-queue lock"), "{legacy}");
+        assert!(!legacy.contains("another capture"), "{legacy}");
+        assert_eq!(refusal_for(OwnerBlock::ActiveOwner), Refusal::Busy);
+    }
 }

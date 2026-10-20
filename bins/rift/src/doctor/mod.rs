@@ -23,6 +23,7 @@ mod compose;
 mod family;
 mod git_hooks;
 pub(crate) mod health;
+mod legacy_lock;
 mod prices;
 mod queues;
 mod recovery;
@@ -109,6 +110,12 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     // Recovery runs before any leg that drains a queue, and the tickets it
     // classified historical stay out of every repair drain after it, so the
     // backlog is never replayed one ticket at a time (CFX-4 ruling).
+    // A stale old-format queue lock is retired first, so the recovery and
+    // every queue leg after it run against an open queue.
+    report.leg(
+        "legacy_queue_lock",
+        legacy_lock::doctor_legacy_queue_lock(root, repair),
+    );
     let (recovery, _left_to_recovery) = doctor_capture_recovery(root, repair);
     report.leg("capture_recovery", recovery);
     report.leg("memory_chain", doctor_memory_chain(root, strict_read_only));

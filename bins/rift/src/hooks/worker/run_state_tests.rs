@@ -170,13 +170,13 @@ fn a_hook_never_waits_for_a_mover_holding_the_lock() {
 thread_local! {
     static BEFORE_RELEASE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
-struct ReleasePause(Option<Box<dyn FnOnce()>>);
+pub(super) struct ReleasePause(Option<Box<dyn FnOnce()>>);
 impl Drop for ReleasePause {
     fn drop(&mut self) {
         BEFORE_RELEASE.with(|slot| *slot.borrow_mut() = self.0.take());
     }
 }
-fn before_release(callback: impl FnOnce() + 'static) -> ReleasePause {
+pub(super) fn before_release(callback: impl FnOnce() + 'static) -> ReleasePause {
     ReleasePause(BEFORE_RELEASE.with(|slot| slot.replace(Some(Box::new(callback)))))
 }
 pub(super) fn pause_before_owner_release() {
