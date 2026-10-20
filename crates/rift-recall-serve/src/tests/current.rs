@@ -339,3 +339,48 @@ fn diff_since_reports_one_row_per_path_against_the_checkout() {
     assert_eq!(changed.len(), 1, "{}", older.payload);
     assert_eq!(changed[0]["new_sha256"], json!(b));
 }
+
+/// A hand edit committed after the last ingest: the store holds only the
+/// older revision, the checkout holds the edit, and the caller states the
+/// edit's hash. The bytes on disk decide, so the file is unchanged and no
+/// changed row names the stored, older hash.
+#[test]
+fn diff_since_stating_a_hash_the_store_never_saw_is_unchanged_when_the_checkout_holds_it() {
+    let store = projection();
+    let checkout = Checkout::holding(&[(PATH, B_BYTES), (OTHER, OTHER_BYTES)]);
+    let reader = checkout.reader();
+    let holding_b = ToolRequest {
+        known_hashes: vec![sha256_hex(B_BYTES)],
+        ..holding_a()
+    };
+    let resp = serve(&store, &reader, ToolName::DiffSince, &holding_b);
+    assert_eq!(
+        rows_for(&resp.payload["unchanged"], PATH).len(),
+        1,
+        "{}",
+        resp.payload
+    );
+    assert_eq!(
+        rows_for(&resp.payload["changed"], PATH),
+        Vec::<serde_json::Value>::new(),
+        "{}",
+        resp.payload
+    );
+}
+
+/// The same edit stated by nobody: the caller holds an unrelated hash, so the
+/// file is one changed row naming the hash on disk, not the stored one.
+#[test]
+fn diff_since_names_the_checkout_hash_when_the_store_lags_the_edit() {
+    let store = projection();
+    let checkout = Checkout::holding(&[(PATH, B_BYTES), (OTHER, OTHER_BYTES)]);
+    let reader = checkout.reader();
+    let holding_other = ToolRequest {
+        known_hashes: vec![sha256_hex(b"something else entirely")],
+        ..holding_a()
+    };
+    let resp = serve(&store, &reader, ToolName::DiffSince, &holding_other);
+    let changed = rows_for(&resp.payload["changed"], PATH);
+    assert_eq!(changed.len(), 1, "{}", resp.payload);
+    assert_eq!(changed[0]["new_sha256"], json!(sha256_hex(B_BYTES)));
+}

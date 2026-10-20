@@ -234,6 +234,40 @@ impl ProvenanceOracle for CaptureProvenance {
     }
 }
 
+/// Who the attribution recorded at `checkpoint_id` credits with `path`, or
+/// with the hunk holding `line`. `rift why` asks this for its one answering
+/// row so that it and recall provenance decide credit by the same rule; the
+/// per-file `counts` are the ones `why` already read.
+pub(super) async fn author_at(
+    store: &SqliteStore,
+    checkpoint_id: &str,
+    path: &str,
+    counts: Option<AttrCounts>,
+    line: Option<usize>,
+) -> Result<Author> {
+    let mut record = FileRecord {
+        counts,
+        hunks: Vec::new(),
+    };
+    for r in store
+        .query(
+            "SELECT h.new_start, h.new_len, h.category FROM attribution_hunk h \
+             JOIN file_revision fr ON fr.file_revision_id = h.file_revision_id \
+             WHERE h.checkpoint_id = ? AND fr.path = ?",
+            &[
+                rift_store::Value::text(checkpoint_id.to_owned()),
+                rift_store::Value::text(path.to_owned()),
+            ],
+        )
+        .await?
+    {
+        record
+            .hunks
+            .push((r.get_i64(0)?, r.get_i64(1)?, r.get_text(2)?));
+    }
+    Ok(record.author(line.and_then(|n| u32::try_from(n).ok())))
+}
+
 impl FileRecord {
     /// The hunks covering `line` decide when there are any; otherwise the
     /// file's counts do, through the same tag `rift why` prints, so a file
