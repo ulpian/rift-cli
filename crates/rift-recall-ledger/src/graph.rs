@@ -17,6 +17,9 @@ use sha2::{Digest, Sha256};
 /// any rebuild fingerprint), so a constant keeps re-ingest byte-identical and
 /// snapshots stable. (A wall clock would also be *safe* — the PK is
 /// content-addressed, so a re-insert is ignored regardless — but not stable.)
+/// The ingest watermark is the exception: its `ingested_at` is when a pass
+/// ran, so it takes the clock the caller injects (`IngestOptions::now_ms`), and
+/// this value is the fixed time tests pass for it.
 pub const INGEST_TS: i64 = 0;
 
 const SCHEMA_VERSION: i64 = 1;

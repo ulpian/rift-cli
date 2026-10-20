@@ -115,9 +115,12 @@ fn read_stages_follow_a_read_to_a_hash_bound_answer_and_doctor_stays_silent() {
     assert_eq!(stages["joins"]["ambiguous"], 0, "{stages}");
     assert!(stages["lag"]["archival"]["p50_ms"].is_i64(), "{stages}");
     assert!(stages["lag"]["delivery"]["p50_ms"].is_i64(), "{stages}");
-    // Query lag is not asserted: ingest stamps `ingest_watermark.ingested_at`
-    // with the constant `graph::INGEST_TS` (0), so readiness has no time of
-    // its own yet and both reads count as out-of-order (CFX-6 open follow-up).
+    // Ingest stamps its watermark with the system clock, so a read becomes
+    // queryable at a real time after its capture: query lag is a figure, and
+    // no read counts as out of order.
+    let query_p50 = &stages["lag"]["query"]["p50_ms"];
+    assert!(query_p50.as_i64().is_some_and(|ms| ms >= 0), "{stages}");
+    assert_eq!(stages["anomalies"], 0, "readiness after capture: {stages}");
     let doctor = env.doctor(&repo);
     assert!(!doctor.contains("read stages:"), "{doctor}");
 }
