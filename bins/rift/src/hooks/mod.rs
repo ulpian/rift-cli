@@ -56,7 +56,8 @@ pub(crate) use gate::{gate_step, gate_turn, sweep_outline_cache, GateStep, AUDIT
 pub(crate) use git::effective_config;
 pub(crate) use git::spawn_capture_worker;
 pub(crate) use install::{
-    effective_hooks_dir, family_sites, hook_names, install_family_hooks, report_lines,
+    effective_hooks_dir, family_sites, follow_from_hook, follow_running_binary, hook_names,
+    install_family_hooks, is_debug_build, report_lines, RunningBinary,
 };
 pub(crate) use manifest::seed_manifest_baseline;
 pub(crate) use originals::{spooled_sessions, SpooledSession};

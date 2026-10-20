@@ -76,7 +76,7 @@ planted under an undeclared name changed no compared byte.
 | `full.jsonl` | one line per archived canonical event |
 | `metadata.json` | header: sessions, recorded Merkle root, `canon_version`, task list, token rollups |
 | `redaction_report.json` | counts only — what redaction removed, never what |
-| `transcript.jsonl`, `transcript.compact.jsonl` | the transcript, full and compacted |
+| `transcript.jsonl`, `transcript.compact.jsonl` | the transcript, full and compacted; a turn-end checkpoint can store the full one as `transcript.segments/NNNNNN` instead |
 | `sessions/<index>/metadata.json` | per-session headers (2+ sessions) |
 | `tasks/<tool-use-id>/{metadata.json, transcript.jsonl, transcript.compact.jsonl}` | one subtree per subagent, sealed through the same gate; its metadata names the agent, the spawn (`matched`, or `unmatched` when no dispatching call was found), the subagent type, the parent session, worktree provenance, start and end instants, and the `bytes` and `sha256` of the sealed transcript — or `task_transcript`: `missing`, `unreadable` or `unsealed` |
 | `tool-results/<tool-use-id>.txt` | a tool result the client spilled to a file of its own, redacted and sealed beside the transcript that names it (a subagent's inside its `tasks/<id>/`) |
@@ -104,6 +104,9 @@ design: a secret never reaches durable storage, so a masked value is the record
 and not a loss; and a thinking block's `signature` is an opaque replay token
 rather than content, so the gate masks it as high-entropy text while the
 thinking text itself is kept.
+A checkpoint sealed at a turn end can store that transcript as line-aligned parts, `transcript.segments/NNNNNN`, each turn adding one part past the last cut the gate admits as safe; a prior part that fails its read-back, or a changed pack set, reseals the whole document instead.
+Every leaf, `content_hash.txt` input and id is still computed over the whole document, the parts' concatenation, so the layout needs no id rule of its own.
+One resolver answers the name `transcript.jsonl` for a segmented shard (a subagent's under `tasks/<id>/` too), and a missing part, a malformed count or both layouts at once read as absent, never as a shorter transcript.
 
 Fallback counts live in `redaction_report.json` for the parent transcript pair,
 with a checked mirror in parent metadata, and in each task's metadata for that
@@ -423,6 +426,9 @@ native passes.
   rebuild derives the projection from git, so if git changed it agrees with the
   change. The message names the checkpoint. If only the projection drifted, deleting
   `projection.db` and running `rift rebuild` restores agreement safely.
+- **Doctor's `turn_seals`, "segment-mismatch" or "lagging":** not a verify finding.
+  A mismatch means the session end's whole seal already replaced the turn parts.
+  A lag means turn-end seals stopped landing, so look at the worker's parked jobs (`rift session retry`, [§3.10](03-capture.md#310-the-detached-worker)).
 
 ---
 

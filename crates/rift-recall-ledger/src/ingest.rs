@@ -22,7 +22,7 @@ use rift_recall_substrate::{CheckpointShard, SubstrateReader};
 use rift_recall_types::checkpoint::{CheckpointMetadata, CostEstimate, ToolCallRecord};
 use rift_store::{CanonicalStore, Value};
 
-use crate::graph::{file_read_id, file_revision_id, sha256_id, Built, INGEST_TS};
+use crate::graph::{file_read_id, file_revision_id, sha256_id, Built};
 use crate::FileRead;
 use resume::{record_resume_points, resume_frontier, ResumeFrontier};
 
@@ -232,6 +232,11 @@ pub struct IngestOptions {
     /// no entry ingests as 0 tokens plus a counted
     /// `IssueKind::TokenUnresolved` — measured or absent, never a guess.
     pub token_estimate_by_hash: BTreeMap<String, u32>,
+    /// When this pass ran, in epoch milliseconds: the time each watermark
+    /// row records, which is when the checkpoints it reached became
+    /// queryable. Production passes the system clock; the default 0 is the
+    /// fixed time tests and rebuild comparisons use, so their rows match.
+    pub now_ms: i64,
 }
 
 /// What every read row of one checkpoint shares: the shard, whose ordinal
@@ -304,12 +309,18 @@ fn screened_commit_oid(commit: Option<&str>) -> Option<String> {
         .then(|| oid.to_ascii_lowercase())
 }
 
-/// Push whichever of the two containment rows this header supports.
-/// Neither is invented: a header with no `commit` gets no anchor row, and a
-/// shard with no `worktree` member gets no member row.
+/// Push whichever containment rows this header supports. None is invented:
+/// a header with no `commit` gets no anchor row, a shard with no `worktree`
+/// member gets no member row, and only an anchorless seal gets an observed
+/// head row, so an anchor and a seen head never stand side by side.
 fn push_containment_rows(b: &mut Built, cid: &str, meta: &CheckpointMetadata) {
-    if let Some(oid) = screened_commit_oid(meta.commit.as_deref()) {
-        b.checkpoint_commit(cid, &oid);
+    match screened_commit_oid(meta.commit.as_deref()) {
+        Some(oid) => b.checkpoint_commit(cid, &oid),
+        None => {
+            if let Some(oid) = screened_commit_oid(meta.observed_head.as_deref()) {
+                b.checkpoint_observed_head(cid, &oid);
+            }
+        }
     }
     if let Some(member) = meta.worktree.as_ref() {
         b.checkpoint_worktree(cid, member);
@@ -701,14 +712,15 @@ pub(crate) async fn ingest_planned(
 
     // Durable incremental-ingest evidence: one append-only row per dialect,
     // and the stream position its tip held.
-    record_resume_points(store, &plan.shards, &tips).await?;
+    record_resume_points(store, &plan.shards, &tips, opts.now_ms).await?;
 
     // Changed hunks between consecutive revisions of each read path.
     report.hunks = persist_read_hunks(store, reader).await?;
     Ok(report)
 }
 
-/// Append one `ingest_watermark` row; a row already there is kept.
+/// Append one `ingest_watermark` row stamped `ingested_at`; a row already
+/// there is kept, so its first time stands.
 ///
 /// # Errors
 /// Propagates store write errors.
@@ -717,6 +729,7 @@ pub(crate) async fn record_watermark(
     watermark_id: &str,
     branch: &str,
     tip: &str,
+    ingested_at: i64,
 ) -> Result<()> {
     store
         .insert_or_ignore(
@@ -732,7 +745,7 @@ pub(crate) async fn record_watermark(
                 Value::text(watermark_id),
                 Value::text(branch),
                 Value::text(tip),
-                Value::Int(INGEST_TS),
+                Value::Int(ingested_at),
                 Value::Int(1),
             ],
         )
@@ -1098,6 +1111,7 @@ mod tests {
             .collect(),
             default_developer: Some("dev_default".to_string()),
             token_estimate_by_hash: BTreeMap::new(),
+            now_ms: 0,
         };
         block(ingest_with(&store, &sub, &opts)).unwrap();
         let dev_of = |cid: &str| {
@@ -1333,5 +1347,30 @@ mod tests {
         );
         assert_eq!(count(&store, "n_checkpoint_commit"), 0);
         assert_eq!(count(&store, "n_checkpoint_worktree"), 0);
+    }
+
+    /// An anchorless turn-end seal's observed head is mirrored beside its
+    /// member; an anchored shard keeps its anchor alone, whatever else its
+    /// header says.
+    #[test]
+    fn an_ingested_anchorless_seal_records_its_observed_head_and_an_anchored_one_does_not() {
+        let seal = br#"{"observed_head":"DDEE","worktree":{"name":"main","token":"0123456789ab","linked":false,"branch":"main"}}"#;
+        let anchored = br#"{"commit":"aabb","observed_head":"ccdd"}"#;
+        let sub = MemorySubstrate::local()
+            .with_shard(shard("c1", 1))
+            .with_shard(shard("c2", 2))
+            .with_artifact("c1", "metadata.json", seal)
+            .with_artifact("c2", "metadata.json", anchored);
+        let store = recall_store();
+        block(ingest(&store, &sub)).unwrap();
+        let rows = block(store.query(
+            "SELECT node_id, observed_head FROM n_checkpoint_observed_head",
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 1, "an anchored shard gets no observed head row");
+        assert_eq!(rows[0].get_text(0).unwrap(), "c1");
+        assert_eq!(rows[0].get_text(1).unwrap(), "ddee");
+        assert_eq!(count(&store, "n_checkpoint_commit"), 1);
     }
 }

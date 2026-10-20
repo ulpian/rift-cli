@@ -4,6 +4,7 @@
 //! honest. Separate because it is the one place a checkpoint is minted.
 
 mod assembly;
+mod carry;
 mod originals;
 mod outlines;
 mod spills;
@@ -21,6 +22,7 @@ use super::{now_ms, projection_db_at};
 
 pub(crate) use self::assembly::assemble_session;
 use self::assembly::SessionAssembly;
+use self::assembly::{assemble_session_end, assemble_turn_end};
 pub(super) use self::outlines::bind_and_cache_outlines;
 use self::outlines::bind_session_outlines;
 pub(crate) use self::spills::contained;
@@ -121,23 +123,27 @@ pub(super) fn archive_in_git_hook(
     // assembly, same boundary discipline as the post-commit worker. A git hook
     // keeps no phase timings, so its timer is the disabled one.
     let untimed = crate::hooktime::HookTimer::new("archive-now", false);
+    // A turn end seals the main transcript from its new lines alone; a
+    // session end seals only the tail its turn ends left; every other road
+    // seals it whole.
+    use rift_shadow::hooks::strategy::ArchiveReason;
+    let turn_end = decision.reason == ArchiveReason::TurnEnd;
+    let assemble = match decision.reason {
+        ArchiveReason::TurnEnd => assemble_turn_end,
+        ArchiveReason::SessionEnd => assemble_session_end,
+        _ => assemble_session,
+    };
     let SessionAssembly {
         raw,
         facts,
         packs,
         notes,
-        mut transcript,
+        transcript,
         transcript_raw_lines,
         tasks,
-    } = assemble_session(&untimed, rt, store, &repo, agent, session)?;
+        turn_read,
+    } = assemble(&untimed, rt, store, &repo, agent, session)?;
     report_pack_notes(&notes);
-    // A turn-end shard replaces only the full body with the segmented seal;
-    // the originals the assembly attached are untouched, so the order is free.
-    let turn_end = decision.reason == rift_shadow::hooks::strategy::ArchiveReason::TurnEnd;
-    let sealed = transcript
-        .as_mut()
-        .filter(|_| turn_end)
-        .and_then(|pair| super::turn_end::seal_turn_full(rt, store, &repo, session, &packs, pair));
 
     let archived = rt.block_on(rift_shadow::run_decision(
         &native, store, work_tree, session, &raw, decision, commit, now, facts, &packs, transcript,
@@ -151,7 +157,7 @@ pub(super) fn archive_in_git_hook(
     if let (false, Ok(Some(_)), Some(lines)) = (turn_end, &archived, transcript_raw_lines) {
         record_transcript_progress(&repo.git_dir, session, lines, now);
     }
-    if let (Some(read), Ok(Some(id))) = (sealed, &archived) {
+    if let (Some(read), Ok(Some(id))) = (turn_read, &archived) {
         super::turn_end::frontier::record(&repo.git_dir, session, id.as_str(), read, now);
     }
     // The shard is in git; its POSITION is not, until this runs — the same
@@ -1025,6 +1031,7 @@ fn run_archive(
         transcript,
         transcript_raw_lines,
         tasks,
+        ..
     } = assemble_session(t, rt, store, repo, agent, session_id)?;
 
     let archived = t.phase("archive_native", || {
@@ -1076,6 +1083,14 @@ fn record_transcript_progress(git_dir: &Path, session_id: &str, raw_lines: u64, 
     }
 }
 
+/// A sealed transcript pair, its non-empty raw-line count, and what a
+/// turn-end seal read when one built the pair.
+type SealedTranscript = (
+    rift_shadow::backend::ArchivedTranscript,
+    u64,
+    Option<super::turn_end::frontier::SealRead>,
+);
+
 /// Read, compact and seal the session's transcript for the archive, or `None`
 /// when there is nothing to archive: no cached `transcript_path` (the agent
 /// never reported one), or the file is gone/unreadable (the agent owns it).
@@ -1086,23 +1101,18 @@ fn record_transcript_progress(git_dir: &Path, session_id: &str, raw_lines: u64, 
 /// worker's transcript-progress sidecar; a missing or unreadable sidecar reads
 /// as 0, which re-covers the whole session (self-contained shards make that a
 /// correctness no-op — only the recorded boundary widens).
+///
+/// The caller reads the file once and hands its bytes here and to the task
+/// collector, so one archive never reads the main transcript twice.
 fn session_transcript(
     git_dir: &Path,
     session_id: &str,
+    main: (&Path, &rift_core::SecretBytes),
     packs: &rift_shadow::redact::RulePackSet,
     spool: &originals::Spool,
-) -> Option<(rift_shadow::backend::ArchivedTranscript, u64)> {
-    let path = PathBuf::from(
-        rift_shadow::hooks::read_cache(
-            &crate::family::run_state::sessions_dir(git_dir),
-            session_id,
-        )
-        .ok()
-        .flatten()?
-        .transcript_path?,
-    );
-    let bytes = std::fs::read(&path).ok()?;
-    let raw = rift_core::SecretBytes::new(bytes);
+    turn: Option<&super::turn_end::TurnInputs<'_>>,
+) -> Option<SealedTranscript> {
+    let (path, raw) = main;
     let start_line = rift_shadow::hooks::read_transcript_progress(
         &crate::family::run_state::sessions_dir(git_dir),
         session_id,
@@ -1110,11 +1120,20 @@ fn session_transcript(
     .ok()
     .flatten()
     .map_or(0usize, |p| usize::try_from(p.raw_lines).unwrap_or(0));
-    match rift_shadow::archived_transcript(&raw, start_line, packs) {
-        Ok((mut pair, raw_lines)) => {
-            pair.spills = spills::of_transcript(&path, session_id, packs, raw.as_slice());
+    // A turn end seals only the lines past the previous shard's parts; it
+    // falls to the whole seal below only when that seal cannot be made.
+    let turn_sealed =
+        turn.and_then(|inputs| super::turn_end::seal_turn_pair(inputs, raw, start_line));
+    let sealed = match turn_sealed {
+        Some((pair, raw_lines, read)) => Ok((pair, raw_lines, Some(read))),
+        None => rift_shadow::archived_transcript(raw, start_line, packs)
+            .map(|(pair, lines)| (pair, u64::try_from(lines).unwrap_or(u64::MAX), None)),
+    };
+    match sealed {
+        Ok((mut pair, raw_lines, read)) => {
+            pair.spills = spills::of_transcript(path, session_id, packs, raw.as_slice());
             pair.originals = spool.claimed_by(raw.as_slice(), pair.full.as_slice());
-            Some((pair, u64::try_from(raw_lines).unwrap_or(u64::MAX)))
+            Some((pair, raw_lines, read))
         }
         Err(e) => {
             // Unreachable for any transcript since the gate became total: a

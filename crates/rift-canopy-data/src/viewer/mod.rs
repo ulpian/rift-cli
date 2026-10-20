@@ -17,6 +17,7 @@ mod catalogue;
 mod detail;
 mod diff;
 mod lifecycle;
+mod seal;
 mod text;
 mod transcript;
 

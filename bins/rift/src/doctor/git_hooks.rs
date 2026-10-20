@@ -40,6 +40,34 @@ fn doctor_hooks_target_with(
     fix: bool,
     rift_bin: Option<std::path::PathBuf>,
 ) -> (String, serde_json::Value) {
+    // The self-heal order: the record moves to the running binary first, so
+    // every repair after it (these hooks, then the members' manifests in the
+    // worktree leg) is written from a record that already names it.
+    let moved = fix
+        .then(|| {
+            let running = hooks::RunningBinary {
+                path: rift_bin.clone()?,
+                screen: rift_shadow::hooks::is_transient,
+            };
+            hooks::follow_running_binary(repo, &running)
+        })
+        .flatten();
+    let (human, mut json) = hooks_target_leg(repo, fix, rift_bin);
+    let Some(line) = moved else {
+        return (human, json);
+    };
+    if let Some(map) = json.as_object_mut() {
+        map.insert("record".to_owned(), serde_json::json!(line));
+    }
+    (format!("\n  record:         {line}{human}"), json)
+}
+
+/// The hooks leg proper, once the record has been reconciled.
+fn hooks_target_leg(
+    repo: &std::path::Path,
+    fix: bool,
+    rift_bin: Option<std::path::PathBuf>,
+) -> (String, serde_json::Value) {
     let Ok(paths) = rift_git::discover(repo) else {
         return (String::new(), serde_json::json!({ "readable": false }));
     };
@@ -307,10 +335,10 @@ fn retired_hooks(dir: &std::path::Path) -> Vec<(String, String)> {
 }
 
 /// The family's binary of record: what it names, whether that binary is still
-/// there, and whether the hooks agree with it.
+/// there, and whether the hooks agree with it, as one closed word.
 ///
 /// Report-only. The record is a note about the hooks, so a note that disagrees
-/// with them is corrected by the next install, never by a reader.
+/// with them is corrected by the next install or `--fix`, never by a reader.
 pub(super) fn doctor_binary_of_record(repo: &std::path::Path) -> (String, serde_json::Value) {
     let Ok(paths) = rift_git::discover(repo) else {
         return (String::new(), serde_json::json!({ "readable": false }));
@@ -326,18 +354,6 @@ pub(super) fn doctor_binary_of_record(repo: &std::path::Path) -> (String, serde_
             serde_json::json!({ "recorded": false, "path": path.display().to_string() }),
         );
     };
-    let live = record.is_live();
-    let mut human = format!(
-        "\n  binary of record: {} (by {}, {} superseded){}",
-        record.rift_bin,
-        record.recorded_by,
-        record.history.len(),
-        if live {
-            ""
-        } else {
-            " — GONE; `rift doctor --fix` re-points the hooks"
-        }
-    );
     let dir = hooks::effective_hooks_dir(repo).unwrap_or_else(|| paths.common_dir.join("hooks"));
     let elsewhere: Vec<String> = rift_shadow::hooks::HOOK_NAMES
         .iter()
@@ -345,9 +361,19 @@ pub(super) fn doctor_binary_of_record(repo: &std::path::Path) -> (String, serde_
         .filter(|target| target != record.path())
         .map(|target| target.display().to_string())
         .collect();
+    let state = record_state(&record, &sites, elsewhere.is_empty());
+    let mut human = format!(
+        "\n  binary of record: {state}: {} (by {}, {} superseded)",
+        record.rift_bin,
+        record.recorded_by,
+        record.history.len(),
+    );
+    if state != "agrees" {
+        human.push_str(&format!("\n    {}", state_remedy(state)));
+    }
     if !elsewhere.is_empty() {
         human.push_str(&format!(
-            "\n    {} hook(s) point elsewhere ({}) — `rift hooks install --repoint` records what is in force",
+            "\n    {} hook(s) run {}",
             elsewhere.len(),
             elsewhere.first().map_or("?", String::as_str)
         ));
@@ -359,11 +385,47 @@ pub(super) fn doctor_binary_of_record(repo: &std::path::Path) -> (String, serde_
             "path": path.display().to_string(),
             "rift_bin": record.rift_bin,
             "recorded_by": record.recorded_by.as_str(),
-            "live": live,
+            "state": state,
+            "live": record.is_live(),
             "superseded": record.history.len(),
             "hooks_elsewhere": elsewhere.len(),
         }),
     )
+}
+
+/// The record's state in one closed word, worst first: `missing` (the binary
+/// is gone), `debug` (a debug-profile build), `throwaway` (a temp, `deps/` or
+/// member build), `diverges` (the hooks run another binary), else `agrees`.
+///
+/// A reader that wants more than the word reads the other fields; the word is
+/// closed so a script can switch on it.
+fn record_state(
+    record: &rift_shadow::hooks::BinaryOfRecord,
+    sites: &rift_shadow::hooks::FamilySites,
+    hooks_agree: bool,
+) -> &'static str {
+    if !record.is_live() {
+        return "missing";
+    }
+    if hooks::is_debug_build(record.path()) {
+        return "debug";
+    }
+    if rift_shadow::hooks::is_transient(record.path(), sites).is_some() {
+        return "throwaway";
+    }
+    if hooks_agree {
+        "agrees"
+    } else {
+        "diverges"
+    }
+}
+
+/// What to run for a record that does not agree.
+fn state_remedy(state: &str) -> &'static str {
+    match state {
+        "diverges" => "`rift doctor --fix` from the binary the family should run moves the record and hooks together",
+        _ => "run `rift doctor --fix` or `rift enable` from a release binary; it moves the record and hooks together",
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +593,85 @@ mod tests {
         assert!(std::fs::read_to_string(&theirs)
             .unwrap()
             .contains("echo theirs"));
+    }
+
+    /// A record the hooks disagree with is named `diverges`, and the report
+    /// changes no file: the record and every hook read the same afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_names_a_record_the_hooks_diverge_from_and_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let hooks_dir = install_five_hooks(&git_dir, &root, std::path::Path::new("/bin/echo"));
+        let first = hooks_dir.join(rift_shadow::hooks::HOOK_NAMES[0]);
+        std::fs::remove_file(&first).unwrap();
+        std::os::unix::fs::symlink("/bin/cat", &first).unwrap();
+        let record_file =
+            rift_shadow::hooks::binary_of_record_path(&hooks::family_sites(&git_dir).dir);
+        let before = std::fs::read(&record_file).unwrap();
+
+        let (human, json) = doctor_binary_of_record(&root);
+        let (_, _) = doctor_hooks_target_with(&root, false, Some("/bin/sh".into()));
+
+        assert_eq!(json["state"], "diverges", "{human}");
+        assert!(human.contains("binary of record: diverges"), "{human}");
+        assert_eq!(std::fs::read(&record_file).unwrap(), before);
+        assert_eq!(
+            std::fs::read_link(&first).unwrap(),
+            std::path::Path::new("/bin/cat")
+        );
+    }
+
+    /// A record naming a binary that is gone, or a debug build, gets its own
+    /// closed word.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_names_a_missing_or_debug_record_in_one_word() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let debug = tmp.path().join("checkout/target/debug/rift");
+        std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        std::fs::copy("/bin/echo", &debug).unwrap();
+        let gone = tmp.path().join("gone/rift");
+        for (bin, word) in [(&debug, "debug"), (&gone, "missing")] {
+            let policy = rift_shadow::hooks::HookInstallPolicy::Repoint {
+                allow_transient: true,
+            };
+            let by = rift_shadow::hooks::RecordedBy::HooksInstall;
+            hooks::install_family_hooks(&git_dir, &root, None, bin.clone(), policy, by).unwrap();
+
+            let (human, json) = doctor_binary_of_record(&root);
+
+            assert_eq!(json["state"], word, "{human}");
+        }
+    }
+
+    /// `--fix` from a release binary other than the record's moves the record
+    /// first and reports it before anything the hooks leg repaired.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_fix_moves_the_record_before_the_hooks_and_says_so_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let git_dir = rift_git::test_support::fake_repo(&root).unwrap();
+        let hooks_dir = install_five_hooks(&git_dir, &root, std::path::Path::new("/bin/echo"));
+
+        let (human, json) = doctor_hooks_target_with(&root, true, Some("/bin/cat".into()));
+
+        let record = human
+            .find("moved from /bin/echo to /bin/cat")
+            .expect(&human);
+        let hooks_line = human.find("\n  hooks:").expect(&human);
+        assert!(record < hooks_line, "{human}");
+        assert!(json["record"].as_str().is_some());
+        let (_, record_json) = doctor_binary_of_record(&root);
+        assert_eq!(record_json["rift_bin"], "/bin/cat");
+        assert_eq!(record_json["superseded"], 1);
+        assert_eq!(record_json["state"], "agrees");
+        let post_commit = std::fs::read_link(hooks_dir.join("post-commit")).unwrap();
+        assert_eq!(post_commit, std::path::Path::new("/bin/cat"));
     }
 
     /// The five hooks as the installer writes them, so a doctor fixture starts

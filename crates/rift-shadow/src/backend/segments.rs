@@ -10,11 +10,19 @@ use std::collections::BTreeMap;
 
 use rift_core::{RedactedBytes, Result, RiftError};
 use rift_recall_substrate::parse::segments::{
-    segment_name, SEGMENT_PACKS_KEY, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_KEY,
+    compact_segment_name, join_compact_segments, segment_name, COMPACT_SEGMENTS_DIR,
+    COMPACT_SEGMENTS_KEY, SEGMENT_PACKS_KEY, SEGMENT_RAW_LINES_KEY, TRANSCRIPT_SEGMENTS_DIR,
+    TRANSCRIPT_SEGMENTS_KEY,
 };
 use rift_recall_substrate::worktree::git_blob_oid;
 
-use super::TRANSCRIPT_FULL_NAME;
+use super::RedactionFallback;
+
+/// The metadata member listing each full part's redaction fallback counts as
+/// `[lines, placeholders]`, in part order: the whole pair's
+/// `redaction_flat_fallback` says how many lines fell back, this says which
+/// turn's part holds them.
+pub const SEGMENT_FALLBACK_KEY: &str = "segment_redaction_fallback";
 
 /// The redacted full transcript as the shard stores it.
 ///
@@ -25,6 +33,10 @@ pub enum TranscriptBody {
     Whole(RedactedBytes),
     /// The parts of a transcript sealed turn by turn.
     Segments(Segments),
+    /// One blob an earlier turn-end shard holds for the same raw bytes,
+    /// written again by its oid alone (ruling "L-5 turn-end assembly must not
+    /// re-redact"): an unchanged subagent transcript or spooled original.
+    Carried(CarriedPart),
 }
 
 /// Line-aligned parts, each already through the redaction gate. The fields
@@ -40,6 +52,20 @@ pub struct Segments {
     /// The fingerprint of the packs the sealed part ran under; `None` for a
     /// body built from parts alone, which a later turn never carries.
     packs: Option<String>,
+    /// Which transcript the parts make up; it names the tree and the members.
+    layout: Layout,
+    /// Each part's fallback counts, in part order; empty where none were
+    /// recorded (a body built from parts alone, or a compact one).
+    fallbacks: Vec<RedactionFallback>,
+}
+
+/// The two transcripts a shard can segment. They differ in how parts make
+/// the document: the full form concatenates, while a compact part may
+/// re-emit a record an earlier part holds, so the compact form joins.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Full,
+    Compact,
 }
 
 /// One part of a segmented body.
@@ -125,6 +151,37 @@ impl Segments {
         })
     }
 
+    /// The earlier parts carried by oid and nothing new: a session end whose
+    /// turn-end seals already covered every line.
+    ///
+    /// # Errors
+    /// As [`Segments::new`].
+    pub fn carried(earlier: Vec<CarriedPart>, packs: String) -> Result<Self> {
+        let parts = earlier.into_iter().map(SegmentPart::Carried).collect();
+        Ok(Self {
+            packs: Some(packs),
+            ..Self::of(parts)?
+        })
+    }
+
+    /// The compact transcript's parts: the earlier ones carried by oid, then
+    /// this turn's sealed part when the turn changed any record. The body
+    /// reads as their join, which is what every leaf is computed over.
+    ///
+    /// # Errors
+    /// As [`Segments::new`].
+    pub fn compact(earlier: Vec<CarriedPart>, new: Option<RedactedBytes>) -> Result<Self> {
+        let mut parts: Vec<SegmentPart> = earlier.into_iter().map(SegmentPart::Carried).collect();
+        parts.extend(new.map(SegmentPart::Sealed));
+        let of = Self::of(parts)?;
+        let pieces: Vec<Vec<u8>> = of.parts.iter().map(|p| p.as_slice().to_vec()).collect();
+        Ok(Self {
+            joined: join_compact_segments(&pieces),
+            layout: Layout::Compact,
+            ..of
+        })
+    }
+
     fn of(parts: Vec<SegmentPart>) -> Result<Self> {
         if parts.is_empty() {
             return Err(RiftError::validity("a segmented transcript has no parts"));
@@ -143,7 +200,28 @@ impl Segments {
             parts,
             joined,
             packs: None,
+            layout: Layout::Full,
+            fallbacks: Vec::new(),
         })
+    }
+
+    /// Record each part's fallback counts, in part order.
+    ///
+    /// # Errors
+    /// [`RiftError::Validity`] when the counts do not name every part once.
+    pub fn with_fallbacks(self, fallbacks: Vec<RedactionFallback>) -> Result<Self> {
+        if fallbacks.len() != self.parts.len() {
+            return Err(RiftError::validity(
+                "segment fallback counts must name every part once",
+            ));
+        }
+        Ok(Self { fallbacks, ..self })
+    }
+
+    /// The fallback counts recorded per part; empty where none were.
+    #[must_use]
+    pub fn fallbacks(&self) -> &[RedactionFallback] {
+        &self.fallbacks
     }
 
     /// The fingerprint of the packs the parts were sealed under, if recorded.
@@ -156,6 +234,22 @@ impl Segments {
     #[must_use]
     pub fn parts(&self) -> &[SegmentPart] {
         &self.parts
+    }
+
+    /// The tree the parts are written under.
+    #[must_use]
+    pub fn dir(&self) -> &'static str {
+        match self.layout {
+            Layout::Full => TRANSCRIPT_SEGMENTS_DIR,
+            Layout::Compact => COMPACT_SEGMENTS_DIR,
+        }
+    }
+
+    fn part_name(&self, index: usize) -> String {
+        match self.layout {
+            Layout::Full => segment_name(index),
+            Layout::Compact => compact_segment_name(index),
+        }
     }
 
     /// Each part's line count, which `segment_raw_lines` records: the gate is
@@ -179,6 +273,18 @@ impl TranscriptBody {
         match self {
             Self::Whole(whole) => whole.as_slice(),
             Self::Segments(segments) => &segments.joined,
+            Self::Carried(carried) => carried.as_slice(),
+        }
+    }
+
+    /// The git blob id this body is written as when it is one blob; `None`
+    /// for a segmented body, which is a tree.
+    #[must_use]
+    pub fn blob_oid(&self) -> Option<String> {
+        match self {
+            Self::Whole(whole) => Some(git_blob_oid(whole.as_slice())),
+            Self::Carried(carried) => Some(carried.oid().to_owned()),
+            Self::Segments(_) => None,
         }
     }
 }
@@ -198,31 +304,68 @@ pub(super) fn insert_segment_members(
     let TranscriptBody::Segments(segments) = body else {
         return;
     };
+    if segments.layout == Layout::Compact {
+        // A compact part may re-emit a record, so its line count says nothing
+        // a reader can check; the count of parts is the whole layout.
+        obj.insert(COMPACT_SEGMENTS_KEY.into(), segments.parts.len().into());
+        return;
+    }
     obj.insert(TRANSCRIPT_SEGMENTS_KEY.into(), segments.parts.len().into());
     obj.insert(SEGMENT_RAW_LINES_KEY.into(), segments.raw_lines().into());
     if let Some(packs) = &segments.packs {
         obj.insert(SEGMENT_PACKS_KEY.into(), packs.clone().into());
     }
+    if !segments.fallbacks.is_empty() {
+        let counts: Vec<[u32; 2]> = segments
+            .fallbacks
+            .iter()
+            .map(|f| [f.lines, f.placeholders])
+            .collect();
+        obj.insert(SEGMENT_FALLBACK_KEY.into(), serde_json::json!(counts));
+    }
+}
+
+/// The per-part fallback counts a metadata document records, in part order;
+/// empty when the member is absent or any entry is not `[lines, placeholders]`.
+#[must_use]
+pub fn segment_fallbacks(meta: &serde_json::Value) -> Vec<RedactionFallback> {
+    let Some(entries) = meta.get(SEGMENT_FALLBACK_KEY).and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let count = |v: Option<&serde_json::Value>| {
+        v.and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    entries
+        .iter()
+        .map(|e| {
+            let pair = e.as_array()?;
+            Some(RedactionFallback {
+                lines: count(pair.first())?,
+                placeholders: count(pair.get(1))?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 /// The artifact-map entries a body occupies under `dir` (`""` or
-/// `tasks/<id>/`), named exactly as `write_shard` names them.
+/// `tasks/<id>/`), named exactly as `write_shard` names them; `whole` is the
+/// blob's name when the body is not segmented.
 pub(super) fn insert_body_artifacts(
     out: &mut BTreeMap<String, Vec<u8>>,
     dir: &str,
+    whole: &str,
     body: &TranscriptBody,
 ) {
     match body {
-        TranscriptBody::Whole(whole) => {
-            out.insert(
-                format!("{dir}{TRANSCRIPT_FULL_NAME}"),
-                whole.as_slice().to_vec(),
-            );
+        TranscriptBody::Whole(_) | TranscriptBody::Carried(_) => {
+            out.insert(format!("{dir}{whole}"), body.as_slice().to_vec());
         }
         TranscriptBody::Segments(segments) => {
             for (index, part) in segments.parts.iter().enumerate() {
                 out.insert(
-                    format!("{dir}{}", segment_name(index)),
+                    format!("{dir}{}", segments.part_name(index)),
                     part.as_slice().to_vec(),
                 );
             }

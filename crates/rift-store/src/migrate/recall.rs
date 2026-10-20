@@ -1,4 +1,4 @@
-//! The recall projection's migration set (`recall.db`): the seventeen
+//! The recall projection's migration set (`recall.db`): the nineteen
 //! checksum-locked SQL builders over the recall registry slices and their
 //! secondary indexes.
 //!
@@ -13,7 +13,7 @@ type RecallMigration = (&'static str, fn() -> String);
 
 /// Every recall migration's name and SQL builder, in version order: the
 /// position is the version, so a row appends and never moves.
-const RECALL_MIGRATIONS: [RecallMigration; 17] = [
+const RECALL_MIGRATIONS: [RecallMigration; 19] = [
     ("recall_core", recall_canonical_schema_sql),
     ("recall_outcome_labels", recall_outcome_label_schema_sql),
     ("recall_key_custody", recall_key_custody_schema_sql),
@@ -46,6 +46,11 @@ const RECALL_MIGRATIONS: [RecallMigration; 17] = [
         "recall_ingest_watermark_positions",
         recall_ingest_watermark_position_schema_sql,
     ),
+    (
+        "recall_checkpoint_observed_heads",
+        recall_checkpoint_observed_head_schema_sql,
+    ),
+    ("recall_would_save_bytes", recall_would_save_schema_sql),
 ];
 
 /// The recall projection's migration set (applied to a fresh `recall.db`).
@@ -65,7 +70,9 @@ const RECALL_MIGRATIONS: [RecallMigration; 17] = [
 /// version 15 adds the `n_window_row` relation a checkpoint's frozen window
 /// rows are read back into; version 16 adds the `summary_token_count` costs
 /// beside each bound outline; version 17 adds the `ingest_watermark_position`
-/// stream position beside each ingest watermark.
+/// stream position beside each ingest watermark; version 18 adds the
+/// `n_checkpoint_observed_head` a turn-end seal saw; version 19 adds the
+/// `memd_audit_would_save` bytes an observing tool-output row carries.
 #[must_use]
 pub fn recall_migrations() -> Vec<Migration> {
     RECALL_MIGRATIONS
@@ -503,6 +510,60 @@ fn recall_ingest_watermark_position_schema_sql() -> String {
     sql
 }
 
+/// The v18 additive recall migration: the `n_checkpoint_observed_head`
+/// relation, the `HEAD` each anchorless turn-end seal saw.
+///
+/// Found by name for the reason v13's relation is. No secondary index: the
+/// relation is read whole, keyed by checkpoint.
+fn recall_checkpoint_observed_head_schema_sql() -> String {
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "n_checkpoint_observed_head")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
+/// The v19 additive recall migration: the `memd_audit_would_save`
+/// relation, the bytes an observing tool-output row would have spared.
+///
+/// Found by name for the reason v13's relation is. No secondary index: the
+/// relation is read by its key, joined from the audit row.
+fn recall_would_save_schema_sql() -> String {
+    let tables = || {
+        crate::schema::recall_canonical_tables()
+            .iter()
+            .filter(|table| table.name == "memd_audit_would_save")
+    };
+    let mut sql = String::new();
+    for table in tables() {
+        sql.push_str(&table.create_table_sql());
+        sql.push('\n');
+        sql.push_str(&table.guard_trigger_sql());
+        sql.push('\n');
+    }
+    for table in tables() {
+        sql.push_str(&format!(
+            "INSERT INTO _schema_version(table_name, schema_version) VALUES ('{}', 1);\n",
+            table.name
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,7 +721,30 @@ mod tests {
             &[
                 "summary_token_count",
                 "CREATE TABLE IF NOT EXISTS ingest_watermark ",
+                "n_checkpoint_observed_head",
             ],
+        ),
+        (
+            "recall_checkpoint_observed_heads",
+            &[
+                "CREATE TABLE IF NOT EXISTS n_checkpoint_observed_head",
+                "n_checkpoint_observed_head_no_update",
+                "n_checkpoint_observed_head_no_delete",
+            ],
+            &[
+                "ingest_watermark_position",
+                "n_checkpoint_commit",
+                "memd_audit_would_save",
+            ],
+        ),
+        (
+            "recall_would_save_bytes",
+            &[
+                "CREATE TABLE IF NOT EXISTS memd_audit_would_save",
+                "memd_audit_would_save_no_update",
+                "memd_audit_would_save_no_delete",
+            ],
+            &["n_checkpoint_observed_head", "memd_audit_pull_claim"],
         ),
     ];
 
@@ -671,7 +755,7 @@ mod tests {
     #[test]
     fn every_recall_version_creates_only_its_own_relations() {
         let migs = recall_migrations();
-        assert_eq!(migs.len(), 17);
+        assert_eq!(migs.len(), 19);
         for (version, (name, creates, excludes)) in VERSION_CONTENTS.iter().enumerate() {
             assert_eq!(migs[version].name, *name);
             let sql = &migs[version].sql;
@@ -693,11 +777,55 @@ mod tests {
     fn recall_migrations_apply_and_rerun_cleanly() {
         let s = store();
         let out = apply_migrations(&s, &recall_migrations()).unwrap();
-        assert_eq!(out.applied, 17);
-        assert_eq!(out.high_water, 17);
+        assert_eq!(out.applied, 19);
+        assert_eq!(out.high_water, 19);
         let again = apply_migrations(&s, &recall_migrations()).unwrap();
         assert_eq!(again.applied, 0);
-        assert_eq!(again.skipped, 17);
+        assert_eq!(again.skipped, 19);
+    }
+}
+
+#[cfg(test)]
+mod would_save_tests {
+    use super::*;
+    use crate::migrate::apply_migrations;
+    use crate::migrate::fixtures::store;
+
+    const AUDIT: &str = "INSERT INTO memd_audit_event \
+        (audit_id, verb, handle, reason, tokens_returned, tokens_avoided, recorded_at, \
+         schema_version) \
+        VALUES ('a1', 'memd.tool_output_held', NULL, NULL, 0, 0, 5, 1)";
+
+    const ROW: &str = "INSERT INTO memd_audit_would_save \
+        (audit_id, would_save_bytes, schema_version) VALUES ('a1', 740, 1)";
+
+    fn count(s: &crate::SqliteStore, table: &str) -> i64 {
+        s.with_conn(|c| c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_store_at_v18_keeps_its_audit_rows_and_gains_the_would_save_relation() {
+        let s = store();
+        let migs = recall_migrations();
+        assert_eq!(apply_migrations(&s, &migs[..18]).unwrap().high_water, 18);
+        assert_eq!(s.execute_raw(AUDIT).unwrap(), 1);
+        let after = apply_migrations(&s, &migs).unwrap();
+        assert_eq!((after.applied, after.high_water), (1, 19));
+        assert_eq!(count(&s, "memd_audit_event"), 1);
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+        assert_eq!(count(&s, "memd_audit_would_save"), 1);
+    }
+
+    #[test]
+    fn a_would_save_row_can_be_neither_updated_nor_deleted() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s.execute_raw(ROW).unwrap();
+        let update = s.execute_raw("UPDATE memd_audit_would_save SET would_save_bytes = 9");
+        let delete = s.execute_raw("DELETE FROM memd_audit_would_save");
+        assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
+        assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
     }
 }
 
@@ -910,7 +1038,7 @@ mod watermark_position_tests {
         let before = apply_migrations(&s, &migs[..16]).unwrap();
         assert_eq!(before.high_water, 16);
         assert_eq!(s.execute_raw(WATERMARK).unwrap(), 1);
-        let after = apply_migrations(&s, &migs).unwrap();
+        let after = apply_migrations(&s, &migs[..17]).unwrap();
         assert_eq!(after.applied, 1);
         assert_eq!(after.high_water, 17);
         let kept: i64 = s
@@ -927,6 +1055,51 @@ mod watermark_position_tests {
         s.execute_raw(ROW).unwrap();
         let update = s.execute_raw("UPDATE ingest_watermark_position SET chain_seq = 9");
         let delete = s.execute_raw("DELETE FROM ingest_watermark_position");
+        assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
+        assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
+    }
+}
+
+#[cfg(test)]
+mod observed_head_tests {
+    use super::*;
+    use crate::migrate::apply_migrations;
+    use crate::migrate::fixtures::store;
+
+    const ROW: &str = "INSERT INTO n_checkpoint_observed_head \
+        (node_id, observed_head, schema_version) VALUES ('c1', 'aabb', 1)";
+
+    const POSITION: &str = "INSERT INTO ingest_watermark_position \
+        (watermark_id, chain_seq, schema_version) VALUES ('w1', 2, 1)";
+
+    #[test]
+    fn a_store_at_the_previous_version_gains_the_observed_head_relation_and_keeps_its_rows() {
+        let s = store();
+        let migs = recall_migrations();
+        let before = apply_migrations(&s, &migs[..17]).unwrap();
+        assert_eq!(before.high_water, 17);
+        assert_eq!(s.execute_raw(POSITION).unwrap(), 1);
+        let after = apply_migrations(&s, &migs[..18]).unwrap();
+        assert_eq!(after.applied, 1);
+        assert_eq!(after.high_water, 18);
+        let kept: i64 = s
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM ingest_watermark_position", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert_eq!(s.execute_raw(ROW).unwrap(), 1);
+    }
+
+    #[test]
+    fn an_observed_head_row_can_be_neither_updated_nor_deleted() {
+        let s = store();
+        apply_migrations(&s, &recall_migrations()).unwrap();
+        s.execute_raw(ROW).unwrap();
+        let update = s.execute_raw("UPDATE n_checkpoint_observed_head SET observed_head = 'cc'");
+        let delete = s.execute_raw("DELETE FROM n_checkpoint_observed_head");
         assert!(matches!(update, Err(rift_core::RiftError::Immutability(_))));
         assert!(matches!(delete, Err(rift_core::RiftError::Immutability(_))));
     }

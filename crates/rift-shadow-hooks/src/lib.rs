@@ -37,6 +37,7 @@ pub mod session_cache;
 pub mod session_id;
 pub mod strategy;
 pub mod trailers;
+pub mod turn_frontier;
 pub mod wire;
 
 pub use claim::{claim_session_agent, session_owner, Claim};

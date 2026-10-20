@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::ci_meta::production_half;
 
+use super::gate_path::declared_for_tests;
 use super::{is_test_surface, line_of, rust_corpus, Leg};
 
 /// The literals a hook response is made of. A file that spells one of these is
@@ -64,10 +65,14 @@ pub fn one_gate_chokepoint(root: &Path) -> Result<Leg, String> {
 /// (the same seam, for the same reason, as the retired-vocabulary screen's).
 fn screen_chokepoint(corpus: &[(String, String)], allow_text: &str) -> Result<Leg, String> {
     let mut allow = read_allow_list(allow_text)?;
+    // The same production cut every other leg takes: a file its parent
+    // declares under `#[cfg(test)]` is test code wherever it lives, so a test
+    // module moved out to its own file is not read as a second composer.
+    let for_tests = declared_for_tests(corpus);
     let mut v = Vec::new();
     let mut allowed_sites = 0_usize;
     for (rel, text) in corpus {
-        if rel == CHOKEPOINT || is_test_surface(rel) {
+        if rel == CHOKEPOINT || is_test_surface(rel) || for_tests.contains(rel.as_str()) {
             continue;
         }
         let production = production_half(text);
@@ -213,6 +218,31 @@ mod tests {
         )];
         let leg = screen_chokepoint(&corpus, NO_ALLOWANCES).expect("the screen runs");
         assert!(leg.violations.is_empty(), "{:#?}", leg.violations);
+    }
+
+    #[test]
+    fn a_test_module_file_its_parent_declares_under_cfg_test_is_not_a_finding() {
+        let corpus = vec![
+            file(
+                "bins/rift/src/hooks/agent.rs",
+                "fn real() {}\n\n#[cfg(test)]\nmod injection_tests;\n",
+            ),
+            file(
+                "bins/rift/src/hooks/agent/injection_tests.rs",
+                "const X: &str = \"hookSpecificOutput\";\n",
+            ),
+            file(
+                "bins/rift/src/hooks/other.rs",
+                "const Y: &str = \"hookSpecificOutput\";\n",
+            ),
+        ];
+        let leg = screen_chokepoint(&corpus, NO_ALLOWANCES).expect("the screen runs");
+        assert_eq!(leg.violations.len(), 1, "{:#?}", leg.violations);
+        assert!(
+            leg.violations[0].contains("other.rs"),
+            "{:#?}",
+            leg.violations
+        );
     }
 
     /// ★ An allow-list entry covers an exact count, so a real occurrence added

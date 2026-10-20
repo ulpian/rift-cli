@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detect::{DetectionEnvironment, NativeIdeHost};
-use crate::native::{CodexHookVerdict, CodexSurface, CodexTrust};
+use crate::native::{CodexHookVerdict, CodexSurface, CodexTrust, HookComposition};
 use crate::ClientFamily;
 
 use super::{assess, client_surface, Facts, Finding, Reason, Severity, Surface};
@@ -349,4 +349,33 @@ fn handlers_judged(trust: &CodexTrust, verdict: CodexHookVerdict) -> usize {
 /// token for any other: the token is what the user typed to enable it.
 fn agent_name(agent: &str) -> &str {
     ClientFamily::from_token(agent).map_or(agent, |family| family.display_name())
+}
+
+/// The sentence for one hook composition word, `None` for `owned`.
+///
+/// Doctor reports these words and never rewrites the hook file: `rift enable`
+/// is the one command that rewrites an agent's hooks, so every sentence names
+/// it, and the match has no catch-all arm so a new word cannot ship silent.
+#[must_use]
+pub fn hook_composition_sentence(agent: &str, composition: HookComposition) -> Option<String> {
+    let name = agent_name(agent);
+    let enable = enable_step(agent);
+    let sentence = match composition {
+        HookComposition::Owned => return None,
+        HookComposition::Missing => {
+            format!("{name}'s hook file holds no Rift entry: {enable}.")
+        }
+        HookComposition::Stale => {
+            format!("{name}'s hook file holds an older Rift bundle: {enable} to refresh it.")
+        }
+        HookComposition::ForeignModified => format!(
+            "{name}'s Rift-like hook entries were changed by hand or sit behind a symlink, so \
+             no fingerprint proves them Rift's: settle the edit, then {enable}."
+        ),
+        HookComposition::Shadowed => format!(
+            "a hook Rift does not own answers the same tool calls in {name}'s hook file: \
+             move or remove it there, then {enable} if Rift's entries need re-wiring."
+        ),
+    };
+    Some(sentence)
 }

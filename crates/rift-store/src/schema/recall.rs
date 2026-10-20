@@ -604,6 +604,20 @@ const RECALL_TABLES: &[CanonicalTable] = &[
         primary_key: &["watermark_id"],
         unique: NO_UNIQUE,
     },
+    // --- v18 additive (observed heads) -------------------------------------------
+    CanonicalTable {
+        name: "n_checkpoint_observed_head",
+        columns: N_CHECKPOINT_OBSERVED_HEAD_COLUMNS,
+        primary_key: &["node_id"],
+        unique: NO_UNIQUE,
+    },
+    // --- v19 additive (tool-output would-save bytes) -----------------------------
+    CanonicalTable {
+        name: "memd_audit_would_save",
+        columns: MEMD_AUDIT_WOULD_SAVE_COLUMNS,
+        primary_key: &["audit_id"],
+        unique: NO_UNIQUE,
+    },
 ];
 
 /// The two relations a serve key can live in: a schema-1 decision row, or a
@@ -750,6 +764,35 @@ const SUMMARY_TOKEN_COUNT_COLUMNS: &[Column] = &[
 const INGEST_WATERMARK_POSITION_COLUMNS: &[Column] = &[
     Column::text("watermark_id"), // FK: ingest_watermark(watermark_id)
     Column::int("chain_seq"),     // 1-based position of the tip; never 0
+    Column::int("schema_version"),
+];
+
+/// Columns for the v18 `n_checkpoint_observed_head` relation: the `HEAD` a
+/// turn-end seal saw, mirrored from shard `metadata.observed_head`.
+///
+/// Its own relation rather than a column on `n_checkpoint_commit`: an
+/// observed head is not an anchor. The anchor stays one checkpoint per commit,
+/// and a second claimant on one commit is the cursor regression slice 4 fixed.
+/// The serving scope reads this only to admit an anchorless seal to the member
+/// that wrote it, on its branch, while the seen head is still in its history.
+const N_CHECKPOINT_OBSERVED_HEAD_COLUMNS: &[Column] = &[
+    Column::text("node_id"),       // FK: n_checkpoint (1:0..1)
+    Column::text("observed_head"), // hex oid, from metadata.observed_head
+    Column::int("schema_version"),
+];
+
+/// Columns for the v19 `memd_audit_would_save` relation: the bytes an
+/// observing tool-output row says a hold or a fold would have spared.
+///
+/// A sparse companion on the audit row's own key, for the reason
+/// `memd_audit_citation` is one: `memd_audit_event` is frozen, and widening
+/// it would move a checksum every deployed `recall.db` holds. A count of
+/// bytes, never tokens, because the hook that measured it does not load the
+/// tokenizer; and never summed into the realised share, because nothing was
+/// spared yet.
+const MEMD_AUDIT_WOULD_SAVE_COLUMNS: &[Column] = &[
+    Column::text("audit_id"), // FK: memd_audit_event(audit_id), 1:0..1
+    Column::int("would_save_bytes"),
     Column::int("schema_version"),
 ];
 

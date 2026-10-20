@@ -157,13 +157,14 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path, fix: bool) -> (String, serd
     let members = rift_git::family_members(&paths);
     let (run_human, run_json) = run_state_leftovers(&members, fix);
     let gone: Vec<&rift_git::FamilyMember> = members.iter().filter(|m| m.prunable).collect();
+    let (gone_human, gone_json) = gone_member_run_state(&gone, fix);
     if gone.is_empty() {
         return (
             run_human,
             serde_json::json!({ "members": members.len(), "prunable": 0, "run_state": run_json }),
         );
     }
-    let mut human = run_human;
+    let mut human = run_human + &gone_human;
     human.push_str(&format!(
         "\n  worktrees:      {} of {} member(s) have no checkout left \
          (rift never prunes one)",
@@ -178,6 +179,7 @@ pub(super) fn doctor_prunable_worktrees(repo: &Path, fix: bool) -> (String, serd
         "members": members.len(),
         "prunable": gone.len(),
         "run_state": run_json,
+        "gone_run_state": gone_json,
         "pruned": false,
         "found": gone
             .iter()
@@ -230,6 +232,47 @@ fn run_state_leftovers(
         }));
     }
     (human, serde_json::Value::Array(found))
+}
+
+/// Run state Rift still keeps for members whose checkout is provably gone:
+/// the path is absent while its parent directory is present, so an unmounted
+/// disk never counts. Each root is named with the files it holds. `--fix`
+/// removes only a root that holds no file: a queued ticket or a session
+/// journal is evidence another leg drains or names, and a gap is never
+/// erased to tidy a directory.
+fn gone_member_run_state(
+    gone: &[&rift_git::FamilyMember],
+    fix: bool,
+) -> (String, serde_json::Value) {
+    let mut human = String::new();
+    let mut found = Vec::new();
+    for member in gone.iter().filter(|m| checkout_provably_gone(&m.work_tree)) {
+        for (root, files) in crate::family::run_state::member_roots(&member.git_dir) {
+            let removed = fix && files == 0 && std::fs::remove_dir_all(&root).is_ok();
+            let fate = match (removed, files) {
+                (true, _) => "removed (empty)",
+                (false, 0) => "empty; `rift doctor --fix` removes it",
+                (false, _) => "kept until drained",
+            };
+            human.push_str(&format!(
+                "\n  run state:      gone member {} keeps {} ({files} file(s)); {fate}",
+                member.name,
+                root.display()
+            ));
+            found.push(serde_json::json!({
+                "member": member.name,
+                "root": root.display().to_string(),
+                "files": files,
+                "removed": removed,
+            }));
+        }
+    }
+    (human, serde_json::Value::Array(found))
+}
+
+/// A checkout is provably gone when its path is absent and its parent is not.
+fn checkout_provably_gone(work_tree: &Path) -> bool {
+    !work_tree.exists() && work_tree.parent().is_some_and(Path::is_dir)
 }
 
 /// The human line for one member's leftovers.
@@ -327,6 +370,12 @@ pub(super) fn doctor_worktree_wiring(repo: &Path, fix: bool) -> (String, serde_j
         if let Some(previous) = &previous {
             line.push_str(&format!(" ({previous})"));
         }
+        // The exact command, per member: `--fix` runs this adoption and
+        // nothing past it, so the report names what a repair would do.
+        let command = format!("rift worktree adopt {}", member.work_tree.display());
+        if !fix {
+            line.push_str(&format!("\n      unwired; to wire it: {command}"));
+        }
         let mut outcome = None;
         if let (Some(machine), Some(intent)) = (machine.as_ref(), intent.as_ref()) {
             let report = adopt::adopt_member(&member.work_tree, machine, intent, hooks::now_ms());
@@ -340,6 +389,8 @@ pub(super) fn doctor_worktree_wiring(repo: &Path, fix: bool) -> (String, serde_j
         found.push(serde_json::json!({
             "name": member.name,
             "work_tree": member.work_tree.display().to_string(),
+            "state": "unwired",
+            "command": command,
             "previous_attempt": previous,
             "adopted": outcome,
         }));
@@ -454,6 +505,12 @@ mod tests {
         assert!(human.contains("member"), "{human}");
         assert!(human.contains("rift worktree adopt"), "{human}");
         assert_eq!(json["unwired"], 1);
+        assert_eq!(json["found"][0]["state"], "unwired");
+        let command = json["found"][0]["command"].as_str().unwrap();
+        assert!(
+            command.starts_with("rift worktree adopt ") && command.ends_with("member"),
+            "the report names the exact adoption a repair would run: {command}"
+        );
         assert_eq!(json["adopted"], 0, "a report is not a repair");
         assert!(
             !member.join(".rift").exists(),
@@ -757,6 +814,51 @@ mod tests {
                 .iter()
                 .any(|(_, kind)| *kind == crate::agent_queue::JobKind::MoveRunState),
             "a resolution outside the report journals the move"
+        );
+    }
+
+    #[test]
+    fn a_gone_members_run_state_is_named_and_fix_removes_only_empty_roots() {
+        use rift_shadow::hooks::run_state::RunRoot;
+        let tmp = tempfile::tempdir().unwrap();
+        let admin = tmp.path().join("admin");
+        let roots: Vec<_> = RunRoot::ALL
+            .into_iter()
+            .map(|r| r.legacy_under(&admin))
+            .collect();
+        let (empty, held) = (&roots[0], &roots[1]);
+        std::fs::create_dir_all(empty).unwrap();
+        std::fs::create_dir_all(held).unwrap();
+        std::fs::write(held.join("ticket.json"), b"{}").unwrap();
+        let member = rift_git::FamilyMember {
+            name: "gone".to_owned(),
+            work_tree: tmp.path().join("checkout-that-was-removed"),
+            git_dir: admin.clone(),
+            is_main: false,
+            prunable: true,
+        };
+        let mounted_elsewhere = rift_git::FamilyMember {
+            work_tree: tmp.path().join("unmounted/volume/checkout"),
+            ..member.clone()
+        };
+
+        assert!(gone_member_run_state(&[&mounted_elsewhere], true)
+            .0
+            .is_empty());
+        let (human, json) = gone_member_run_state(&[&member], false);
+        assert!(human.contains("`rift doctor --fix` removes it"), "{human}");
+        assert!(human.contains("kept until drained"), "{human}");
+        assert!(empty.is_dir(), "a report removes nothing");
+
+        let (_, json_fixed) = gone_member_run_state(&[&member], true);
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            json_fixed.as_array().unwrap().len()
+        );
+        assert!(!empty.exists(), "an empty root of a gone member is removed");
+        assert!(
+            held.join("ticket.json").is_file(),
+            "a held ticket is never removed"
         );
     }
 }

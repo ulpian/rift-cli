@@ -17,7 +17,9 @@
 //! in the order the legs print.
 
 mod capture;
+mod checkouts;
 mod completeness;
+mod compose;
 mod family;
 mod git_hooks;
 pub(crate) mod health;
@@ -25,6 +27,7 @@ mod prices;
 mod queues;
 mod recovery;
 mod redaction;
+mod session_gaps;
 mod set_asides;
 mod setup;
 mod spool;
@@ -120,6 +123,10 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("push_queue", doctor_push_queue(root, repair));
     report.leg("prunable_worktrees", doctor_prunable_worktrees(root, fix));
     report.leg("orphan_projections", doctor_orphan_projections(root));
+    report.leg(
+        "obsolete_checkouts",
+        checkouts::doctor_obsolete_checkouts(root, repair),
+    );
     report.leg("family_identity", doctor_family_identity(root));
     report.leg(
         "turn_boundaries",
@@ -130,6 +137,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("binary_of_record", doctor_binary_of_record(root));
     report.leg("integration_health", doctor_integration_health(root));
     report.leg("worktree_wiring", doctor_worktree_wiring(root, repair));
+    report.leg("hook_composition", compose::doctor_hook_composition(root));
     report.leg("window_journals", doctor_window_journals(root));
     report.leg("config_load", doctor_config_load(root));
     report.leg("retired_config_keys", doctor_retired_config_keys(root));
@@ -139,8 +147,14 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("redaction_fallback", doctor_redaction_fallback(root));
     report.leg("turn_seals", doctor_turn_seals(root));
     report.leg("completeness", doctor_capture_completeness(root));
+    report.leg("session_gaps", session_gaps::doctor_session_gaps(root));
+    report.leg("read_stages", crate::read_stages::doctor_leg(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
+    // Every leg has read the said-once markers; only a repair run clears them.
+    if repair {
+        capture::consume_said_once_markers(root);
+    }
     report.json.insert("fix".to_owned(), serde_json::json!(fix));
     Outcome::ok(report.human, serde_json::Value::Object(report.json))
 }

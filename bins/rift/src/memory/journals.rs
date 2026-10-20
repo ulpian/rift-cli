@@ -525,7 +525,9 @@ fn member_windows(dir: &Path) -> Vec<(String, Vec<JournalLine>)> {
     let mut keyed: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if Path::new(&name).extension().is_none_or(|e| e != "jsonl") {
+        if Path::new(&name).extension().is_none_or(|e| e != "jsonl")
+            || crate::window_journal::is_call_sidecar(&name)
+        {
             continue;
         }
         let Some(key) = name.split('.').next() else {
@@ -740,7 +742,8 @@ fn line_at_ms(line: &JournalLine) -> i64 {
         | JournalLine::Spawn { at_ms, .. }
         | JournalLine::Claim { at_ms, .. }
         | JournalLine::Family { at_ms, .. }
-        | JournalLine::Matched { at_ms, .. } => *at_ms,
+        | JournalLine::Matched { at_ms, .. }
+        | JournalLine::Call { at_ms, .. } => *at_ms,
     };
     i64::try_from(ms).unwrap_or(i64::MAX)
 }
@@ -852,7 +855,8 @@ fn split_line(
         | JournalLine::Spawn { .. }
         | JournalLine::Claim { .. }
         | JournalLine::Family { .. }
-        | JournalLine::Matched { .. } => None,
+        | JournalLine::Matched { .. }
+        | JournalLine::Call { .. } => None,
     }
 }
 
@@ -1085,6 +1089,12 @@ mod tests {
         // A snapshot is a fold of rows this pass reads for itself: reading it
         // too would count them twice.
         std::fs::write(dir.join("w1.1.snapshot.json"), "{}").unwrap();
+        // A call sidecar is the window's correlation facts, never its reads.
+        std::fs::write(
+            dir.join("w1.calls.jsonl"),
+            format!("{}\n", read_line(1, &rev, 40, 50).to_json_line()),
+        )
+        .unwrap();
         let w = window_journals(tmp.path(), 98_304, 24);
         assert_eq!((w.windows, w.reads), (2, 3));
     }

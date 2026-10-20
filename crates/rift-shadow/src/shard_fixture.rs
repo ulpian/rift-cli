@@ -142,7 +142,7 @@ fn fixture_original(
         line: present.then_some(4),
         rewritten: present.then_some(Rewritten::Delivered(RewriteForm::FoldedOutput)),
         state,
-        body: Some(crate::transcript::sealed_original(&record, packs)?),
+        body: Some(crate::transcript::sealed_original(&record, packs)?.into()),
     })
 }
 
@@ -210,6 +210,7 @@ pub fn every_artifact_archive() -> Result<CheckpointArchive> {
     let (transcript, task_transcript) = fixture_transcripts(&packs)?;
 
     let mut archive = CheckpointArchive {
+        observed_head: None,
         boundary_gaps: None,
         repo: PathBuf::from("/shard-goldens"),
         commit: Some("9".repeat(40)),

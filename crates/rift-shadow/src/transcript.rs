@@ -164,6 +164,25 @@ pub fn compact_jsonl(raw: &SecretBytes, start_line: usize) -> CompactTranscript 
     }
 }
 
+/// The raw-line count and the slice start [`compact_jsonl`] would report, for
+/// a caller that already knows how many `records` the whole compact form
+/// holds. A turn end has that count from its carried compactor, so only the
+/// lines from `start_line` on are compacted here: compacting the whole file
+/// again cost a 28 MB transcript most of its turn-end mint (L-5 slice 15).
+#[must_use]
+pub fn slice_start(raw: &SecretBytes, start_line: usize, records: usize) -> (usize, usize) {
+    let raw_lines = raw
+        .as_slice()
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    if start_line == 0 {
+        return (raw_lines, 0);
+    }
+    let delta = compact_lines(raw.as_slice(), start_line);
+    (raw_lines, records.saturating_sub(delta.lines.len()))
+}
+
 /// Compact and seal one session transcript for archiving — **the one writer of
 /// the raw→artifact flow**: the compactor runs on the
 /// RAW side, then each of the two artifacts passes the redaction gate once.
@@ -192,11 +211,12 @@ pub fn archived_transcript(
     Ok((
         ArchivedTranscript {
             full: full.redacted.into(),
-            compact: compact.redacted,
+            compact: compact.redacted.into(),
             compact_start: compacted.compact_transcript_start,
             spills: Vec::new(),
             originals: Vec::new(),
             redaction_fallback: RedactionFallback::of(&[&full.report, &compact.report]),
+            reconciliation: None,
         },
         compacted.raw_lines,
     ))
@@ -244,6 +264,25 @@ pub fn sealed_original(
         }
     }
     Ok(sealed)
+}
+
+/// One raw line compacted alone: its record, with the schema version a
+/// record's first fragment gets, and the message id a later fragment merges
+/// by; `None` for a line the compactor skips. The carried compactor replays a
+/// record from its fragments with this and `merge_content`, so it emits the
+/// same bytes `compact_lines` does, each record keeping the position its first
+/// fragment gave it.
+pub(crate) fn compact_fragment(raw_line: &[u8]) -> Option<(Map<String, Value>, Option<String>)> {
+    let value = serde_json::from_slice::<Value>(raw_line).ok()?;
+    let (mut obj, _) = compact_record(value.as_object()?);
+    let id = obj.get("id").and_then(Value::as_str).map(str::to_owned);
+    obj.insert("v".to_owned(), COMPACT_SCHEMA_VERSION.into());
+    Some((obj, id))
+}
+
+/// One compact record's canonical line, without its `\n`.
+pub(crate) fn record_line(obj: Map<String, Value>) -> Vec<u8> {
+    canonical(&Value::Object(obj))
 }
 
 /// The compaction of one slice: its lines and what it could not read.
@@ -316,7 +355,7 @@ fn compact_lines(raw: &[u8], start_line: usize) -> Compacted {
 }
 
 /// Append `next`'s content blocks to the already-emitted `existing` record's.
-fn merge_content(existing: &mut Map<String, Value>, next: &Map<String, Value>) {
+pub(crate) fn merge_content(existing: &mut Map<String, Value>, next: &Map<String, Value>) {
     let Some(next_content) = next.get("content") else {
         return;
     };
@@ -877,5 +916,26 @@ mod tests {
         assert!(!stdout.contains("123456789"));
         assert!(stderr.is_empty());
         assert!(interrupted);
+    }
+
+    /// A turn end already holds the whole compact form from its carried
+    /// compactor, so the slice start must come out the same as the whole
+    /// compactor's without compacting the prefix again.
+    #[test]
+    fn the_slice_start_from_a_known_record_count_matches_the_whole_compactor() {
+        let mut lines = fragments("m1", &["a", "b", "c"]);
+        lines.extend(fragments("m2", &["x"]));
+        lines.extend(fragments("m1", &["d"]));
+        lines.extend(fragments("m3", &["y", "z"]));
+        let raw = SecretBytes::new(format!("{}\n\n", lines.join("\n")).into_bytes());
+        let records = compact_jsonl(&raw, 0).lines;
+        for start_line in 0..=lines.len() + 1 {
+            let whole = compact_jsonl(&raw, start_line);
+            assert_eq!(
+                slice_start(&raw, start_line, records),
+                (whole.raw_lines, whole.compact_transcript_start),
+                "start_line {start_line}"
+            );
+        }
     }
 }

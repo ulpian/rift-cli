@@ -9,6 +9,7 @@
 use rift_core::Sha256Id;
 use serde_json::{json, Map, Value};
 
+use super::call::{call_line_from, insert_call_fields, CallFact};
 use super::family::{family_line_from, insert_family_fields, FamilyRoute};
 use super::inherit::{class_at, inherited_line_from, insert_inherited_fields, InheritClass};
 use super::matched::{insert_matched_fields, matched_line_from};
@@ -360,6 +361,18 @@ pub enum Line {
         /// When the line was written, in milliseconds.
         at_ms: u64,
     },
+    /// One outcome of one native tool call, keyed by the client's own id.
+    Call {
+        /// The turn the call was made in.
+        turn: u32,
+        /// The id the client gave the call, or `None` when it sent none and
+        /// the outcome cannot be paired with any other.
+        call: Option<String>,
+        /// Which outcome this is.
+        fact: CallFact,
+        /// When the line was written, in milliseconds.
+        at_ms: u64,
+    },
 }
 
 impl Line {
@@ -381,6 +394,7 @@ impl Line {
             Self::Claim { .. } => "claim",
             Self::Family { .. } => "family",
             Self::Matched { .. } => "matched",
+            Self::Call { .. } => "call",
         }
     }
 
@@ -401,7 +415,8 @@ impl Line {
             | Self::Spawn { turn, .. }
             | Self::Claim { turn, .. }
             | Self::Family { turn, .. }
-            | Self::Matched { turn, .. } => *turn,
+            | Self::Matched { turn, .. }
+            | Self::Call { turn, .. } => *turn,
         }
     }
 
@@ -479,6 +494,7 @@ impl Line {
             }
             Self::Family { .. } => insert_family_fields(self, object),
             Self::Matched { .. } => insert_matched_fields(self, object),
+            Self::Call { .. } => insert_call_fields(self, object),
         }
     }
 
@@ -585,6 +601,7 @@ fn linking_line_from(
     match kind {
         "family" => family_line_from(object, turn, at_ms),
         "matched" => matched_line_from(object, turn, at_ms),
+        "call" => call_line_from(object, turn, at_ms),
         kind => inherited_line_from(kind, object, turn, at_ms),
     }
 }

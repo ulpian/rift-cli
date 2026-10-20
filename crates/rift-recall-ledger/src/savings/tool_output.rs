@@ -24,6 +24,10 @@ pub struct ToolOutputClass {
     pub observed: u64,
     /// The lines the observed rows' handles name.
     pub observed_lines: u64,
+    /// The bytes the observed rows say the class would have spared; `None`
+    /// when no observed row carried the figure, so a zero is never invented.
+    /// A counterfactual, never inside the share.
+    pub observed_bytes: Option<u64>,
     /// Rows that acted.
     pub acted: u64,
     /// What the acting rows avoided; already inside the share.
@@ -52,7 +56,7 @@ pub async fn tool_output_totals(
 ) -> Result<ToolOutputTotals> {
     let (clause, mut params) = since_ms.map_or_else(
         || (String::new(), Vec::new()),
-        |ms| (" AND recorded_at >= ?3".to_owned(), vec![Value::Int(ms)]),
+        |ms| (" AND e.recorded_at >= ?3".to_owned(), vec![Value::Int(ms)]),
     );
     params.splice(
         0..0,
@@ -64,8 +68,10 @@ pub async fn tool_output_totals(
     let rows = recall
         .query(
             &format!(
-                "SELECT verb, handle, tokens_avoided, tokens_returned \
-                 FROM memd_audit_event WHERE verb IN (?1, ?2){clause}"
+                "SELECT e.verb, e.handle, e.tokens_avoided, e.tokens_returned, \
+                 w.would_save_bytes FROM memd_audit_event e \
+                 LEFT JOIN memd_audit_would_save w ON w.audit_id = e.audit_id \
+                 WHERE e.verb IN (?1, ?2){clause}"
             ),
             &params,
         )
@@ -82,6 +88,11 @@ pub async fn tool_output_totals(
             let lines = r.get_opt_text(1)?.as_deref().map_or(0, handle_lines);
             class.observed = class.observed.saturating_add(1);
             class.observed_lines = class.observed_lines.saturating_add(lines);
+            if let Some(bytes) = r.get_opt_i64(4)? {
+                let bytes = u64::try_from(bytes).unwrap_or(0);
+                class.observed_bytes =
+                    Some(class.observed_bytes.unwrap_or(0).saturating_add(bytes));
+            }
             continue;
         }
         class.acted = class.acted.saturating_add(1);
@@ -180,6 +191,7 @@ mod tests {
             let held = ToolOutputClass {
                 observed: 1,
                 observed_lines: 20,
+                observed_bytes: None,
                 acted: 1,
                 avoided: 900,
                 returned: 40,
@@ -189,6 +201,43 @@ mod tests {
             let late = tool_output_totals(&recall, Some(2_000)).await.unwrap();
             assert_eq!((late.held.observed, late.held.acted), (0, 1));
             assert_eq!(late.folded, ToolOutputClass::default());
+        });
+    }
+
+    /// ★ An ingested observing row's would-save bytes reach the class and
+    /// leave the headline where it was: the figure is a counterfactual.
+    #[test]
+    fn an_ingested_tool_output_row_carries_its_would_save_bytes_outside_the_headline() {
+        block(async {
+            let (recall, projection) = stores();
+            let before = crate::savings::compose(&recall, &projection, None)
+                .await
+                .unwrap();
+            let held = rift_recall_events::MemdEvent::ToolOutputHeld {
+                handle: "file:src/a.rs@sha256:ab:L1-4".to_owned(),
+                would_save_bytes: 740,
+            };
+            let folded = rift_recall_events::MemdEvent::ToolOutputFolded {
+                would_save_bytes: 120,
+            };
+            for event in [&held, &folded] {
+                let envelope = event.to_hook_json();
+                crate::audit::append_memd_audit(&recall, envelope.as_bytes(), 1_000)
+                    .await
+                    .unwrap();
+                crate::audit::append_memd_audit(&recall, envelope.as_bytes(), 2_000)
+                    .await
+                    .unwrap();
+            }
+            let totals = tool_output_totals(&recall, None).await.unwrap();
+            assert_eq!(totals.held.observed, 1);
+            assert_eq!(totals.held.observed_bytes, Some(740));
+            assert_eq!(totals.folded.observed_bytes, Some(120));
+            let after = crate::savings::compose(&recall, &projection, None)
+                .await
+                .unwrap();
+            assert_eq!(after.tokens_avoided, before.tokens_avoided);
+            assert_eq!(after.share(), before.share());
         });
     }
 

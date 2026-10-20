@@ -5,7 +5,7 @@
 //! spool of the session ([`super::super::originals`]) and seals every record
 //! again: a record is never consumed here, and the spool is not deleted —
 //! deletion at the session's final archive is the session lifecycle's (S8
-//! L-4), whose hook point is [`Spool::load`]'s caller once that archive lands.
+//! L-4), whose hook point is [`Spool::load_carrying`]'s caller once that archive lands.
 //!
 //! **Which transcript.** A record is sealed beside the transcript whose line
 //! records a `tool_result` for its call — the session's, or a subagent's when
@@ -31,17 +31,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::Path;
 
-use rift_core::{RedactedBytes, SecretBytes};
+use rift_core::SecretBytes;
 use rift_shadow::backend::rewrite::{
     delivered_result, parse_original_record, LineRange, ResultText, RewriteForm, Rewritten,
 };
 use rift_shadow::backend::{
     parse_spool_record, ArchivedOriginal, ArchivedTask, ArchivedTranscript, OriginalState,
+    TranscriptBody,
 };
 use rift_shadow::redact::RulePackSet;
 
 use super::super::originals::{session_spool_dir, SPOOL_SUFFIX};
 use super::super::subagent_claims::is_safe_id;
+use super::carry::{self, TurnCarry};
 use super::tasks::same_file;
 
 /// The largest spool record the archive reads: a 30,000-character original
@@ -56,7 +58,9 @@ struct SpoolRecord {
     replaced: Vec<LineRange>,
     /// `Sealed` for a whole record, else why it is not.
     state: OriginalState,
-    body: Option<RedactedBytes>,
+    body: Option<TranscriptBody>,
+    /// SHA-256 of the record file as read, for the turn-end sidecar.
+    raw_sha256: Option<String>,
 }
 
 /// A session's spool, read and sealed once per archive.
@@ -69,7 +73,19 @@ impl Spool {
     /// Every record spooled for `session_id` in the family whose common dir
     /// is `common_dir`, each through the gate with `packs`, in file-name order.
     /// Empty when the session spooled nothing.
+    #[cfg(test)]
     pub(super) fn load(common_dir: &Path, session_id: &str, packs: &RulePackSet) -> Self {
+        Self::load_carrying(common_dir, session_id, packs, None)
+    }
+
+    /// [`Spool::load_carrying`], on a turn end with the previous shard's originals: a
+    /// record whose bytes are unchanged keeps that shard's blob, unredacted.
+    pub(super) fn load_carrying(
+        common_dir: &Path,
+        session_id: &str,
+        packs: &RulePackSet,
+        carry: Option<&TurnCarry>,
+    ) -> Self {
         if !rift_shadow::hooks::is_safe_session_id(session_id) {
             return Self::default();
         }
@@ -99,7 +115,7 @@ impl Spool {
             .into_iter()
             .map(|stem| {
                 let bytes = read_record(&dir.join(format!("{stem}{SPOOL_SUFFIX}")));
-                record_of(stem, bytes, packs)
+                record_of(stem, bytes, packs, carry)
             })
             .collect();
         Self { records }
@@ -127,6 +143,12 @@ impl Spool {
                 Some(original)
             })
             .collect()
+    }
+
+    /// The hash of `tool_use_id`'s record file as read, if it was read.
+    pub(super) fn raw_sha256(&self, tool_use_id: &str) -> Option<&str> {
+        let record = self.records.iter().find(|r| r.tool_use_id == tool_use_id)?;
+        record.raw_sha256.as_deref()
     }
 
     /// Seal every record no transcript claimed beside the transcript it most
@@ -255,7 +277,12 @@ fn read_record(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// A record from its file's stem and bytes, its body through the gate.
-fn record_of(stem: String, bytes: Option<Vec<u8>>, packs: &RulePackSet) -> SpoolRecord {
+fn record_of(
+    stem: String,
+    bytes: Option<Vec<u8>>,
+    packs: &RulePackSet,
+    carry: Option<&TurnCarry>,
+) -> SpoolRecord {
     let mut record = SpoolRecord {
         tool_use_id: stem,
         agent_id: None,
@@ -263,10 +290,15 @@ fn record_of(stem: String, bytes: Option<Vec<u8>>, packs: &RulePackSet) -> Spool
         replaced: Vec::new(),
         state: OriginalState::SpoolCorrupt,
         body: None,
+        raw_sha256: None,
     };
     let Some(bytes) = bytes else {
         return record;
     };
+    let raw_sha256 = carry.map(|_| carry::raw_key(packs, &bytes));
+    let carried = carry.zip(raw_sha256.as_deref());
+    let carried = carried.and_then(|(c, h)| c.original(&record.tool_use_id, h));
+    record.raw_sha256 = raw_sha256;
     let (header, body) = parse_spool_record(&bytes);
     if let Some(h) = &header {
         record.agent_id = h.agent_id.clone().filter(|a| is_safe_id(a));
@@ -278,6 +310,16 @@ fn record_of(stem: String, bytes: Option<Vec<u8>>, packs: &RulePackSet) -> Spool
             && u64::try_from(body.len()).ok() == Some(h.bytes)
             && rift_shadow::sha256_hex(&[body]) == h.sha256
     }) && parse_original_record(body).is_some();
+    // The same bytes sealed at the last turn end: that shard's blob stands for
+    // them, and the gate's verdict on them cannot have changed.
+    if let Some(carried) = carried {
+        record.body = Some(carried);
+        if whole {
+            record.state = OriginalState::Sealed;
+        }
+        return record;
+    }
+    carry::gate_ran();
     let raw = SecretBytes::new(body.to_vec());
     // Corrupt spool evidence stays partial evidence; only an intact owned
     // envelope may become Sealed, and its post-gate shape must still hold.
@@ -288,7 +330,7 @@ fn record_of(stem: String, bytes: Option<Vec<u8>>, packs: &RulePackSet) -> Spool
     };
     match sealed {
         Ok(sealed) => {
-            record.body = Some(sealed);
+            record.body = Some(sealed.into());
             if whole {
                 record.state = OriginalState::Sealed;
             }

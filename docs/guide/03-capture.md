@@ -249,6 +249,7 @@ call's full input, every tool result in full — with secrets and the opaque
 thinking signatures masked
 ([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint) says why that,
 and not byte-identity, is the standard).
+A turn-end checkpoint can seal only the lines past the previous turn's cut, as one more part under `transcript.segments/`, and one resolver joins the parts back into the whole transcript every reader and every hash sees.
 
 An optional `turn_boundary_gaps.jsonl` records a checked repository/member recovery
 assertion. A genuine checkpoint session carries it; other subject session digests
@@ -295,6 +296,27 @@ its inputs:
 
 Over all of them, **a touched sensitive path always archives immediately**; a session
 that is not live never archives; a session's end always requests a condense, off the hook.
+
+### One checkpoint per turn
+
+Beside the strategy, every turn end mints a checkpoint of its own, archive reason `turn-end`.
+The agent's `Stop` hook only journals the job; the detached worker (§3.10) seals it, so the hook budget never pays for it.
+A condense never needs a commit: the shard is anchored to `HEAD` only when `HEAD` is born and is not the commit the session's previous checkpoint already anchors, and is otherwise **anchorless**, recording the `HEAD` it saw as `observed_head`.
+Recall serves an anchorless seal to the same worktree on the same branch while that observed head is in the caller's history, and a rewound branch drops it again ([§6](06-recall.md)).
+
+Each turn passes only its new lines through the gate.
+The earlier parts, full and compact, are read back from the previous shard and carried by their checked blob oids, so the shard holds `transcript.segments/NNNNNN` and its compact counterpart, joined by the one resolver of [§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint).
+A part that fails its read-back, or a changed pack set, reseals the whole transcript instead.
+The cut is the last complete record the worker read, so a turn's final line, still being written when `Stop` fires, waits for the next turn or the session end.
+
+The worker records what it sealed in a sidecar beside the session cache, `<id>.turn-seal`: the checkpoint, the transcript length it read, the lines the parts cover and any fallback.
+The **lag** is the live transcript's length past that read.
+`rift doctor`'s `turn_seals` leg names a session whose last seal fell back (`segment-chain-broken`, `packs-changed`, `segment-mismatch`), whose lag passed 1 MiB (`lagging`), or whose sidecar does not parse (`unreadable`); it reports only, and `--fix` changes nothing there.
+
+At the session end the tail is sealed the same way, then compared once with the whole transcript sealed in one pass.
+Equal bytes keep the parts and the shard records `reconciled: true`; any difference makes the whole seal the final body, recorded as `reconciled: false` with `supersedes_segments: true` and named `segment-mismatch`.
+
+The cost is the worker's, not the hook's: on a transcript near 30 MB a turn end still spends seconds of background CPU reading back and hashing the whole document, since every leaf and id is computed over it.
 
 ---
 

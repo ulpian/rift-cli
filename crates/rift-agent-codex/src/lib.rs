@@ -21,6 +21,7 @@ use rift_agent::{
     ModelFact, ModelSource, ReadRequest, SearchRequest, TokenUsage,
 };
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};
+use std::path::Path;
 
 /// The Codex adapter.
 pub struct CodexAdapter;
@@ -49,6 +50,10 @@ const PATCH_FIELD: &str = "command";
 /// name: the pinned source shows this family building its hook payload with
 /// `HookToolName::bash()`, so a read, a listing and a grep all arrive here.
 const SHELL_TOOL: &str = "Bash";
+
+/// The shell argument naming the directory one call ran in, as upstream's
+/// own exec arguments spell it.
+const WORKDIR_FIELD: &str = "workdir";
 
 /// The markers a patch document opens a file section with, and the one that
 /// renames a file.
@@ -120,6 +125,61 @@ impl CodexAdapter {
             .and_then(serde_json::Value::as_str)?;
         shell_read::recognise(command)
     }
+
+    /// Where a shell call's relative names resolve from.
+    ///
+    /// The session's `cwd` is where the agent stands, not where a command ran:
+    /// a call can carry its own `workdir`, and a relative name read there is a
+    /// different file from the same name under the session. The pinned
+    /// upstream payload does not promise the field, so its absence keeps the
+    /// session reading, while a field present in a shape this adapter cannot
+    /// place makes the call's directory unknown rather than guessed.
+    fn execution_dir(native: &serde_json::Value) -> ExecutionDir {
+        let Some(field) = native.get("tool_input").and_then(|i| i.get(WORKDIR_FIELD)) else {
+            return ExecutionDir::Session;
+        };
+        let Some(dir) = field.as_str().filter(|dir| !dir.is_empty()) else {
+            return ExecutionDir::Unknown;
+        };
+        if Path::new(dir).is_absolute() {
+            return ExecutionDir::Named(dir.to_owned());
+        }
+        match rift_agent::payload_cwd(native) {
+            Some(cwd) if Path::new(&cwd.path).is_absolute() => {
+                ExecutionDir::Named(joined(&cwd.path, dir))
+            }
+            _ => ExecutionDir::Unknown,
+        }
+    }
+
+    /// A recognised name, spelled from where the call ran; `None` when that
+    /// place is unknown, so the call passes through with no read claimed.
+    fn placed(native: &serde_json::Value, path: String) -> Option<String> {
+        if Path::new(&path).is_absolute() {
+            return Some(path);
+        }
+        match Self::execution_dir(native) {
+            ExecutionDir::Session => Some(path),
+            ExecutionDir::Named(dir) => Some(joined(&dir, &path)),
+            ExecutionDir::Unknown => None,
+        }
+    }
+}
+
+/// The answer [`CodexAdapter::execution_dir`] gives.
+enum ExecutionDir {
+    /// No override: names resolve against the session directory downstream.
+    Session,
+    /// The absolute directory the call named for itself.
+    Named(String),
+    /// An override that names no place this adapter can prove.
+    Unknown,
+}
+
+/// A name under a directory, joined with `/` as the read ledger keys it on
+/// every platform.
+fn joined(dir: &str, name: &str) -> String {
+    format!("{}/{name}", dir.trim_end_matches(['/', '\\']))
 }
 
 impl AgentAdapter for CodexAdapter {
@@ -254,16 +314,25 @@ impl AgentAdapter for CodexAdapter {
 
     /// A read is a command line, or it is nothing.
     fn read_request(&self, _verb: &str, native: &serde_json::Value) -> Option<ReadRequest> {
-        Self::shell_call(native)?.read_request()
+        let request = Self::shell_call(native)?.read_request()?;
+        let path = Self::placed(native, request.path)?;
+        Some(ReadRequest { path, ..request })
     }
 
     /// …and one command line is as many reads as it spells. This family has
     /// no read tool at all, so a chain of `cat`s under one `cd` is not a
     /// convenience here but the only way several files reach the window.
     fn read_requests(&self, _verb: &str, native: &serde_json::Value) -> Vec<ReadRequest> {
-        Self::shell_call(native)
+        let requests = Self::shell_call(native)
             .map(|call| call.read_requests())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        requests
+            .into_iter()
+            .filter_map(|request| {
+                let path = Self::placed(native, request.path)?;
+                Some(ReadRequest { path, ..request })
+            })
+            .collect()
     }
 
     /// A listing is a command line too; a content search stays a content
@@ -275,7 +344,8 @@ impl AgentAdapter for CodexAdapter {
     /// The one file a content search named — this family reads files, and
     /// searches inside them, through the same shell tool.
     fn searched_file(&self, _verb: &str, native: &serde_json::Value) -> Option<String> {
-        Self::shell_call(native)?.searched_file().map(str::to_owned)
+        let path = Self::shell_call(native)?.searched_file()?.to_owned();
+        Self::placed(native, path)
     }
 
     /// A patch document changed a file, and which file is all that follows.
@@ -861,6 +931,119 @@ mod pinned_tool_field_surface {
                 .search_request("PreToolUse", &payload)
                 .is_none());
             assert!(CodexAdapter.edit_request("PreToolUse", &payload).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod execution_dir {
+    use super::{AgentAdapter, CodexAdapter};
+
+    /// An absolute directory name on whichever platform runs the test.
+    fn abs(name: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{name}")
+        } else {
+            format!("/{name}")
+        }
+    }
+
+    /// A shell call fired in session directory `cwd`, with `tool_input`
+    /// carrying the command and whatever extra fields are given.
+    fn shell(cwd: Option<&str>, command: &str, extra: &serde_json::Value) -> serde_json::Value {
+        let mut input = serde_json::json!({ "command": command });
+        if let (Some(input), Some(extra)) = (input.as_object_mut(), extra.as_object()) {
+            input.extend(extra.clone());
+        }
+        let mut native = serde_json::json!({ "tool_name": "Bash", "tool_input": input });
+        if let (Some(native), Some(cwd)) = (native.as_object_mut(), cwd) {
+            native.insert("cwd".into(), cwd.into());
+        }
+        native
+    }
+
+    fn read_paths(native: &serde_json::Value) -> Vec<String> {
+        CodexAdapter
+            .read_requests("PreToolUse", native)
+            .into_iter()
+            .map(|request| request.path)
+            .collect()
+    }
+
+    #[test]
+    fn a_relative_read_under_an_outside_workdir_names_the_file_in_that_workdir() {
+        let root = abs("r");
+        let external = abs("e");
+        let native = shell(
+            Some(&root),
+            "sed -n '1,190p' README.md",
+            &serde_json::json!({ "workdir": external }),
+        );
+        let expected = format!("{external}/README.md");
+        assert_eq!(read_paths(&native), vec![expected.clone()]);
+        let single = CodexAdapter.read_request("PostToolUse", &native);
+        assert_eq!(single.map(|request| request.path), Some(expected));
+    }
+
+    #[test]
+    fn a_relative_workdir_is_taken_from_the_session_directory() {
+        let root = abs("r");
+        let native = shell(
+            Some(&root),
+            "cat README.md",
+            &serde_json::json!({ "workdir": "sub" }),
+        );
+        assert_eq!(read_paths(&native), vec![format!("{root}/sub/README.md")]);
+    }
+
+    #[test]
+    fn a_leading_cd_composes_with_the_workdir_and_an_absolute_file_ignores_it() {
+        let external = abs("e");
+        let extra = serde_json::json!({ "workdir": external });
+        let native = shell(Some(&abs("r")), "cd sub && cat README.md", &extra);
+        assert_eq!(
+            read_paths(&native),
+            vec![format!("{external}/sub/README.md")]
+        );
+        let elsewhere = format!("{}/notes.md", abs("x"));
+        let native = shell(Some(&abs("r")), &format!("cat {elsewhere}"), &extra);
+        assert_eq!(read_paths(&native), vec![elsewhere]);
+    }
+
+    #[test]
+    fn a_call_with_no_workdir_keeps_the_path_as_spelled() {
+        let native = shell(Some(&abs("r")), "cat README.md", &serde_json::json!({}));
+        assert_eq!(read_paths(&native), vec!["README.md".to_owned()]);
+    }
+
+    #[test]
+    fn an_unusable_workdir_leaves_the_call_with_no_read_at_all() {
+        let cases = [
+            (Some(abs("r")), serde_json::json!({ "workdir": "" })),
+            (Some(abs("r")), serde_json::json!({ "workdir": 7 })),
+            (None, serde_json::json!({ "workdir": "sub" })),
+            (
+                Some("rel".to_owned()),
+                serde_json::json!({ "workdir": "sub" }),
+            ),
+        ];
+        for (cwd, extra) in cases {
+            let native = shell(cwd.as_deref(), "cat README.md", &extra);
+            assert!(read_paths(&native).is_empty(), "{extra}");
+            assert!(CodexAdapter.read_request("PreToolUse", &native).is_none());
+            assert!(CodexAdapter.searched_file("PreToolUse", &native).is_none());
+        }
+    }
+
+    #[test]
+    fn a_wrapped_or_native_exec_name_is_never_read_as_a_shell_call() {
+        for tool in ["exec_command", "functions.exec", "call"] {
+            let native = serde_json::json!({
+                "tool_name": tool,
+                "cwd": abs("r"),
+                "tool_input": { "cmd": "cat README.md", "command": "cat README.md" },
+            });
+            assert!(read_paths(&native).is_empty(), "{tool}");
         }
     }
 }

@@ -11,7 +11,20 @@ use super::{
     ArchivedTask, ArchivedTranscript, CheckpointArchive, NativeBackend, SegmentPart,
     TranscriptBody, NATIVE_CHECKPOINT_REF, TRANSCRIPT_COMPACT_NAME, TRANSCRIPT_FULL_NAME,
 };
-use rift_recall_substrate::parse::segments::TRANSCRIPT_SEGMENTS_DIR;
+
+impl CheckpointArchive {
+    /// The `content_hash.txt` bytes over metadata already rendered, so a
+    /// writer that also writes `metadata.json` derives the root once.
+    pub(super) fn content_hash_over(&self, metadata: &[u8]) -> Vec<u8> {
+        let report = self.redaction_report_json();
+        let full = self.full_jsonl();
+        let mut parts: Vec<&[u8]> = vec![metadata, &report];
+        parts.extend(full.as_deref());
+        let mut hex = crate::sha256_hex(&parts);
+        hex.push('\n');
+        hex.into_bytes()
+    }
+}
 
 impl<W: NativeGitWrite> NativeBackend<W> {
     /// Write the checkpoint shard: structural artifacts + the durable content blob,
@@ -45,10 +58,13 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     /// the redaction wall — then the Rift-authored structural artifacts, then
     /// the optional ones a shard carries only when it has them.
     fn write_top_level_blobs(&self, archive: &CheckpointArchive) -> Result<Vec<TreeWriteEntry>> {
+        // The metadata records the Merkle root, which hashes every transcript
+        // byte: render it once and hash the content address over that copy.
+        let metadata = archive.metadata_json();
         let mut entries = vec![
             self.durable_entry("content.redacted", &archive.content)?,
-            self.structural_entry("content_hash.txt", &archive.content_hash_txt())?,
-            self.structural_entry("metadata.json", &archive.metadata_json())?,
+            self.structural_entry("content_hash.txt", &archive.content_hash_over(&metadata))?,
+            self.structural_entry("metadata.json", &metadata)?,
             self.structural_entry("redaction_report.json", &archive.redaction_report_json())?,
         ];
         if let Some(full) = archive.full_jsonl() {
@@ -148,17 +164,26 @@ impl<W: NativeGitWrite> NativeBackend<W> {
         transcript: &ArchivedTranscript,
         entries: &mut Vec<TreeWriteEntry>,
     ) -> Result<()> {
-        entries.push(self.durable_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
-        entries.push(self.full_body_entry(&transcript.full)?);
+        entries.push(self.body_entry(TRANSCRIPT_COMPACT_NAME, &transcript.compact)?);
+        entries.push(self.body_entry(TRANSCRIPT_FULL_NAME, &transcript.full)?);
         self.push_original_tree(transcript, entries)?;
         self.push_spill_tree(transcript, entries)
     }
 
-    /// The full transcript's entry: its one blob, or the `transcript.segments`
-    /// tree of its parts — each part through the durable door like the blob.
-    fn full_body_entry(&self, body: &TranscriptBody) -> Result<TreeWriteEntry> {
+    /// A transcript's entry: its one blob `whole`, or the segments tree of its
+    /// parts — each part through the durable door like the blob.
+    fn body_entry(&self, whole: &str, body: &TranscriptBody) -> Result<TreeWriteEntry> {
         let segments = match body {
-            TranscriptBody::Whole(whole) => return self.durable_entry(TRANSCRIPT_FULL_NAME, whole),
+            TranscriptBody::Whole(blob) => return self.durable_entry(whole, blob),
+            // The earlier shard's blob: the tree names its oid, no bytes are
+            // written again.
+            TranscriptBody::Carried(carried) => {
+                return Ok(TreeWriteEntry {
+                    mode: GitFileMode::Blob,
+                    name: whole.into(),
+                    oid: carried.oid().into(),
+                })
+            }
             TranscriptBody::Segments(segments) => segments,
         };
         let mut parts = Vec::with_capacity(segments.parts().len());
@@ -175,7 +200,7 @@ impl<W: NativeGitWrite> NativeBackend<W> {
                 },
             });
         }
-        self.tree_entry(TRANSCRIPT_SEGMENTS_DIR.into(), &parts)
+        self.tree_entry(segments.dir().into(), &parts)
     }
 
     /// Write a transcript's sealed originals as the `tool-originals` tree
@@ -189,7 +214,7 @@ impl<W: NativeGitWrite> NativeBackend<W> {
     ) -> Result<()> {
         let mut files = Vec::new();
         for (original, body) in transcript.sealed_originals() {
-            files.push(self.durable_entry(&original.file_name(), body)?);
+            files.push(self.body_entry(&original.file_name(), body)?);
         }
         if files.is_empty() {
             return Ok(());

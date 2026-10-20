@@ -757,13 +757,15 @@ pub(crate) fn session_phase(repo: &Path, id: &str) -> String {
         .to_owned()
 }
 
-/// The files in this checkout's window-journal directory, by name.
+/// The journal files in this checkout's window-journal directory, by name;
+/// a window's call sidecar beside its journal is not one.
 pub(crate) fn window_journal_files(repo: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(repo.join(".rift").join("state").join("reads"))
         .into_iter()
         .flatten()
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with(".calls.jsonl"))
         .collect();
     names.sort();
     names

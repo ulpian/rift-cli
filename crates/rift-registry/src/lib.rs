@@ -180,6 +180,21 @@ impl ProjectRegistry {
         &self.projects
     }
 
+    /// Drop every row `gone` selects and return the dropped rows, in
+    /// registration order. This file is a per-machine index, so a row is
+    /// removed rather than superseded; the caller decides what is provably
+    /// gone, and this crate never looks at the disk for it.
+    pub fn remove_where(
+        &mut self,
+        gone: impl Fn(&RegisteredProject) -> bool,
+    ) -> Vec<RegisteredProject> {
+        let (dropped, kept) = std::mem::take(&mut self.projects)
+            .into_iter()
+            .partition(|p| gone(p));
+        self.projects = kept;
+        dropped
+    }
+
     /// Persist the registry to `path`, creating parent directories as needed.
     ///
     /// The write is atomic: the TOML is written to a sibling temp file and then
@@ -250,6 +265,18 @@ mod tests {
             path: PathBuf::from(path),
             family_id: None,
         }
+    }
+
+    #[test]
+    fn remove_where_drops_only_the_selected_rows_and_keeps_the_order_of_the_rest() {
+        let mut reg = ProjectRegistry::default();
+        for name in ["a", "b", "c"] {
+            assert!(reg.add(name, PathBuf::from(format!("/r/{name}"))));
+        }
+        let dropped = reg.remove_where(|p| p.name == "b");
+        assert_eq!(dropped, vec![proj("b", "/r/b")]);
+        assert_eq!(reg.projects(), &[proj("a", "/r/a"), proj("c", "/r/c")]);
+        assert!(reg.remove_where(|_| false).is_empty());
     }
 
     #[test]

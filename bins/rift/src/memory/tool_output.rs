@@ -61,16 +61,15 @@ pub(super) fn with_tool_output(
     json
 }
 
-/// One class's two halves. The would-save bytes are `null` because the audit
-/// relation keeps the row and drops the figure: a zero would read as a
-/// measurement.
+/// One class's two halves. The would-save bytes are `null` when no observing
+/// row carried the figure: a zero would read as a measurement.
 fn class_json(c: &ToolOutputClass) -> serde_json::Value {
     serde_json::json!({
         "would_save": {
             "in_share": false,
             "results": c.observed,
             "lines": c.observed_lines,
-            "bytes": serde_json::Value::Null,
+            "bytes": c.observed_bytes,
         },
         "realised": {
             "in_share": true,
@@ -87,18 +86,24 @@ mod tests {
 
     /// ★ The would-save half says it is outside the share and carries no
     /// token figure; the realised half says it is inside it; a projection
-    /// that cannot say publishes `null`, never zeroes.
+    /// that cannot say publishes `null`, never zeroes, and a class with only
+    /// observing rows carries its would-save bytes.
     #[test]
     fn the_savings_json_keeps_would_save_apart_from_realised() {
         let totals = ToolOutputTotals {
             held: ToolOutputClass {
                 observed: 3,
                 observed_lines: 60,
+                observed_bytes: None,
                 acted: 1,
                 avoided: 900,
                 returned: 40,
             },
-            folded: ToolOutputClass::default(),
+            folded: ToolOutputClass {
+                observed: 2,
+                observed_bytes: Some(120),
+                ..ToolOutputClass::default()
+            },
         };
         let base = serde_json::json!({ "overall": { "share_pct": 10.0 } });
         let json = with_tool_output(base.clone(), Some(&totals));
@@ -115,7 +120,13 @@ mod tests {
         assert_eq!(held["realised"]["in_share"], true);
         assert_eq!(held["realised"]["tokens_avoided"], 900);
         let folded = &json["tool_output"]["tool_output_folded"];
-        assert_eq!(folded["would_save"]["results"], 0);
+        assert_eq!(folded["would_save"]["results"], 2);
+        assert_eq!(
+            folded["would_save"]["bytes"], 120,
+            "observe rows alone carry bytes"
+        );
+        assert!(folded["would_save"].get("tokens_avoided").is_none());
+        assert_eq!(folded["realised"]["tokens_avoided"], 0);
         assert!(with_tool_output(base, None)["tool_output"].is_null());
     }
 

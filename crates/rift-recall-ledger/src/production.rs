@@ -23,7 +23,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use rift_core::Result;
+use rift_core::{Result, Timestamp};
 use rift_recall_substrate::{worktree, SubstrateReader};
 use rift_store::{CanonicalStore, SqliteStore};
 
@@ -95,6 +95,7 @@ pub async fn production_ingest_with_capture(
     repo: &Path,
     capture: Option<&impl CanonicalStore>,
     pass: Pass,
+    now: Timestamp,
 ) -> Result<ProductionIngest> {
     let plan = ingest::plan_ingest(store, reader).await?;
     let facts = match pass {
@@ -112,10 +113,11 @@ pub async fn production_ingest_with_capture(
     crate::blob_map::persist_blob_oid_map(store, &blobs, 0).await?;
     // The options shape only the rows of checkpoints the plan projects, so a
     // pass that projects none needs none.
-    let opts = match &facts {
+    let mut opts = match &facts {
         Some(facts) => projecting_options(store, reader, repo, capture, facts).await,
         None => IngestOptions::default(),
     };
+    opts.now_ms = now.as_millis();
     let report = ingest::ingest_planned(store, reader, plan, &opts).await?;
     // After the projection knows which revisions were read, and only then: the
     // bridge asks git whether it already holds each one's bytes, so a later
@@ -148,7 +150,15 @@ pub async fn production_ingest(
     repo: &Path,
 ) -> Result<ProductionIngest> {
     let capture = open_capture(repo);
-    production_ingest_with_capture(store, reader, repo, capture.as_ref(), Pass::Incremental).await
+    production_ingest_with_capture(
+        store,
+        reader,
+        repo,
+        capture.as_ref(),
+        Pass::Incremental,
+        Timestamp::now(),
+    )
+    .await
 }
 
 /// [`production_ingest`] as the full pass: every shard read, history walked.
@@ -161,7 +171,15 @@ pub async fn production_ingest_full(
     repo: &Path,
 ) -> Result<ProductionIngest> {
     let capture = open_capture(repo);
-    production_ingest_with_capture(store, reader, repo, capture.as_ref(), Pass::Full).await
+    production_ingest_with_capture(
+        store,
+        reader,
+        repo,
+        capture.as_ref(),
+        Pass::Full,
+        Timestamp::now(),
+    )
+    .await
 }
 
 /// The options for a pass that will project checkpoints: the developer axis,
@@ -198,6 +216,9 @@ mod tests {
     use super::*;
     use rift_recall_substrate::{CheckpointShard, Dialect, MemorySubstrate};
     use rift_store::{apply_migrations, default_migrations, recall_migrations, SqliteStore, Value};
+
+    /// The fixed ingest time every test passes, so two runs write the same rows.
+    const FIXED_CLOCK: Timestamp = Timestamp::from_millis(crate::graph::INGEST_TS);
 
     fn block<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
@@ -276,6 +297,7 @@ mod tests {
             tmp.path(),
             Some(&capture),
             Pass::Incremental,
+            FIXED_CLOCK,
         ))
         .unwrap();
         assert_eq!(pass.report.checkpoints, 1);
@@ -305,6 +327,7 @@ mod tests {
             tmp.path(),
             Some(&capture),
             Pass::Incremental,
+            FIXED_CLOCK,
         ))
         .unwrap();
         let door_b = recall_store();
@@ -314,6 +337,7 @@ mod tests {
             tmp.path(),
             Some(&capture),
             Pass::Incremental,
+            FIXED_CLOCK,
         ))
         .unwrap();
         let fp_a = block(crate::doctor::rebuild_fingerprint(&door_a)).unwrap();
@@ -328,6 +352,7 @@ mod tests {
             tmp.path(),
             Some(&capture),
             Pass::Incremental,
+            FIXED_CLOCK,
         ))
         .unwrap();
         assert_eq!(again.report.skipped, 1, "re-run projects nothing new");
@@ -368,6 +393,7 @@ mod tests {
             tmp.path(),
             None::<&SqliteStore>,
             Pass::Incremental,
+            FIXED_CLOCK,
         ))
         .unwrap();
         assert_eq!(pass.bridge.mapped, 1, "{:?}", pass.bridge);
@@ -391,6 +417,7 @@ mod tests {
             tmp.path(),
             None::<&SqliteStore>,
             Pass::Incremental,
+            FIXED_CLOCK,
         ))
         .unwrap();
         let dev = block(store.query("SELECT developer FROM n_session WHERE node_id = 's1'", &[]))
@@ -464,6 +491,7 @@ mod tests {
             repo,
             None::<&SqliteStore>,
             pass,
+            FIXED_CLOCK,
         ))
         .unwrap()
     }

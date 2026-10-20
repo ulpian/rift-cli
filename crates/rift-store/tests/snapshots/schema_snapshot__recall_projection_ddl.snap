@@ -198,6 +198,14 @@ CREATE TABLE memd_audit_session (
   PRIMARY KEY (serve_key)
 ) STRICT
 
+-- table memd_audit_would_save
+CREATE TABLE memd_audit_would_save (
+  audit_id TEXT NOT NULL,
+  would_save_bytes INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (audit_id)
+) STRICT
+
 -- table memd_call_event
 CREATE TABLE memd_call_event (
   call_id TEXT NOT NULL,
@@ -260,6 +268,14 @@ CREATE TABLE n_checkpoint (
 CREATE TABLE n_checkpoint_commit (
   node_id TEXT NOT NULL,
   commit_oid TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  PRIMARY KEY (node_id)
+) STRICT
+
+-- table n_checkpoint_observed_head
+CREATE TABLE n_checkpoint_observed_head (
+  node_id TEXT NOT NULL,
+  observed_head TEXT NOT NULL,
   schema_version INTEGER NOT NULL,
   PRIMARY KEY (node_id)
 ) STRICT
@@ -504,6 +520,12 @@ CREATE TRIGGER memd_audit_session_no_delete BEFORE DELETE ON memd_audit_session 
 -- trigger memd_audit_session_no_update
 CREATE TRIGGER memd_audit_session_no_update BEFORE UPDATE ON memd_audit_session BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_session is append-only (UPDATE forbidden)'); END
 
+-- trigger memd_audit_would_save_no_delete
+CREATE TRIGGER memd_audit_would_save_no_delete BEFORE DELETE ON memd_audit_would_save BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_would_save is append-only (DELETE forbidden)'); END
+
+-- trigger memd_audit_would_save_no_update
+CREATE TRIGGER memd_audit_would_save_no_update BEFORE UPDATE ON memd_audit_would_save BEGIN SELECT RAISE(ABORT, 'rift: memd_audit_would_save is append-only (UPDATE forbidden)'); END
+
 -- trigger memd_call_event_no_delete
 CREATE TRIGGER memd_call_event_no_delete BEFORE DELETE ON memd_call_event BEGIN SELECT RAISE(ABORT, 'rift: memd_call_event is append-only (DELETE forbidden)'); END
 
@@ -539,6 +561,12 @@ CREATE TRIGGER n_checkpoint_no_delete BEFORE DELETE ON n_checkpoint BEGIN SELECT
 
 -- trigger n_checkpoint_no_update
 CREATE TRIGGER n_checkpoint_no_update BEFORE UPDATE ON n_checkpoint BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint is append-only (UPDATE forbidden)'); END
+
+-- trigger n_checkpoint_observed_head_no_delete
+CREATE TRIGGER n_checkpoint_observed_head_no_delete BEFORE DELETE ON n_checkpoint_observed_head BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_observed_head is append-only (DELETE forbidden)'); END
+
+-- trigger n_checkpoint_observed_head_no_update
+CREATE TRIGGER n_checkpoint_observed_head_no_update BEFORE UPDATE ON n_checkpoint_observed_head BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_observed_head is append-only (UPDATE forbidden)'); END
 
 -- trigger n_checkpoint_worktree_no_delete
 CREATE TRIGGER n_checkpoint_worktree_no_delete BEFORE DELETE ON n_checkpoint_worktree BEGIN SELECT RAISE(ABORT, 'rift: n_checkpoint_worktree is append-only (DELETE forbidden)'); END
