@@ -360,10 +360,13 @@ fn file_verdict(
     (state, baseline)
 }
 
-/// The delta list's rows, in the order the candidates loaded in: a held file
-/// by path — or, when the caller stated it but this family never recorded
-/// reading it, by path and the tag that says why it earned nothing — and every
-/// other file as a move with its story. A file the caller stated that the
+/// The delta list's rows, one per path, in the order each path first loaded
+/// in. A file with several stored revisions is decided once, against what the
+/// checkout holds now, so an older revision never shows up as a second row
+/// that contradicts the first. A held file is listed by path — or, when the
+/// caller stated it but this family never recorded reading it, by path and the
+/// tag that says why it earned nothing — and every other file is a move with
+/// its story and the hash it has now. A file the caller stated that the
 /// checkout no longer holds, or could not read, is a move too, tagged with
 /// what the checkout found.
 fn deltas<S: CanonicalStore, R: SubstrateReader>(
@@ -378,27 +381,74 @@ fn deltas<S: CanonicalStore, R: SubstrateReader>(
         changed_plain: Vec::new(),
         unchanged: Vec::new(),
     };
-    for lc in loaded {
-        if evidence.holds(known, lc) {
-            let mut entry = json!({ "path": lc.candidate.path });
-            evidence.tag(known, lc, &mut entry);
-            let tagged = entry.as_object().is_some_and(|o| o.len() > 1);
-            rows.unchanged.push(if tagged {
-                entry
-            } else {
-                json!(lc.candidate.path)
-            });
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for first in loaded {
+        let path = first.candidate.path.as_str();
+        if !seen.insert(path) {
             continue;
         }
-        let mut entry = json!({ "path": lc.candidate.path, "new_sha256": lc.content_sha256 });
-        evidence.tag(known, lc, &mut entry);
+        let revisions: Vec<&LoadedCandidate> = loaded
+            .iter()
+            .filter(|lc| lc.candidate.path == path)
+            .collect();
+        let now = current_revision(evidence, path, &revisions);
+        if let Some(held) = now.filter(|lc| evidence.holds(known, lc)) {
+            rows.unchanged.push(unchanged_row(evidence, known, held));
+            continue;
+        }
+        let shown = now.unwrap_or(newest_revision(&revisions).unwrap_or(first));
+        let new_hash = match evidence.current(path) {
+            Some(Current::Verified(hash)) => hash.as_str(),
+            _ => shown.content_sha256.as_str(),
+        };
+        let mut entry = json!({ "path": path, "new_sha256": new_hash });
+        for lc in &revisions {
+            evidence.tag(known, lc, &mut entry);
+        }
         let mut bare = entry.clone();
-        story.attach(ctx.provenance, &mut entry, loaded, lc, known, None);
-        Story::attach_handle(&mut bare, &lc.candidate.path, None);
+        story.attach(ctx.provenance, &mut entry, loaded, shown, known, None);
+        Story::attach_handle(&mut bare, path, None);
         rows.changed.push(entry);
         rows.changed_plain.push(bare);
     }
     rows
+}
+
+/// The stored revision a path's verdict is decided on: the one whose bytes
+/// the checkout holds now, none when the checkout could not read the file,
+/// and the newest stored one when no checkout was asked about it.
+fn current_revision<'a>(
+    evidence: &Evidence,
+    path: &str,
+    revisions: &[&'a LoadedCandidate],
+) -> Option<&'a LoadedCandidate> {
+    match evidence.current(path) {
+        Some(Current::Verified(now)) => revisions
+            .iter()
+            .copied()
+            .find(|lc| lc.content_sha256 == *now),
+        Some(Current::Unverified(_)) => None,
+        None => newest_revision(revisions),
+    }
+}
+
+/// The revision touched last; a tie goes to the one loaded last.
+fn newest_revision<'a>(revisions: &[&'a LoadedCandidate]) -> Option<&'a LoadedCandidate> {
+    revisions
+        .iter()
+        .copied()
+        .max_by_key(|lc| lc.candidate.last_touched)
+}
+
+/// A held file's row: its bare path, or its path and the tag that says why
+/// the hold earned nothing.
+fn unchanged_row(evidence: &Evidence, known: &BTreeSet<&str>, lc: &LoadedCandidate) -> Value {
+    let mut entry = json!({ "path": lc.candidate.path });
+    evidence.tag(known, lc, &mut entry);
+    if entry.as_object().is_some_and(|o| o.len() > 1) {
+        return entry;
+    }
+    json!(lc.candidate.path)
 }
 
 /// The sealed manifest entry for every ranked revision.
