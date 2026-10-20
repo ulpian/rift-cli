@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use rift_agent::window_journal::Line;
+use rift_agent::window_journal::{CallFact, Line};
 use rift_shadow::hooks::AdapterRegistry;
 
 use super::fixtures::*;
@@ -104,14 +104,69 @@ fn a_verification_read_after_a_full_read_and_an_edit_is_denied_once_with_exact_s
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        vec!["read", "edit", "deny", "call", "read"],
+        vec!["read", "edit", "deny", "read"],
         "declined once, then handed the bytes and recorded as holding them"
     );
-    // The decline is also a planned call fact. This fixture's call carries
-    // no native id, so it is recorded as uncorrelatable and never paired.
-    let journal = crate::window_journal::WindowJournal::open(here, "s-delta", None);
-    let calls = crate::window_journal::ineffective_denies(&journal.load().journal);
-    assert_eq!((calls.planned, calls.uncorrelatable), (0, 1));
+}
+
+/// A decline's planned and emitted facts go to the window's call sidecar
+/// under the client's own call id, and the window's journal — what the
+/// window holds — gets none of them.
+#[test]
+fn a_declined_call_is_recorded_in_the_call_sidecar_by_its_id_and_never_in_the_journal() {
+    let tmp = tempfile::tempdir().expect("a work tree");
+    let here = tmp.path();
+    let file = here.join("src.rs");
+    let enforce = levers_for("claude-code", rift_recall_policy::Mode::Enforce);
+    read_then_edit(
+        here,
+        "s-calls",
+        &file,
+        "a\nold\nc\n",
+        "a\nnew\nc\n",
+        ("old\n", "new\n"),
+        &enforce,
+    );
+    let mut payload = whole(&file);
+    payload["tool_use_id"] = serde_json::json!("toolu_9");
+    let verify = hook("claude-code", "PreToolUse", "s-calls", payload);
+    let declined = gate_under(&verify, here, &enforce);
+    assert!(
+        declined.deny_reason.is_some(),
+        "the verification is declined"
+    );
+    let receipt = declined.receipt.expect("a decline carries its receipt");
+    crate::hooks::gate::record_emission(&receipt, true, 0);
+
+    let sidecar = crate::window_journal::CallSidecar::open(here, "s-calls", None);
+    let facts: Vec<_> = sidecar
+        .load()
+        .lines()
+        .iter()
+        .filter_map(|line| match line {
+            Line::Call { call, fact, .. } => Some((call.clone(), *fact)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        facts,
+        vec![
+            (Some("toolu_9".to_owned()), CallFact::Planned),
+            (
+                Some("toolu_9".to_owned()),
+                CallFact::Emitted {
+                    wrote: true,
+                    exit: 0
+                }
+            ),
+        ]
+    );
+    assert!(
+        lines_of(here, "s-calls", None)
+            .iter()
+            .all(|line| !matches!(line, Line::Call { .. })),
+        "the journal holds no call fact"
+    );
 }
 
 /// Reading exactly the lines that changed is the right thing to do, so it

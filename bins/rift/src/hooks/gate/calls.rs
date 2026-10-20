@@ -5,13 +5,15 @@
 //! for the same call writes "applied". All three are keyed by the id the
 //! client gave the call, so a later diagnostic can tell a response that never
 //! left the hook from one the client received and did not act on. Nothing
-//! here opens a store: each fact is one append to the window's own journal.
+//! here opens a store: each fact is one append to the window's call sidecar,
+//! beside its journal and never in it, since the journal models only what
+//! the window holds.
 
 use std::path::{Path, PathBuf};
 
-use rift_agent::window_journal::{CallFact, Journal, Line};
+use rift_agent::window_journal::{CallFact, Line};
 
-use crate::window_journal::WindowJournal;
+use crate::window_journal::CallSidecar;
 
 /// What the gate concluded about a call, handed back to the hook that
 /// answers it.
@@ -44,6 +46,13 @@ pub(super) struct Window<'a> {
     pub(super) at_ms: u64,
 }
 
+impl Window<'_> {
+    /// This window's call sidecar.
+    fn sidecar(&self) -> CallSidecar {
+        CallSidecar::open(self.work_tree, self.session, self.child)
+    }
+}
+
 /// The id the client gave this call, or `None` when it sent none.
 ///
 /// Claude Code and Codex both name a tool call `tool_use_id` on the pre and
@@ -56,13 +65,9 @@ pub(super) fn native_call_id(payload: &serde_json::Value) -> Option<String> {
 
 /// Record that the gate declined this call, and hand back the receipt the
 /// hook records its emission against.
-pub(super) fn plan_decline(
-    window: &Window<'_>,
-    journal: &WindowJournal,
-    payload: &serde_json::Value,
-) -> CallReceipt {
+pub(super) fn plan_decline(window: &Window<'_>, payload: &serde_json::Value) -> CallReceipt {
     let call = native_call_id(payload);
-    let _ = journal.append(&Line::Call {
+    let _ = window.sidecar().append(&Line::Call {
         turn: window.turn,
         call: call.clone(),
         fact: CallFact::Planned,
@@ -82,15 +87,12 @@ pub(super) fn plan_decline(
 ///
 /// Only a call with a planned decline under the same id is written, so an
 /// ordinary result costs no row. A result with no id is not paired at all.
-pub(super) fn record_applied(
-    window: &Window<'_>,
-    journal: &WindowJournal,
-    held: &Journal,
-    payload: &serde_json::Value,
-) {
+pub(super) fn record_applied(window: &Window<'_>, payload: &serde_json::Value) {
     let Some(call) = native_call_id(payload) else {
         return;
     };
+    let sidecar = window.sidecar();
+    let held = sidecar.load();
     let fact_of = |wanted: CallFact| {
         held.lines().iter().any(|line| {
             matches!(line, Line::Call { call: Some(id), fact, .. } if *id == call && *fact == wanted)
@@ -100,7 +102,7 @@ pub(super) fn record_applied(
     if !fact_of(CallFact::Planned) || fact_of(CallFact::Applied) {
         return;
     }
-    let _ = journal.append(&Line::Call {
+    let _ = sidecar.append(&Line::Call {
         turn: window.turn,
         call: Some(call),
         fact: CallFact::Applied,
@@ -114,12 +116,12 @@ pub(super) fn record_applied(
 /// Stamped with the millisecond the decline was planned at, because the hook
 /// reads no clock of its own and the two happen in one process.
 pub(in crate::hooks) fn record_emission(receipt: &CallReceipt, wrote: bool, exit: i32) {
-    let journal = WindowJournal::open(
+    let sidecar = CallSidecar::open(
         &receipt.work_tree,
         &receipt.session,
         receipt.child.as_deref(),
     );
-    let _ = journal.append(&Line::Call {
+    let _ = sidecar.append(&Line::Call {
         turn: receipt.turn,
         call: receipt.call.clone(),
         fact: CallFact::Emitted { wrote, exit },

@@ -203,9 +203,7 @@ fn under_the_default_policy_a_first_read_is_answered_with_the_outline_once() {
         .iter()
         .map(rift_agent::window_journal::Line::kind)
         .collect();
-    // The decline also plans its call, so the journal names it once more; the
-    // outline itself is still one row, and nothing in the window is coverage.
-    assert_eq!(kinds, ["outline", "call"], "the outline is not coverage");
+    assert_eq!(kinds, ["outline"], "the outline is not coverage");
     let rows = first_contact_rows(here);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(

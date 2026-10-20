@@ -54,15 +54,6 @@ impl Chain {
         self.lines().iter().map(Line::kind).collect()
     }
 
-    /// The lines the members wrote, without the `call` rows: a call row is
-    /// one per tool call, so a chain of two members writes one where two
-    /// lone calls write two.
-    fn member_lines(&self) -> Vec<Line> {
-        let mut lines = self.lines();
-        lines.retain(|line| line.kind() != "call");
-        lines
-    }
-
     fn runs_held_of(&self, rel: &str) -> Vec<Interval> {
         lines_journal(self.here(), "s-chain")
             .read_coverage(rel, revision(self.here(), rel))
@@ -138,12 +129,8 @@ fn a_chain_of_a_held_and_a_narrowable_member_is_declined_one_sentence_each() {
     }
     assert!(lone.enforced(&[CAT_SRC]).is_some());
     assert!(lone.enforced(&[OTHER_ALL]).is_some());
-    assert_eq!(joined.kinds(), ["read", "read", "deny", "deny", "call"]);
-    assert_eq!(
-        joined.member_lines(),
-        lone.member_lines(),
-        "each member's line, as alone"
-    );
+    assert_eq!(joined.kinds(), ["read", "read", "deny", "deny"]);
+    assert_eq!(joined.lines(), lone.lines(), "each member's line, as alone");
     assert_eq!(
         joined.bookings(),
         lone.bookings(),
@@ -172,7 +159,7 @@ fn the_identical_chain_after_its_decline_runs_and_records_the_whole_ranges() {
     assert_eq!(chain.enforced(&[CAT_SRC, OTHER_ALL]), None);
     assert_eq!(
         chain.kinds(),
-        ["read", "read", "deny", "deny", "call", "read", "read"]
+        ["read", "read", "deny", "deny", "read", "read"]
     );
     assert_eq!(chain.runs_held_of("other.rs"), [Interval { lo: 1, hi: 60 }]);
     assert_eq!(chain.runs_held_of("src.rs"), [Interval { lo: 1, hi: 60 }]);

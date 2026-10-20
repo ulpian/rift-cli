@@ -216,7 +216,7 @@ mod tests {
             "\n",
         );
         std::fs::write(
-            reads.join(format!("{}.jsonl", window_journal::key("s2", None))),
+            reads.join(format!("{}.calls.jsonl", window_journal::key("s2", None))),
             pair.as_bytes(),
         )
         .unwrap();
