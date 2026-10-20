@@ -4,7 +4,11 @@
 //! * **Receipt** is the caller's: the live window-journal line the read gate
 //!   wrote, with the native invocation id when the hook event carried one.
 //! * **Durable capture** is the capture projection's `checkpoint.created_at`
-//!   for the checkpoint whose `n_window_row` holds the read.
+//!   for the checkpoint whose `n_window_row` holds the read. Until an ingest
+//!   has walked that far, no window row exists, so the projection's own read
+//!   facts stand in: the one session whose tool call read this path at this
+//!   hash, and the first checkpoint sealed over that session after the call.
+//!   Reads by two sessions of the same path and hash leave it ambiguous.
 //! * **Query readiness** is the earliest `ingest_watermark.ingested_at` whose
 //!   walk position covers that checkpoint's ordinal.
 //! * **Final delivery** is the emitted call fact with the read's invocation id
@@ -168,7 +172,7 @@ async fn stage_facts(
             StageFact::at_by_path_hash(sealed_at(stores.capture, checkpoint).await?),
             StageFact::at_by_path_hash(ingested_at(stores.recall, checkpoint).await?),
         ),
-        _ => (StageFact::Absent, StageFact::Absent),
+        _ => captured_by_projection(stores, receipt).await?,
     };
     let delivered = match delivery_by_invocation(receipts, receipt, calls) {
         StageFact::Absent if ambiguous => ambiguous_by_path_hash(),
@@ -241,6 +245,49 @@ async fn read_row_checkpoints(
     );
     let rows = recall.query(&sql, &key_params(receipt)).await?;
     rows.iter().map(|row| row.get_text(0)).collect()
+}
+
+/// Capture and query readiness from the projection's read facts, for a read
+/// no ingest has turned into a window row yet. Recall ingest runs behind
+/// capture, so keying capture on the ingested row alone reported every
+/// recent read as never captured.
+async fn captured_by_projection(
+    stores: StageStores<'_>,
+    receipt: &ReadReceipt<'_>,
+) -> Result<(StageFact, StageFact)> {
+    let sql = "SELECT t.session_id, MIN(c.started_at) FROM file_revision f \
+               JOIN tool_reads_file r ON r.file_revision_id = f.file_revision_id \
+               JOIN tool_call c ON c.tool_call_id = r.tool_call_id \
+               JOIN turn t ON t.turn_id = c.turn_id \
+               WHERE f.path = ?1 AND f.content_sha256 = ?2 GROUP BY t.session_id";
+    let params = [
+        Value::text(receipt.path),
+        Value::text(receipt.content_sha256),
+    ];
+    let sessions = stores.capture.query(sql, &params).await?;
+    let [session] = sessions.as_slice() else {
+        if sessions.is_empty() {
+            return Ok((StageFact::Absent, StageFact::Absent));
+        }
+        return Ok((ambiguous_by_path_hash(), ambiguous_by_path_hash()));
+    };
+    let sql = "SELECT k.checkpoint_id, k.created_at FROM session_in_checkpoint s \
+               JOIN checkpoint k ON k.checkpoint_id = s.checkpoint_id \
+               WHERE s.session_id = ?1 AND k.created_at >= ?2 \
+               ORDER BY k.created_at, k.checkpoint_id LIMIT 1";
+    let params = [
+        Value::text(session.get_text(0)?),
+        Value::Int(session.get_i64(1)?),
+    ];
+    let sealed = stores.capture.query(sql, &params).await?;
+    let Some(row) = sealed.first() else {
+        return Ok((StageFact::Absent, StageFact::Absent));
+    };
+    let checkpoint = row.get_text(0)?;
+    Ok((
+        StageFact::at_by_path_hash(Some(row.get_i64(1)?)),
+        StageFact::at_by_path_hash(ingested_at(stores.recall, &checkpoint).await?),
+    ))
 }
 
 /// The first column of the first row, or nothing when no row or a null came
