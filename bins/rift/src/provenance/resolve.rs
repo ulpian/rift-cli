@@ -47,6 +47,21 @@ pub(super) enum Tag {
     Unknown,
 }
 
+impl AttrCounts {
+    /// Two rows for one path in one checkpoint: the counts add, and the
+    /// weakest confidence is the honest one to report.
+    pub(super) fn merge(self, c: Self) -> Self {
+        Self {
+            agent_added: self.agent_added.saturating_add(c.agent_added),
+            human_added: self.human_added.saturating_add(c.human_added),
+            human_modified_agent: self
+                .human_modified_agent
+                .saturating_add(c.human_modified_agent),
+            confidence_milli: self.confidence_milli.min(c.confidence_milli),
+        }
+    }
+}
+
 impl Tag {
     /// The tag implied by a checkpoint's per-file counts.
     pub(super) fn of(counts: Option<&AttrCounts>) -> Self {
@@ -227,16 +242,7 @@ async fn file_counts(store: &SqliteStore, id: &str, path: &str) -> Result<Option
             human_modified_agent: r.get_i64(2)?,
             confidence_milli: r.get_i64(3)?,
         };
-        acc = Some(acc.map_or(c, |a| {
-            AttrCounts {
-                agent_added: a.agent_added.saturating_add(c.agent_added),
-                human_added: a.human_added.saturating_add(c.human_added),
-                human_modified_agent: a
-                    .human_modified_agent
-                    .saturating_add(c.human_modified_agent),
-                confidence_milli: a.confidence_milli.min(c.confidence_milli),
-            }
-        }));
+        acc = Some(acc.map_or(c, |a| a.merge(c)));
     }
     Ok(acc)
 }

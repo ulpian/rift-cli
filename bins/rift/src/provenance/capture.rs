@@ -7,9 +7,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use rift_core::Result;
-use rift_recall_types::{CheckpointFacts as ServedFacts, ProvenanceOracle, TokenClasses};
+use rift_recall_types::{Author, CheckpointFacts as ServedFacts, ProvenanceOracle, TokenClasses};
 use rift_store::capture::{checkpoint_window_tokens, WindowScope};
 use rift_store::{quote_usage_costs, CanonicalStore, CostQuoteScope, SqliteStore};
+
+use super::resolve::{AttrCounts, Tag};
 
 /// The facts a pull verb's `provenance` object needs and the recall projection
 /// does not hold: when a checkpoint was recorded, which session and agent
@@ -43,6 +45,17 @@ pub(crate) struct CaptureProvenance {
     by_checkpoint: HashMap<String, ServedFacts>,
     /// Commit oid → its subject line, for the commits this checkout can see.
     subjects: HashMap<String, String>,
+    /// (checkpoint, path) → the attribution recorded for that file there.
+    files: HashMap<(String, String), FileRecord>,
+}
+
+/// One file's attribution at one checkpoint: the per-file counts `rift why`
+/// reads, and the per-hunk categories that can split a mixed file by line.
+#[derive(Default)]
+struct FileRecord {
+    counts: Option<AttrCounts>,
+    /// New-side start (0-based, the diff convention), length, and category.
+    hunks: Vec<(i64, i64, String)>,
 }
 
 /// How far back the commit-subject map reads.
@@ -62,6 +75,7 @@ impl CaptureProvenance {
         let mut out = Self {
             by_checkpoint: HashMap::new(),
             subjects: HashMap::new(),
+            files: HashMap::new(),
         };
         if let Ok(store) = SqliteStore::open_read_only(db) {
             let _ = out.read_projection(&store).await;
@@ -83,7 +97,47 @@ impl CaptureProvenance {
             entry.session = Some(first.session_id);
         }
         self.read_window_tokens(store).await?;
-        self.read_window_costs(store).await
+        self.read_window_costs(store).await?;
+        self.read_attribution(store).await
+    }
+
+    /// WHO each checkpoint's attribution credits, per file and per hunk. Read
+    /// last, so a store too old to carry the tables loses only this, and every
+    /// change in it stays unknown rather than credited.
+    async fn read_attribution(&mut self, store: &SqliteStore) -> Result<()> {
+        for r in store
+            .query(
+                "SELECT a.checkpoint_id, fr.path, a.agent_added, a.human_added, \
+                 a.human_modified_agent, a.confidence_milli FROM attribution a \
+                 JOIN file_revision fr ON fr.file_revision_id = a.file_revision_id",
+                &[],
+            )
+            .await?
+        {
+            let c = AttrCounts {
+                agent_added: r.get_i64(2)?,
+                human_added: r.get_i64(3)?,
+                human_modified_agent: r.get_i64(4)?,
+                confidence_milli: r.get_i64(5)?,
+            };
+            let key = (r.get_text(0)?, r.get_text(1)?);
+            let record = self.files.entry(key).or_default();
+            record.counts = Some(record.counts.map_or(c, |a| a.merge(c)));
+        }
+        for r in store
+            .query(
+                "SELECT h.checkpoint_id, fr.path, h.new_start, h.new_len, h.category \
+                 FROM attribution_hunk h \
+                 JOIN file_revision fr ON fr.file_revision_id = h.file_revision_id",
+                &[],
+            )
+            .await?
+        {
+            let key = (r.get_text(0)?, r.get_text(1)?);
+            let hunk = (r.get_i64(2)?, r.get_i64(3)?, r.get_text(4)?);
+            self.files.entry(key).or_default().hunks.push(hunk);
+        }
+        Ok(())
     }
 
     /// WHEN each checkpoint was recorded.
@@ -172,6 +226,49 @@ impl ProvenanceOracle for CaptureProvenance {
     fn commit_subject(&self, oid: &str) -> Option<String> {
         self.subjects.get(oid).cloned()
     }
+
+    fn author(&self, checkpoint_id: &str, path: &str, line: Option<u32>) -> Author {
+        self.files
+            .get(&(checkpoint_id.to_owned(), path.to_owned()))
+            .map_or(Author::Unknown, |record| record.author(line))
+    }
+}
+
+impl FileRecord {
+    /// The hunks covering `line` decide when there are any; otherwise the
+    /// file's counts do, through the same tag `rift why` prints, so a file
+    /// both wrote is never handed to one of them.
+    fn author(&self, line: Option<u32>) -> Author {
+        let covering: Vec<&str> = line.map_or_else(Vec::new, |n| self.categories_at(n));
+        if covering.is_empty() {
+            return match Tag::of(self.counts.as_ref()) {
+                Tag::Ai => Author::Agent,
+                Tag::Human => Author::Human,
+                Tag::Mixed => Author::Mixed,
+                Tag::Unknown => Author::Unknown,
+            };
+        }
+        let agent = covering.contains(&"agent_added");
+        let human = covering
+            .iter()
+            .any(|c| matches!(*c, "human_added" | "human_modified_agent"));
+        match (agent, human) {
+            (true, false) => Author::Agent,
+            (false, true) => Author::Human,
+            (true, true) => Author::Mixed,
+            (false, false) => Author::Unknown,
+        }
+    }
+
+    /// The categories of the hunks whose new side holds 1-based `line`.
+    fn categories_at(&self, line: u32) -> Vec<&str> {
+        let at = i64::from(line) - 1;
+        self.hunks
+            .iter()
+            .filter(|(start, len, _)| *start <= at && at < start.saturating_add(*len))
+            .map(|(_, _, category)| category.as_str())
+            .collect()
+    }
 }
 
 /// The session that took a checkpoint, and its agent family as the `session`
@@ -211,6 +308,39 @@ async fn read_first_sessions(store: &SqliteStore) -> Result<BTreeMap<String, Fir
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent hunk and a between-turns hunk in one file: each line goes to
+    /// the hunk that holds it, and a line in neither falls back to the file's
+    /// tag, which for a file both wrote names no one.
+    #[test]
+    fn provenance_author_follows_the_hunk_that_holds_the_line() {
+        let record = FileRecord {
+            counts: Some(AttrCounts {
+                agent_added: 2,
+                human_added: 1,
+                human_modified_agent: 0,
+                confidence_milli: 1000,
+            }),
+            hunks: vec![
+                (1, 2, "agent_added".to_owned()),
+                (5, 1, "human_added".to_owned()),
+            ],
+        };
+        assert_eq!(record.author(Some(2)), Author::Agent);
+        assert_eq!(record.author(Some(3)), Author::Agent);
+        assert_eq!(record.author(Some(6)), Author::Human);
+        assert_eq!(record.author(Some(1)), Author::Mixed);
+        assert_eq!(record.author(None), Author::Mixed);
+        let human_only = FileRecord {
+            counts: Some(AttrCounts {
+                human_added: 2,
+                ..AttrCounts::default()
+            }),
+            hunks: Vec::new(),
+        };
+        assert_eq!(human_only.author(Some(1)), Author::Human);
+        assert_eq!(FileRecord::default().author(Some(1)), Author::Unknown);
+    }
 
     async fn quote_fixture(s: &SqliteStore) {
         let turn = rift_store::TurnRow {
@@ -421,6 +551,7 @@ mod tests {
         let mut out = CaptureProvenance {
             by_checkpoint: HashMap::new(),
             subjects: HashMap::new(),
+            files: HashMap::new(),
         };
         out.read_projection(s).await.unwrap();
         out

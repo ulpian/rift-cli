@@ -27,7 +27,7 @@ pub mod provenance;
 pub mod scope;
 
 pub use outcome::{LabelSubject, OutcomeKind, OUTCOME_KINDS};
-pub use provenance::{CheckpointFacts, NoProvenance, ProvenanceOracle, TokenClasses};
+pub use provenance::{Author, CheckpointFacts, NoProvenance, ProvenanceOracle, TokenClasses};
 pub use scope::{
     AncestorSet, AncestryOracle, BranchScope, CheckpointWindow, CrossScopeGrant, DeveloperScope,
     NoAncestry, SameMember, Scope, WorktreeScope, ANCESTRY_WALK_CAP,
