@@ -18,7 +18,13 @@
 //! Read-only arithmetic over facts other code already wrote: this module opens
 //! no store and adds no index.
 
+mod sources;
+
 use serde::Serialize;
+
+pub use sources::{
+    read_stage_facts, CallEmission, ReadReceipt, ReadStageFacts, StageFact, StageJoin, StageStores,
+};
 
 /// How far along the archive chain a read has come.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
