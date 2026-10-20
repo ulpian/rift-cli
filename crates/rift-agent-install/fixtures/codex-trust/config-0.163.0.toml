@@ -1,0 +1,42 @@
+# Codex's hook-trust record for hooks-0.163.0.json beside this file, as
+# Codex 0.163.0 writes it into ~/.codex/config.toml.
+#
+# Recorded from a real machine after the user re-trusted Rift's hooks in
+# 0.163.0 (`/hooks`), over the release-binary handlers hooks-0.163.0.json
+# holds. Rift's existing reconstruction reproduces all ten hashes: 0.163.0
+# hashes Rift's handlers the way 0.157.0 does. `enabled = true` is Codex's
+# own field on the record and is kept as written.
+#
+# The test substitutes @HOOKS_JSON@ with the absolute path it copies the hook
+# file to, because Codex keys every record by that path.
+
+[hooks.state."@HOOKS_JSON@:pre_tool_use:0:0"]
+trusted_hash = "sha256:98adbc535fe78e1a7a2bc1e362c44e608e6c7561b061b711aea6c16bd8401158"
+enabled = true
+
+[hooks.state."@HOOKS_JSON@:post_tool_use:0:0"]
+trusted_hash = "sha256:c57062ebab87240238895cb7e32e00cec33c5203ae3bb53fe5e9a5b3a3eaccc4"
+
+[hooks.state."@HOOKS_JSON@:pre_compact:0:0"]
+trusted_hash = "sha256:66d16f93a9ac07b42c01c28281e450f60a303ad8bac63955072678d57f2fef39"
+
+[hooks.state."@HOOKS_JSON@:post_compact:0:0"]
+trusted_hash = "sha256:0994fbe549b4be3ad8428457fd35ca33468801a237f38846b53a73e5380e1243"
+
+[hooks.state."@HOOKS_JSON@:session_start:0:0"]
+trusted_hash = "sha256:3c5f23d3cff0048e006ac5962369f6a06608fe1bc4c4e5a64d542c739edfb329"
+
+[hooks.state."@HOOKS_JSON@:session_end:0:0"]
+trusted_hash = "sha256:c8f09710c2a5c04055c8584d003f5c8089376877e9a023be86cbce25874ffb46"
+
+[hooks.state."@HOOKS_JSON@:user_prompt_submit:0:0"]
+trusted_hash = "sha256:bbfbf86ec028a0cfc440c2a853c62c54de24a8118d324cd6bec6fe49d1691c24"
+
+[hooks.state."@HOOKS_JSON@:subagent_start:0:0"]
+trusted_hash = "sha256:577dcf9fcd0551369bcdb77ada00425e6cae6eb911c7db7117dcefc68e5d8b4e"
+
+[hooks.state."@HOOKS_JSON@:subagent_stop:0:0"]
+trusted_hash = "sha256:30710ddac4d37e40a748fd9c541bb462466336e24c070952c1013813555773a3"
+
+[hooks.state."@HOOKS_JSON@:stop:0:0"]
+trusted_hash = "sha256:49a99e81b05dc9c0b31830b4f1ee6153d261d064701c18bcea297e2a68f32538"

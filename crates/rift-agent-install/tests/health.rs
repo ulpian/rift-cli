@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rift_agent_install::health::{assess, Facts, Finding, Reason, Severity};
+use rift_agent_install::health::{assess, remedy, Facts, Finding, Reason, Severity, Surface};
 use rift_agent_install::native::{
     CodexClient, CodexHookTrust, CodexHookVerdict, CodexSurface, CodexTrust,
 };
@@ -160,7 +160,11 @@ fn every_reason_serialises_to_its_stable_string_and_severity() {
         .collect();
     assert_eq!(
         warnings,
-        [Reason::CodexTrustUnverifiable, Reason::HookBinaryDisagrees]
+        [
+            Reason::CodexTrustUnverifiable,
+            Reason::CodexVersionUnsupported,
+            Reason::HookBinaryDisagrees
+        ]
     );
     assert_eq!(serde_json::to_value(Severity::Error).unwrap(), "error");
     assert_eq!(serde_json::to_value(Severity::Warning).unwrap(), "warning");
@@ -188,11 +192,28 @@ fn codex_trusting_every_hook_reports_nothing() {
 #[test]
 fn an_unproven_codex_version_is_a_warning_naming_the_version() {
     let mut facts = facts(&[], None);
-    facts.codex_trust = Some(codex(&[CodexHookVerdict::Unverifiable; 2], "0.999.0"));
+    facts.codex_trust = Some(codex(&[CodexHookVerdict::Unverifiable; 2], "0.150.0"));
     let findings = assess(&facts, NOW);
     assert_eq!(reasons(&findings), [Reason::CodexTrustUnverifiable]);
     assert_eq!(findings[0].severity, Severity::Warning);
-    assert_eq!(findings[0].detail, "codex 0.999.0");
+    assert_eq!(findings[0].detail, "codex 0.150.0");
+}
+
+#[test]
+fn a_codex_newer_than_every_pin_is_an_unsupported_version_warning_not_untrusted() {
+    let mut facts = facts(&[], None);
+    facts.codex_trust = Some(codex(&[CodexHookVerdict::Unverifiable; 2], "0.164.0"));
+    let findings = assess(&facts, NOW);
+    assert_eq!(reasons(&findings), [Reason::CodexVersionUnsupported]);
+    assert_eq!(findings[0].severity, Severity::Warning);
+    assert_eq!(findings[0].detail, "codex 0.164.0");
+    let trust = facts.codex_trust.as_ref();
+    let sentence = remedy(&findings[0], Surface::Terminal, trust).sentence;
+    let summary = trust.map(CodexTrust::summary).unwrap_or_default();
+    assert!(summary.starts_with("unsupported version — Codex 0.164.0 is newer than 0.163.0"));
+    let shared = summary.trim_start_matches("unsupported version — ");
+    assert!(sentence.starts_with(shared), "{sentence}");
+    assert!(!sentence.contains("untrusted"), "{sentence}");
 }
 
 #[test]

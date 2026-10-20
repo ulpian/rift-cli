@@ -1,0 +1,118 @@
+{
+  "hooks": {
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex PostCompact",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex PostToolUse",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex PreCompact",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex PreToolUse",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex SessionEnd",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "additionalContextLimit": 1200,
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex SessionStart",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex Stop",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex SubagentStart",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex SubagentStop",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "additionalContextLimit": 1200,
+            "command": "\"/Users/ulpian/Documents/codebase/rift/rift-cli/target/release/rift\" hooks codex UserPromptSubmit",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
