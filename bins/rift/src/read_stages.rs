@@ -326,6 +326,16 @@ mod tests {
     }
 
     #[test]
+    fn read_stages_ingest_stamped_zero_is_queryable_with_no_lag_and_no_anomaly() {
+        let summary = summarize(&[facts(100, at(150), at(0))], NOW);
+        let json = summary_json(Some(&summary));
+        assert_eq!(json["furthest"]["queryable"], serde_json::json!(1));
+        assert_eq!(json["lag"]["query"]["p50_ms"], serde_json::Value::Null);
+        assert_eq!(json["anomalies"], serde_json::json!(0));
+        assert_eq!(json["never_queryable"], serde_json::json!(0));
+    }
+
+    #[test]
     fn read_stages_ambiguous_read_is_counted_apart_and_never_called_stuck() {
         let ambiguous = StageFact::Ambiguous {
             join: StageJoin::PathHash,
