@@ -122,6 +122,12 @@ const LOCK_WAIT_ATTEMPTS: u32 = 40;
 
 const LOCK_WAIT_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread's drains levelled the projection.
+    static LEVELS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Condense every queued commit, oldest first, under the drain lock.
 ///
 /// An entry that fails is **kept** and marked, so the next worker retries it and
@@ -269,19 +275,27 @@ fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: Drain
     let mut attempted = std::collections::BTreeSet::new();
     loop {
         let pass = drain_locked(&t, git_dir, &owner, &mut attempted, policy);
-        all.minted |= pass.minted;
+        let mut minted = pass.minted;
         all.condensed.extend(pass.condensed);
         if !pass.ready {
+            all.minted |= minted;
             return all;
         }
         all.ready = true;
         if sweep {
             let swept = super::sweep::sweep_idle_family(&owner, now_ms(), None);
-            all.minted |= !swept.condensed_checkpoints.is_empty();
+            minted |= !swept.condensed_checkpoints.is_empty();
         }
-        if all.minted && crate::family::run_state::prepare_owned(&owner).is_ok() {
+        all.minted |= minted;
+        // Only a pass that wrote a checkpoint levels. Keying this on the
+        // worker's whole life made every later pass re-walk the whole
+        // checkpoint branch once anything had been written, and while agents
+        // kept enqueueing jobs that kept the worker CPU-bound on the lock.
+        if minted && crate::family::run_state::prepare_owned(&owner).is_ok() {
             let levelled = level_after_condense(git_dir);
             tracing::debug!(?levelled, "projection levelled under queue owner");
+            #[cfg(test)]
+            LEVELS.with(|levels| levels.set(levels.get() + 1));
         }
         #[cfg(test)]
         run_state_tests::pause_before_owner_release();
