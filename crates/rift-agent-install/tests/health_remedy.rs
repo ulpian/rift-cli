@@ -49,7 +49,7 @@ fn finding(reason: Reason) -> Finding {
             Finding::new(reason, "codex", None, "codex 0.156.0".to_owned())
         }
         Reason::CodexVersionUnsupported => {
-            Finding::new(reason, "codex", None, "codex 0.163.0".to_owned())
+            Finding::new(reason, "codex", None, "codex 0.164.0".to_owned())
         }
         Reason::LifecycleHooksMissing => Finding::new(
             reason,

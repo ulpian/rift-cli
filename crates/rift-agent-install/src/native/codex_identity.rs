@@ -27,7 +27,10 @@ use sha2::{Digest as _, Sha256};
 /// a record taken before the user re-trusted two modified handlers, so it
 /// carries two mismatches. `fixtures/codex-trust/config-0.157.0.toml` pins
 /// 0.157.0: the record taken after that re-trust, all ten hashes current.
-pub(super) const PROVEN_CODEX_VERSIONS: [&str; 3] = ["0.153.1", "0.155.0-alpha.16.3", "0.157.0"];
+/// `fixtures/codex-trust/config-0.163.0.toml` pins 0.163.0: its re-trust of
+/// the release-binary handlers in `hooks-0.163.0.json`, all ten reproduced.
+pub(super) const PROVEN_CODEX_VERSIONS: [&str; 4] =
+    ["0.153.1", "0.155.0-alpha.16.3", "0.157.0", "0.163.0"];
 
 /// The newest of [`PROVEN_CODEX_VERSIONS`], the one a newer client is
 /// measured against.

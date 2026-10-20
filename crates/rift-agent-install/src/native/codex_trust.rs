@@ -391,6 +391,9 @@ mod tests {
     const FIXTURE_CONFIG: &str = include_str!("../../fixtures/codex-trust/config.toml");
     const FIXTURE_CONFIG_0157: &str =
         include_str!("../../fixtures/codex-trust/config-0.157.0.toml");
+    const FIXTURE_HOOKS_0163: &str = include_str!("../../fixtures/codex-trust/hooks-0.163.0.json");
+    const FIXTURE_CONFIG_0163: &str =
+        include_str!("../../fixtures/codex-trust/config-0.163.0.toml");
     const FIXTURE_HASHES: &str = include_str!("../../fixtures/codex-trust/expected-hashes.txt");
 
     /// A checkout holding the fixture hook file, and a Codex home beside it.
@@ -514,7 +517,7 @@ mod tests {
     fn a_codex_0157_record_taken_after_re_trust_reads_all_ten_hooks_trusted() {
         let machine = machine(FIXTURE_HOOKS);
         record(&machine, FIXTURE_CONFIG_0157, &machine.hooks_json);
-        for version in ["0.157.0", "0.155.0-alpha.16.3"] {
+        for version in ["0.163.0", "0.157.0", "0.155.0-alpha.16.3"] {
             let trust = codex_hook_trust(
                 &machine.hooks_json,
                 Some(&machine.home),
@@ -557,6 +560,27 @@ mod tests {
         );
     }
 
+    /// The record Codex 0.163.0 wrote when the user re-trusted the
+    /// release-binary handlers: Rift's reconstruction reproduces all ten
+    /// hashes, so 0.163.0 hashes the way 0.157.0 does and is judged.
+    #[test]
+    fn a_codex_0163_record_over_the_release_handlers_reads_all_ten_hooks_trusted() {
+        let machine = machine(FIXTURE_HOOKS_0163);
+        record(&machine, FIXTURE_CONFIG_0163, &machine.hooks_json);
+        let trust = codex_hook_trust(
+            &machine.hooks_json,
+            Some(&machine.home),
+            client(CodexSurface::Terminal, "0.163.0"),
+        );
+        assert_eq!(trust.state(), "trusted");
+        assert_eq!(trust.unsupported_version(), None);
+        assert_eq!(trust.summary(), "trusted (10 of 10 hooks)");
+        assert!(trust
+            .hooks
+            .iter()
+            .all(|hook| hook.verdict == CodexHookVerdict::Trusted));
+    }
+
     /// Only the versions the fixtures were recorded against are judged; an
     /// older or in-between version says unverifiable, and says why, rather
     /// than guessing.
@@ -595,8 +619,8 @@ mod tests {
 
     /// A client newer than every pinned version is its own state, never
     /// "untrusted": the record may well be current, Rift just cannot hash
-    /// the way that client does. Codex 0.163.0 is the owner's client at the
-    /// time of writing, and its record still holds the 0.157.0 hashes.
+    /// the way that client does. 0.164.0 stands for any client released
+    /// after the newest pin.
     #[test]
     fn a_codex_newer_than_every_pin_is_an_unsupported_version_not_untrusted() {
         let machine = machine(FIXTURE_HOOKS);
@@ -604,15 +628,15 @@ mod tests {
         let trust = codex_hook_trust(
             &machine.hooks_json,
             Some(&machine.home),
-            client(CodexSurface::Terminal, "0.163.0"),
+            client(CodexSurface::Terminal, "0.164.0"),
         );
         assert!(trust.needs_review().is_empty());
         assert_eq!(trust.state(), "unsupported_version");
-        assert_eq!(trust.unsupported_version(), Some("0.163.0"));
+        assert_eq!(trust.unsupported_version(), Some("0.164.0"));
         assert_eq!(trust.remedy(), None);
         assert_eq!(
             trust.summary(),
-            "unsupported version — Codex 0.163.0 is newer than 0.157.0, the newest Codex \
+            "unsupported version — Codex 0.164.0 is newer than 0.163.0, the newest Codex \
              version Rift's hook-trust check is proven against, so Rift cannot tell whether \
              Codex runs its hooks"
         );

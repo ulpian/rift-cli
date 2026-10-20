@@ -202,15 +202,15 @@ fn an_unproven_codex_version_is_a_warning_naming_the_version() {
 #[test]
 fn a_codex_newer_than_every_pin_is_an_unsupported_version_warning_not_untrusted() {
     let mut facts = facts(&[], None);
-    facts.codex_trust = Some(codex(&[CodexHookVerdict::Unverifiable; 2], "0.163.0"));
+    facts.codex_trust = Some(codex(&[CodexHookVerdict::Unverifiable; 2], "0.164.0"));
     let findings = assess(&facts, NOW);
     assert_eq!(reasons(&findings), [Reason::CodexVersionUnsupported]);
     assert_eq!(findings[0].severity, Severity::Warning);
-    assert_eq!(findings[0].detail, "codex 0.163.0");
+    assert_eq!(findings[0].detail, "codex 0.164.0");
     let trust = facts.codex_trust.as_ref();
     let sentence = remedy(&findings[0], Surface::Terminal, trust).sentence;
     let summary = trust.map(CodexTrust::summary).unwrap_or_default();
-    assert!(summary.starts_with("unsupported version — Codex 0.163.0 is newer than 0.157.0"));
+    assert!(summary.starts_with("unsupported version — Codex 0.164.0 is newer than 0.163.0"));
     let shared = summary.trim_start_matches("unsupported version — ");
     assert!(sentence.starts_with(shared), "{sentence}");
     assert!(!sentence.contains("untrusted"), "{sentence}");
