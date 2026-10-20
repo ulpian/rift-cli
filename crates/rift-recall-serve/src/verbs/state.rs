@@ -396,6 +396,12 @@ fn deltas<S: CanonicalStore, R: SubstrateReader>(
             rows.unchanged.push(unchanged_row(evidence, known, held));
             continue;
         }
+        // The checkout holds the stated bytes but the projection never stored
+        // them (an edit newer than the last ingest): the disk decides.
+        if now.is_none() && evidence.checkout_holds_stated(known, path) {
+            rows.unchanged.push(json!(path));
+            continue;
+        }
         let shown = now.unwrap_or(newest_revision(&revisions).unwrap_or(first));
         let new_hash = match evidence.current(path) {
             Some(Current::Verified(hash)) => hash.as_str(),

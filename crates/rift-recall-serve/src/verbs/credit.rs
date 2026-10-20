@@ -93,10 +93,20 @@ impl Evidence {
             return Self::empty(checkout);
         }
         let recorded = recorded_reads(ctx.store, known).await.unwrap_or_default();
+        // A stated hash the projection never stored nor recorded as read can
+        // belong to any loaded file: a hand edit committed after the last
+        // ingest is the usual case. Only the checkout can say which file holds
+        // it, so every loaded path is read rather than trusting the store's
+        // older revision.
+        let unplaced = known.iter().any(|hash| {
+            !loaded.iter().any(|lc| lc.content_sha256 == *hash)
+                && !recorded.iter().any(|(_, h)| h == hash)
+        });
         let claimed: BTreeSet<&str> = loaded
             .iter()
             .filter(|lc| {
-                known.contains(lc.content_sha256.as_str())
+                unplaced
+                    || known.contains(lc.content_sha256.as_str())
                     || recorded.iter().any(|(path, _)| *path == lc.candidate.path)
             })
             .map(|lc| lc.candidate.path.as_str())
@@ -165,6 +175,15 @@ impl Evidence {
             return true;
         }
         self.is_current(lc)
+    }
+
+    /// Whether the bytes on disk at `path` hash to something the caller
+    /// stated, whatever the projection stored for that path.
+    pub(crate) fn checkout_holds_stated(&self, known: &BTreeSet<&str>, path: &str) -> bool {
+        matches!(
+            self.current(path),
+            Some(Current::Verified(now)) if known.contains(now.as_str())
+        )
     }
 
     /// The sealed constructors' input: held only where [`Self::holds`] says.

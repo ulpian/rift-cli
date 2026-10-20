@@ -189,7 +189,7 @@ fn a_real_archive_carries_the_compact_transcript() {
     );
 }
 
-/// The prompt arm of `why` and `explain` must be ALIVE on a shard the CURRENT
+/// The prompt arm of `explain` must be ALIVE on a shard the CURRENT
 /// native writer produced — canon-3 archives the transcript as
 /// `transcript.jsonl`, and both verbs serve the STORED redacted prompt out of
 /// it (never a re-read of the agent's live file, which this fixture keeps
@@ -204,13 +204,9 @@ fn why_and_explain_serve_the_stored_prompt_from_the_native_shard() {
 
     let w = rift_json(&fx.repo, &["why", "b.txt:1", "--json"], &fx.env());
     assert_eq!(
-        w["prompt"]["text"], "add a feature",
-        "why serves the stored redacted prompt from the canon-3 shard: {w}"
-    );
-    assert_eq!(w["prompt"]["extracted"], true, "{w}");
-    assert_eq!(
-        w["prompt"]["line"], 0,
-        "the intent locator's address, not a guess: {w}"
+        w["prompt"],
+        serde_json::Value::Null,
+        "why names no prompt for a line the attribution does not credit to the agent: {w}"
     );
     let e = rift_json(
         &fx.repo,
@@ -564,10 +560,9 @@ fn provenance_verbs_answer_over_the_real_shard(repo: &Path, env: &[(&str, &str)]
     assert_eq!(code, 0, "why through a real trailer: {out}");
     let w: serde_json::Value = serde_json::from_slice(out.as_bytes()).unwrap();
     assert_eq!(w["selection"]["checkpoint_id"], predicted);
-    assert_eq!(
-        w["sessions"][0]["session_id"],
-        rift_core::capture_session_row_id("claude-code", "e2e-live-1")
-    );
+    // The trailer still selects the shard; the attribution credits no agent
+    // with the line, so no session is named for it.
+    assert_eq!(w["sessions"], serde_json::json!([]), "{w}");
     assert_eq!(
         w["prompt"],
         serde_json::Value::Null,
