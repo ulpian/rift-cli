@@ -202,7 +202,8 @@ fn the_hook_reads_the_cache_the_worker_wrote() {
 /// Run the whole journal step for `raw` under the repository's own policy
 /// file, as a hook does; the decline it composed, if any.
 fn step(work_tree: &Path, raw: &rift_shadow::hooks::RawHook) -> Option<String> {
-    let (mut decline, mut document, mut search) = (None, None, None);
+    let (mut decline, mut document, mut search) =
+        (crate::hooks::gate::Decline::default(), None, None);
     crate::hooks::gate::window_journal_step(
         &crate::hooktime::HookTimer::new("test", false),
         raw,
@@ -212,7 +213,7 @@ fn step(work_tree: &Path, raw: &rift_shadow::hooks::RawHook) -> Option<String> {
         &mut document,
         &mut search,
     );
-    decline
+    decline.reason
 }
 
 /// A checkout whose serve policy enforces reads for Claude Code, with the

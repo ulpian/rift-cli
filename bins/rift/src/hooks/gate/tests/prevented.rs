@@ -291,7 +291,7 @@ fn a_decline_after_a_prevented_booking_books_nothing_more() {
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        vec!["read", "hold", "prevented", "deny"],
+        vec!["read", "hold", "prevented", "deny", "call"],
         "the once-per-key decline is untouched"
     );
 
@@ -381,7 +381,7 @@ fn a_wider_decline_over_a_prevented_slice_adds_no_line() {
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        vec!["read", "hold", "prevented", "read", "deny"],
+        vec!["read", "hold", "prevented", "read", "deny", "call"],
         "the once-per-key decline is untouched"
     );
 }

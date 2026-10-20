@@ -144,11 +144,13 @@ pub(super) fn doctor_window_journals(repo: &std::path::Path) -> (String, serde_j
             survey.dropped,
         ));
     }
-    if survey.ineffective > 0 {
+    let calls = &survey.calls;
+    if calls.planned + calls.uncorrelatable > 0 {
         human.push_str(&format!(
-            "\n    {} read(s) ran in spite of a decision not to (this client \
-             does not act on the channel the decision was sent on)",
-            survey.ineffective,
+            "\n    declines: {} planned, {} emitted, {} not written; the client \
+             ran {} emitted decline(s) anyway; {} carried no call id and \
+             cannot be paired",
+            calls.planned, calls.emitted, calls.unwritten, calls.ineffective, calls.uncorrelatable,
         ));
     }
     (
@@ -158,7 +160,11 @@ pub(super) fn doctor_window_journals(repo: &std::path::Path) -> (String, serde_j
             "snapshots": survey.snapshots,
             "lines": survey.lines,
             "dropped": survey.dropped,
-            "ineffective": survey.ineffective,
+            "planned": calls.planned,
+            "emitted": calls.emitted,
+            "unwritten": calls.unwritten,
+            "ineffective": calls.ineffective,
+            "uncorrelatable": calls.uncorrelatable,
         }),
     )
 }
@@ -196,12 +202,18 @@ mod tests {
         assert_eq!(json["dropped"], 1);
         assert_eq!(json["ineffective"], 0);
 
-        // A decline, and then a read of exactly those lines: the client ran
-        // the call regardless, and the pair is the only trace of it.
-        let hash = "a".repeat(64);
-        let pair = format!(
-            "{{\"v\":1,\"k\":\"deny\",\"t\":1,\"p\":\"a.rs\",\"h\":\"{hash}\",\"lo\":1,\"hi\":9,\"at\":1}}\n\
-             {{\"v\":1,\"k\":\"read\",\"t\":1,\"p\":\"a.rs\",\"h\":\"{hash}\",\"lo\":1,\"hi\":9,\"n\":9,\"at\":2}}\n"
+        // A decline planned and emitted for one call, and a result for the
+        // same call: the client ran it regardless. A second decline carried
+        // no call id, so it is reported apart and never paired.
+        let pair = concat!(
+            r#"{"v":1,"k":"call","t":1,"id":"toolu_1","f":"planned","at":1}"#,
+            "\n",
+            r#"{"v":1,"k":"call","t":1,"id":"toolu_1","f":"emitted","w":true,"x":0,"at":1}"#,
+            "\n",
+            r#"{"v":1,"k":"call","t":1,"id":"toolu_1","f":"applied","at":2}"#,
+            "\n",
+            r#"{"v":1,"k":"call","t":1,"id":null,"f":"planned","at":3}"#,
+            "\n",
         );
         std::fs::write(
             reads.join(format!("{}.jsonl", window_journal::key("s2", None))),
@@ -210,9 +222,10 @@ mod tests {
         .unwrap();
         let (human, json) = doctor_window_journals(tmp.path());
         assert!(
-            human.contains("1 read(s) ran in spite of a decision not to"),
+            human.contains("declines: 1 planned, 1 emitted, 0 not written; the client ran 1"),
             "{human}"
         );
         assert_eq!(json["ineffective"], 1);
+        assert_eq!(json["uncorrelatable"], 1);
     }
 }

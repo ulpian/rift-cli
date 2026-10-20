@@ -372,13 +372,16 @@ pub fn install_hooks_with(
         }
     }
 
-    let written = write_hooks(cfg, &dir)?;
     let recorded_by = match policy {
         HookInstallPolicy::Repoint { .. } => RecordedBy::Repoint,
         HookInstallPolicy::KeepIfHealthy { .. } if record.is_some() => RecordedBy::SelfHeal,
         HookInstallPolicy::KeepIfHealthy { .. } => cfg.recorded_by,
     };
+    // The record first, then the hooks: a repair that stops half way leaves
+    // the record naming the binary it was moving to, so the next run finishes
+    // the job instead of rewriting the hooks back to the binary it replaced.
     let of_record = record_binary_of_record(&cfg.family.dir, &cfg.rift_bin, recorded_by)?;
+    let written = write_hooks(cfg, &dir)?;
     let mut report = HookInstallReport {
         hooks_dir: dir,
         binary: Some(PathBuf::from(of_record.rift_bin)),
@@ -619,6 +622,29 @@ mod tests {
             Some(first.to_string_lossy().as_ref()),
             "the binary that died is kept behind the one that replaced it"
         );
+    }
+
+    /// A self-heal repairs the record before the hooks: when writing a hook
+    /// fails (here a user hook whose chained name is taken), the record
+    /// already names the repair's binary rather than the one it replaced.
+    #[test]
+    fn a_self_heal_records_the_binary_before_it_writes_the_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = fake_binary(&tmp.path().join("gone"), "rift");
+        install_at(tmp.path(), &first, repoint());
+        let hooks = tmp.path().join(".git/hooks");
+        std::fs::remove_file(hooks.join("post-commit")).unwrap();
+        std::fs::write(hooks.join("post-commit"), "#!/bin/sh\necho mine\n").unwrap();
+        std::fs::write(hooks.join("post-commit.rift-chained"), "taken\n").unwrap();
+
+        let second = fake_binary(&tmp.path().join("live"), "rift");
+        let mut cfg = cfg(tmp.path(), None);
+        cfg.rift_bin.clone_from(&second);
+        assert!(install_hooks_with(&cfg, keep(true)).is_err());
+
+        let record = read_binary_of_record(&tmp.path().join(".git/rift-family")).unwrap();
+        assert_eq!(record.path(), second);
+        assert_eq!(record.recorded_by, RecordedBy::SelfHeal);
     }
 
     /// An explicit re-point at a path that outlives the decision

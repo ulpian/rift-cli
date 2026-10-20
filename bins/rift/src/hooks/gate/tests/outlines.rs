@@ -128,7 +128,8 @@ fn a_miss_or_a_small_file_is_a_plain_read() {
         outcome,
         crate::hooks::gate::GateOutcome {
             journaled: false,
-            deny_reason: None
+            deny_reason: None,
+            receipt: None,
         }
     );
     let small = beside(here, "small.rs", 120);
@@ -202,7 +203,9 @@ fn under_the_default_policy_a_first_read_is_answered_with_the_outline_once() {
         .iter()
         .map(rift_agent::window_journal::Line::kind)
         .collect();
-    assert_eq!(kinds, ["outline"], "the outline is not coverage");
+    // The decline also plans its call, so the journal names it once more; the
+    // outline itself is still one row, and nothing in the window is coverage.
+    assert_eq!(kinds, ["outline", "call"], "the outline is not coverage");
     let rows = first_contact_rows(here);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(

@@ -116,7 +116,7 @@ fn a_narrower_run_of_held_lines_is_declined_on_its_own_account() {
     );
     assert_eq!(
         shell.kinds("s-codex"),
-        vec!["read", "deny", "read", "deny"],
+        vec!["read", "deny", "call", "read", "deny", "call"],
         "the record the walk left behind"
     );
 }
@@ -135,7 +135,7 @@ fn a_whole_file_command_line_covers_the_file_and_is_declined_once() {
     assert_eq!(shell.deny_reason_for("s-cat", &command), None);
     assert!(shell.deny_reason_for("s-cat", &command).is_some());
     assert_eq!(shell.deny_reason_for("s-cat", &command), None);
-    assert_eq!(shell.kinds("s-cat"), vec!["read", "deny", "read"]);
+    assert_eq!(shell.kinds("s-cat"), vec!["read", "deny", "call", "read"]);
 }
 
 /// ★ **A command line that reads several files is one act, and is
@@ -334,7 +334,7 @@ fn repository_wide_enforce_reaches_codex_despite_retry_telemetry() {
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        vec!["read", "deny"],
+        vec!["read", "deny", "call"],
         "the repeat is declined once"
     );
 
@@ -423,4 +423,35 @@ fn a_lever_that_is_off_leaves_no_journal() {
     gate_under(&call, here, &off);
     gate_under(&call, here, &off);
     assert!(lines_of(here, "s-off", None).is_empty());
+}
+
+/// ★ **A relative name read under a call's own outside `workdir` is that
+/// directory's file, never the held one of the same name.** The control
+/// without the field still resolves against the session and is declined, so
+/// the allow is the workdir's doing and not a cold window.
+#[test]
+fn a_relative_read_under_an_outside_workdir_is_never_declined_for_the_root_file() {
+    let shell = codex_shell();
+    let Some(name) = shell.file.file_name().and_then(|n| n.to_str()) else {
+        panic!("the fixture names a file");
+    };
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join(name), "EXTERNAL\n").unwrap();
+    assert_eq!(shell.deny_reason_for("s-wd", &shell.ranged(1, 40)), None);
+    let relative = format!("sed -n '1,40p' {name}");
+    let with = |workdir: Option<&Path>| {
+        let mut payload = shell_of(&relative);
+        payload["cwd"] = shell_spelling(shell.tmp.path()).into();
+        if let Some(dir) = workdir {
+            payload["tool_input"]["workdir"] = shell_spelling(dir).into();
+        }
+        gate_under(
+            &hook("codex", "PreToolUse", "s-wd", payload),
+            shell.tmp.path(),
+            &shell.enforce,
+        )
+        .deny_reason
+    };
+    assert_eq!(with(Some(outside.path())), None);
+    assert!(with(None).is_some(), "the session-relative control is held");
 }

@@ -145,7 +145,7 @@ fn a_partly_held_read_is_narrowed_once_narrow_is_written_enforce() {
             .iter()
             .map(Line::kind)
             .collect::<Vec<_>>(),
-        ["read", "deny"]
+        ["read", "deny", "call"]
     );
     let rows = audits(here);
     assert_eq!(rows.len(), 1, "{rows:?}");
