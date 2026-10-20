@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use crate::native::{codex_trust, hook_file, installed_hook_binary, CodexTrust};
 
 pub use behind::{is_behind_candidate, sessions_behind_events};
-pub use remedy::{remedies, remedy, Remedy};
+pub use remedy::{hook_composition_sentence, remedies, remedy, Remedy};
 pub use surface::{client_surface, Surface, SurfaceEvidence};
 
 /// Why an integration is unhealthy. Closed: a new reason is a new variant, and

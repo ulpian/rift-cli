@@ -19,7 +19,7 @@ pub enum HookComposition {
     Owned,
     /// The client file holds no Rift entry.
     Missing,
-    /// A recognisable older Rift bundle that a re-wire refreshes.
+    /// A recognisable older Rift bundle that `rift enable` refreshes.
     Stale,
     /// Rift-like entries whose ownership no fingerprint proves: changed by
     /// hand, unreadable, or behind a symlink.
@@ -40,14 +40,6 @@ impl HookComposition {
             Self::ForeignModified => "foreign-modified",
             Self::Shadowed => "shadowed",
         }
-    }
-
-    /// Whether the existing enable path may re-wire it: only entries that are
-    /// absent or still Rift's own, unmodified. A foreign edit or a foreign
-    /// neighbour is the user's to settle.
-    #[must_use]
-    pub fn rewirable(self) -> bool {
-        matches!(self, Self::Missing | Self::Stale)
     }
 }
 
@@ -169,7 +161,11 @@ mod tests {
         std::fs::write(&path, edited).unwrap();
         let verdict = composition(dir.path(), "claude-code").unwrap();
         assert_eq!(verdict, HookComposition::ForeignModified);
-        assert!(!verdict.rewirable(), "a hand edit is never re-wired over");
+        let sentence = crate::health::hook_composition_sentence("claude-code", verdict).unwrap();
+        assert!(
+            sentence.contains("`rift enable --agent claude-code`"),
+            "{sentence}"
+        );
     }
 
     #[test]
@@ -211,7 +207,32 @@ mod tests {
         let verdict = composition(dir.path(), "codex").unwrap();
         assert_eq!(verdict, HookComposition::Shadowed);
         assert_eq!(verdict.as_str(), "shadowed");
-        assert!(!verdict.rewirable());
+        let sentence = crate::health::hook_composition_sentence("codex", verdict).unwrap();
+        assert!(
+            sentence.contains("`rift enable --agent codex`"),
+            "{sentence}"
+        );
+    }
+
+    #[test]
+    fn every_word_but_owned_has_a_sentence_naming_rift_enable() {
+        let words = [
+            HookComposition::Missing,
+            HookComposition::Stale,
+            HookComposition::ForeignModified,
+            HookComposition::Shadowed,
+        ];
+        for word in words {
+            let sentence = crate::health::hook_composition_sentence("codex", word).unwrap();
+            assert!(
+                sentence.contains("`rift enable --agent codex`"),
+                "{sentence}"
+            );
+        }
+        assert_eq!(
+            crate::health::hook_composition_sentence("codex", HookComposition::Owned),
+            None
+        );
     }
 
     #[test]
