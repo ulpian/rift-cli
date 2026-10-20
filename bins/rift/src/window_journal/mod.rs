@@ -102,7 +102,7 @@ mod seen;
 
 use std::path::{Path, PathBuf};
 
-pub(crate) use calls::CallSidecar;
+pub(crate) use calls::{is_call_sidecar, CallSidecar};
 pub(crate) use coordinator::{coordinator_reads, CoordinatorRead};
 pub(crate) use denies::{deny_stands, ineffective_denies, DeclineCalls};
 pub(crate) use edits::{edit_facts, expected_write, prior_revision};

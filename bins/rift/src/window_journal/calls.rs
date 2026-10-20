@@ -20,6 +20,13 @@ use super::{journal_dir, key, MAX_APPEND_BYTES};
 /// The suffix a sidecar's file name carries after its window's key.
 pub(super) const CALLS_SUFFIX: &str = ".calls.jsonl";
 
+/// Whether a file in the journal directory is a call sidecar, never a
+/// journal: every pass that walks the directory for windows asks this one
+/// question, so a sidecar's rows are never folded into what a window holds.
+pub(crate) fn is_call_sidecar(file_name: &str) -> bool {
+    file_name.ends_with(CALLS_SUFFIX)
+}
+
 /// One context window's call sidecar, as a place on disk.
 pub(crate) struct CallSidecar {
     dir: PathBuf,
