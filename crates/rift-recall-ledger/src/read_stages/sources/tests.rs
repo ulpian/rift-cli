@@ -249,3 +249,110 @@ fn read_stages_serialize_each_stage_with_its_join() {
     assert_eq!(json["queryable"]["state"], "at");
     assert_eq!(json["delivered"]["state"], "absent");
 }
+
+/// The projection's read facts of one session reading the fixture file in
+/// turn `turn`, and the turn-end checkpoint `cid` sealed over that session.
+fn projected_read(fx: &Fixture, session: &str, turn: &str, cid: &str, sealed_at: i64) {
+    let rows: [(&str, &[&str], Vec<Value>); 5] = [
+        (
+            "file_revision",
+            &[
+                "file_revision_id",
+                "path",
+                "blob_oid",
+                "content_sha256",
+                "schema_version",
+            ],
+            vec![
+                Value::text("rev"),
+                Value::text(PATH),
+                Value::text("oid"),
+                Value::text(HASH),
+                Value::Int(1),
+            ],
+        ),
+        (
+            "turn",
+            &[
+                "turn_id",
+                "session_id",
+                "ordinal",
+                "started_at",
+                "schema_version",
+            ],
+            vec![
+                Value::text(turn),
+                Value::text(session),
+                Value::Int(1),
+                Value::Int(RECEIVED),
+                Value::Int(1),
+            ],
+        ),
+        (
+            "tool_call",
+            &[
+                "tool_call_id",
+                "turn_id",
+                "tool_name",
+                "started_at",
+                "schema_version",
+            ],
+            vec![
+                Value::text(turn),
+                Value::text(turn),
+                Value::text("Read"),
+                Value::Int(RECEIVED),
+                Value::Int(1),
+            ],
+        ),
+        (
+            "tool_reads_file",
+            &["tool_call_id", "file_revision_id"],
+            vec![Value::text(turn), Value::text("rev")],
+        ),
+        (
+            "session_in_checkpoint",
+            &["checkpoint_id", "session_id", "ordinal", "schema_version"],
+            vec![
+                Value::text(cid),
+                Value::text(session),
+                Value::Int(1),
+                Value::Int(1),
+            ],
+        ),
+    ];
+    for (table, columns, values) in rows {
+        if table == "file_revision" && session != "s1" {
+            continue;
+        }
+        Fixture::insert(&fx.capture, table, columns, &values);
+    }
+    fx.checkpoint(cid, 2, sealed_at);
+}
+
+#[test]
+fn read_stages_find_capture_in_the_projection_before_any_ingest_reached_it() {
+    let fx = Fixture::new();
+    projected_read(&fx, "s1", "t1", "c1", 1_500);
+    let facts = fx.facts(&[receipt(None)], &[]);
+    assert_eq!(facts[0].captured, at(1_500, StageJoin::PathHash));
+    assert_eq!(facts[0].queryable, StageFact::Absent);
+    fx.ingest("wm", 2, 2_000);
+    let facts = fx.facts(&[receipt(None)], &[]);
+    assert_eq!(facts[0].queryable, at(2_000, StageJoin::PathHash));
+}
+
+#[test]
+fn read_stages_name_projection_capture_ambiguous_when_two_sessions_read_the_same_bytes() {
+    let fx = Fixture::new();
+    projected_read(&fx, "s1", "t1", "c1", 1_500);
+    projected_read(&fx, "s2", "t2", "c2", 1_600);
+    let facts = fx.facts(&[receipt(None)], &[]);
+    let ambiguous = StageFact::Ambiguous {
+        join: StageJoin::PathHash,
+    };
+    assert_eq!(
+        (facts[0].captured, facts[0].queryable),
+        (ambiguous, ambiguous)
+    );
+}

@@ -3,8 +3,11 @@
 //!
 //! Read-only: every file is parsed in place and nothing is created. The hook
 //! receipt rows in the projection carry no call id and no path, so they can
-//! key nothing here; a read's call id stays unknown and its delivery rests on
-//! the path and hash join, which the report names.
+//! key nothing here. A journal read line carries no call id either, but the
+//! answer line that declined it does carry the turn, and the call sidecar of
+//! the same window names the call emitted in that turn: when exactly one
+//! call was emitted there, that is the read's delivery call. Otherwise the
+//! call id stays unknown and delivery rests on the path and hash join.
 
 use std::path::Path;
 
@@ -19,6 +22,9 @@ pub(crate) struct WindowRead {
     pub(crate) path: String,
     pub(crate) content_sha256: String,
     pub(crate) received_at: i64,
+    /// The call that delivered the answer to this read, when the window's
+    /// answer line and its call sidecar tie to exactly one.
+    pub(crate) invocation_id: Option<String>,
 }
 
 /// One emitted call fact a window's sidecar holds.
@@ -62,17 +68,15 @@ pub(crate) fn live_reads(work_tree: &Path, limit: usize) -> LiveReads {
             dir: dir.clone(),
             key: key.clone(),
         };
-        live.reads.extend(
-            journal
-                .load()
-                .journal
-                .lines()
-                .iter()
-                .filter_map(|line| read_of(&key, line)),
-        );
-        let sidecar = CallSidecar::at(dir.clone(), key);
-        live.calls
-            .extend(sidecar.load().lines().iter().filter_map(emission_of));
+        let lines = journal.load().journal.lines().to_vec();
+        let sidecar = CallSidecar::at(dir.clone(), key.clone()).load();
+        let call_lines = sidecar.lines();
+        live.reads.extend(lines.iter().filter_map(|line| {
+            let mut read = read_of(&key, line)?;
+            read.invocation_id = delivery_call(line, &lines, call_lines);
+            Some(read)
+        }));
+        live.calls.extend(call_lines.iter().filter_map(emission_of));
     }
     // Newest first, ties in window and path order, so a bound cut is the
     // same on every run.
@@ -97,7 +101,41 @@ fn read_of(window_key: &str, line: &Line) -> Option<WindowRead> {
         path: path.clone(),
         content_sha256: hash.to_hex(),
         received_at: epoch_ms(*at_ms),
+        invocation_id: None,
     })
+}
+
+/// The call that carried the answer to `read`: the first later deny line on
+/// the same path and hash names the turn, and the one call emitted in that
+/// turn of the window is it. Two calls in that turn tie to neither.
+fn delivery_call(read: &Line, lines: &[Line], calls: &[Line]) -> Option<String> {
+    let Line::Read {
+        path, hash, at_ms, ..
+    } = read
+    else {
+        return None;
+    };
+    let answer_turn = lines.iter().find_map(|line| match line {
+        Line::Deny {
+            turn,
+            path: p,
+            hash: h,
+            at_ms: at,
+            ..
+        } if p == path && h == hash && at >= at_ms => Some(*turn),
+        _ => None,
+    })?;
+    let mut ids = calls.iter().filter_map(|line| match line {
+        Line::Call {
+            turn,
+            call: Some(id),
+            fact: CallFact::Emitted { .. },
+            ..
+        } if *turn == answer_turn => Some(id),
+        _ => None,
+    });
+    let id = ids.next()?;
+    ids.all(|other| other == id).then(|| id.clone())
 }
 
 fn emission_of(line: &Line) -> Option<WindowCall> {
@@ -185,5 +223,53 @@ mod tests {
             }]
         );
         assert_eq!(snapshot(&journal_dir(tmp.path())), before);
+    }
+
+    fn emitted(turn: u32, id: &str) -> Line {
+        Line::Call {
+            turn,
+            call: Some(id.to_owned()),
+            fact: CallFact::Emitted {
+                wrote: true,
+                exit: 0,
+            },
+            at_ms: 9,
+        }
+    }
+
+    #[test]
+    fn read_stages_live_reads_tie_a_declined_read_to_the_one_call_emitted_in_its_answer_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (session, calls) in [("s1", &["c1"][..]), ("s2", &["c2", "c3"][..])] {
+            let journal = WindowJournal::open(tmp.path(), session, None);
+            journal.append(&read(1, "a.rs", 1, 1, 10)).unwrap();
+            let deny = Line::Deny {
+                turn: 2,
+                path: "a.rs".to_owned(),
+                hash: hash(1),
+                range: rift_agent::window_journal::Interval::new(1, 10).unwrap(),
+                at_ms: 9,
+            };
+            journal.append(&deny).unwrap();
+            let sidecar = CallSidecar::open(tmp.path(), session, None);
+            sidecar.append(&emitted(1, "earlier")).unwrap();
+            for id in calls {
+                sidecar.append(&emitted(2, id)).unwrap();
+            }
+        }
+
+        let live = live_reads(tmp.path(), 10);
+
+        let tied = |session: &str| {
+            let key = crate::window_journal::key(session, None);
+            let read = live.reads.iter().find(|r| r.window_key == key).unwrap();
+            read.invocation_id.clone()
+        };
+        assert_eq!(tied("s1").as_deref(), Some("c1"));
+        assert_eq!(
+            tied("s2"),
+            None,
+            "two calls in the answer turn tie to neither"
+        );
     }
 }

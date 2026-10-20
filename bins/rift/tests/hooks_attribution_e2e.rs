@@ -481,11 +481,11 @@ fn the_populated_pipeline_keeps_unsupported_authorship_unknown() {
     assert_eq!((all_spans.len(), known), (6, 0));
 }
 
-/// Recorded prompts and checkpoint/session associations remain available
-/// even when the file writer is Unknown. A transcript-less session yields a
-/// null prompt rather than an invented explanation.
+/// A line the attribution does not credit to the agent names no session and
+/// no prompt: the checkpoint is still selected, but recording it is not
+/// the same as writing the line.
 #[test]
-fn why_serves_recorded_prompts_while_authorship_remains_unknown() {
+fn why_names_no_session_or_prompt_while_authorship_remains_unknown() {
     let tmp = tempfile::tempdir().unwrap();
     let px = PopulatedPipeline::build(tmp.path());
     let resolved1 = px.resolved_checkpoint("parser.txt", 0);
@@ -497,17 +497,13 @@ fn why_serves_recorded_prompts_while_authorship_remains_unknown() {
         resolved1.as_str(),
         "{why_ai}"
     );
-    assert_eq!(why_ai["sessions"][0]["session_id"], px.sid1, "{why_ai}");
-    assert_eq!(
-        why_ai["prompt"]["text"], "add the parser feature",
-        "{why_ai}"
-    );
-    assert_eq!(why_ai["prompt"]["extracted"], true, "{why_ai}");
+    assert_eq!(why_ai["sessions"], serde_json::json!([]), "{why_ai}");
+    assert_eq!(why_ai["prompt"], serde_json::Value::Null, "{why_ai}");
 
     let w4 = px.why("parser.txt:6");
     assert_eq!(w4["tag"], "unknown", "{w4}");
     assert_eq!(w4["selection"]["checkpoint_id"], px.ckpt3.as_str(), "{w4}");
-    assert_eq!(w4["sessions"][0]["session_id"], px.sid2, "{w4}");
+    assert_eq!(w4["sessions"], serde_json::json!([]), "{w4}");
     assert_eq!(w4["prompt"], serde_json::Value::Null, "{w4}");
 }
 

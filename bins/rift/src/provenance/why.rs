@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use rift_core::{Result, RiftError};
+use rift_recall_types::Author;
 use rift_store::capture::{checkpoint_usage_windows, checkpoint_window_tokens, WindowScope};
 use rift_store::{quote_usage_costs, CanonicalStore, CostQuoteScope, SqliteStore, Value};
 
@@ -329,6 +330,8 @@ pub(crate) async fn why(
             serde_json::json!({ "error": "not_answerable", "file": file, "line": line }),
         ));
     };
+    let credited = credited_row(store, row, line).await?;
+    let row = &credited;
 
     let checkpoint = row.selection.as_ref().and_then(|sel| {
         res.facts.get(&sel.checkpoint_id).map(|f| {
@@ -344,6 +347,7 @@ pub(crate) async fn why(
     let prompt = row
         .selection
         .as_ref()
+        .filter(|_| !row.sessions.is_empty())
         .map(|sel| prompt_from_shard(root, &sel.checkpoint_id));
     let cost = cost_answer(store, row, &res.facts).await?;
     let file_handle = std::fs::read(root.join(&file))
@@ -359,6 +363,33 @@ pub(crate) async fn why(
         file_handle,
         reads: res.reads,
     }))
+}
+
+/// The answering row with its sessions kept only where the checkpoint's
+/// attribution gives the agent a share of the line's hunk, or of the file
+/// when no hunk holds the line. Credit is decided by the rule recall
+/// provenance uses ([`super::capture::author_at`]); a mixed line keeps its
+/// session because the agent wrote part of it. A line credited to a person,
+/// or to nobody, names no session, so no prompt or cost is read for it.
+async fn credited_row(
+    store: &SqliteStore,
+    row: &Resolved,
+    line: Option<usize>,
+) -> Result<Resolved> {
+    let mut row = row.clone();
+    let Some(sel) = row.selection.as_ref() else {
+        return Ok(row);
+    };
+    if row.sessions.is_empty() {
+        return Ok(row);
+    }
+    let path = row.span.path.clone();
+    let author =
+        super::capture::author_at(store, &sel.checkpoint_id, &path, row.counts, line).await?;
+    if !matches!(author, Author::Agent | Author::Mixed) {
+        row.sessions.clear();
+    }
+    Ok(row)
 }
 
 /// git's refusal, worded: an untracked path, or a line past the end of the
@@ -877,5 +908,57 @@ mod tests {
         );
         assert_eq!(out.json["cost"]["uncached_input"], 20, "{}", out.json);
         assert_eq!(out.json["cost"]["amount_micros"], 20, "{}", out.json);
+    }
+
+    /// The answering row of a hand edit: a checkpoint whose session only read
+    /// the file, with the per-file counts it recorded.
+    fn hand_edit_row(counts: crate::provenance::resolve::AttrCounts) -> Resolved {
+        Resolved {
+            span: Span {
+                start: 2,
+                end: 2,
+                commit: "c".repeat(40),
+                path: "a.txt".into(),
+            },
+            selection: Some(Selection {
+                checkpoint_id: "ck-2".into(),
+                basis: SelectionBasis::FileTouched,
+                considered: 1,
+                resolved: true,
+            }),
+            counts: Some(counts),
+            sessions: vec![crate::provenance::resolve::SessionRef {
+                session_id: "s".into(),
+                agent: Label::of("claude-code"),
+                model: Label::of("m"),
+            }],
+        }
+    }
+
+    /// A line the attribution credits to nobody, or to a person, names no
+    /// session; a line the agent wrote keeps it.
+    #[tokio::test]
+    async fn why_names_a_session_only_where_the_attribution_credits_the_agent() {
+        use crate::provenance::resolve::AttrCounts;
+        let store = sibling_store().await;
+        let nobody = hand_edit_row(AttrCounts::default());
+        let row = credited_row(&store, &nobody, Some(2)).await.unwrap();
+        assert!(row.sessions.is_empty(), "{:?}", row.sessions);
+        let cost = cost_answer(&store, &row, &HashMap::new()).await.unwrap();
+        assert!(matches!(cost, CostAnswer::Silent));
+        let person = hand_edit_row(AttrCounts {
+            human_added: 1,
+            confidence_milli: 1000,
+            ..AttrCounts::default()
+        });
+        let row = credited_row(&store, &person, Some(2)).await.unwrap();
+        assert!(row.sessions.is_empty(), "{:?}", row.sessions);
+        let agent = hand_edit_row(AttrCounts {
+            agent_added: 1,
+            confidence_milli: 1000,
+            ..AttrCounts::default()
+        });
+        let row = credited_row(&store, &agent, Some(2)).await.unwrap();
+        assert_eq!(row.sessions.len(), 1);
     }
 }

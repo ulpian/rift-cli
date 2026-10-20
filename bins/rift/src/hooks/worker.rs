@@ -8,6 +8,7 @@ mod boundary;
 pub(in crate::hooks) mod linehash;
 mod ownership;
 mod reads;
+mod recall_ingest;
 mod repair_skip;
 
 use std::path::Path;
@@ -22,7 +23,7 @@ use super::{flag, now_ms, projection_db_at};
 pub(crate) use repair_skip::{leave_to_recovery, Historical, Leave};
 
 use self::reads::count_tool_result_tokens_job;
-pub(in crate::hooks) use self::reads::snapshot_basis_job;
+pub(in crate::hooks) use self::reads::{snapshot_basis_job, BasisSnapshot};
 
 /// `rift hooks worker --git-dir <dir>`: drain the capture queue. Diverges — the
 /// worker is off git's critical path but it is still capture, so it keeps the
@@ -261,13 +262,26 @@ fn drain_locked(
                 }
             }
         }
+        if recovery_requested(git_dir) {
+            return drained;
+        }
     }
+}
+
+/// Whether `rift doctor --fix` waits for the queue: a worker then lets go at
+/// the next pass boundary, never inside a job.
+fn recovery_requested(git_dir: &Path) -> bool {
+    crate::capture_queue::request::requested(git_dir, std::time::SystemTime::now())
 }
 
 /// Recheck after releasing ownership so a producer that saw the old owner
 /// busy still gets a pass. Already attempted paths never trigger reacquisition.
 fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: DrainPolicy) -> Drained {
     let mut all = Drained::default();
+    // A worker started under a request leaves the lock to recovery.
+    if recovery_requested(git_dir) {
+        return all;
+    }
     let Some(mut owner) = acquire_queue_lock(git_dir, wait) else {
         return all;
     };
@@ -296,10 +310,17 @@ fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: Drain
             tracing::debug!(?levelled, "projection levelled under queue owner");
             #[cfg(test)]
             LEVELS.with(|levels| levels.set(levels.get() + 1));
+            // The new checkpoint is recall's to ingest too. Asked for here and
+            // run as a job, so the pending check below takes it in this
+            // worker's next pass and many such passes owe one ingest.
+            recall_ingest::owe_recall_ingest(git_dir);
         }
         #[cfg(test)]
         run_state_tests::pause_before_owner_release();
         drop(owner);
+        if recovery_requested(git_dir) {
+            return all;
+        }
         // A not-due or parked job is not pending for a `Due` drain: a worker
         // never spins on a delivery its policy would not run.
         let now = now_ms();
@@ -415,6 +436,20 @@ fn run_agent_job(
     }
 }
 
+/// Record a basis snapshot that completed `unavailable` before the drain
+/// removes its job file, so a completion that found the bytes gone is never
+/// mistaken for one that kept them.
+fn basis_landed(
+    owner: &crate::capture_queue::QueueLock,
+    job: &crate::agent_queue::AgentJob,
+    outcome: &BasisSnapshot,
+) -> Landed {
+    if *outcome == BasisSnapshot::Unavailable {
+        crate::agent_queue::record_unavailable(owner.git_dir(), job);
+    }
+    Landed::Nothing
+}
+
 /// The move a hook asked for. The drain already moved before it listed this
 /// job; moving again takes whatever an older binary wrote since, and costs a
 /// `stat` otherwise.
@@ -478,6 +513,7 @@ fn run_job_kind(
         JobKind::DocSweep => sweep_documents_job(t, job).map(|()| Landed::Nothing),
         JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, owner, job, *floor_ms)),
         JobKind::MoveRunState => move_run_state_job(owner),
+        JobKind::RecallIngest => recall_ingest::recall_ingest_job(job).map(|()| Landed::Nothing),
         JobKind::BoundarySnapshot(snapshot) => {
             ownership::require_new_boundary(job, snapshot)?;
             boundary::boundary_snapshot_job(t, job, snapshot).map(|()| Landed::Nothing)
@@ -486,9 +522,8 @@ fn run_job_kind(
             rel_path,
             content_sha256,
             blob_oid,
-        } => {
-            snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid).map(|()| Landed::Nothing)
-        }
+        } => snapshot_basis_job(t, job, rel_path, content_sha256, blob_oid)
+            .map(|outcome| basis_landed(owner, job, &outcome)),
         JobKind::ToolResultTokens {
             tool_result_id,
             session_id,

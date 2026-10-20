@@ -207,3 +207,62 @@ fn a_later_pass_that_writes_no_checkpoint_does_not_level_the_projection_again() 
         "only the pass that condensed levels"
     );
 }
+
+/// A basis-snapshot job owed for `body` at `src/a.rs`, with the file still
+/// holding `body` when it was queued.
+fn owed_basis(root: &Path, body: &str) -> (rift_git::RepoPaths, std::path::PathBuf) {
+    rift_git::test_support::fake_repo(root).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), body).unwrap();
+    let repo = rift_git::discover(root).unwrap();
+    let job = AgentJob {
+        schema_version: 1,
+        work_tree: root.to_owned(),
+        queued_at_ms: 1000,
+        attempts: 0,
+        kind: JobKind::BasisSnapshot {
+            rel_path: "src/a.rs".into(),
+            content_sha256: rift_recall_substrate::worktree::sha256_hex(body.as_bytes()),
+            blob_oid: rift_recall_substrate::worktree::git_blob_oid(body.as_bytes()),
+        },
+    };
+    let path = crate::agent_queue::enqueue(&repo.git_dir, &job).unwrap();
+    (repo, path)
+}
+
+/// The file changed after the read and no copy of the read's bytes was ever
+/// kept, so no retry can bring them back: the job is discharged with an
+/// `unavailable` record instead of spending attempts and parking.
+#[test]
+fn a_basis_job_whose_bytes_are_gone_is_discharged_as_unavailable_not_parked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, path) = owed_basis(tmp.path(), "alpha\n");
+    std::fs::write(tmp.path().join("src/a.rs"), "bravo\n").unwrap();
+
+    drain_jobs(repo.git_dir.to_str(), LockWait::None);
+
+    assert!(!path.exists(), "the job is discharged");
+    assert!(crate::agent_queue::retry_states(&repo.git_dir).is_empty());
+    assert_eq!(crate::agent_queue::unavailable_count(&repo.git_dir), 1);
+}
+
+/// A file the worker cannot read right now proves nothing about whether the
+/// bytes are gone, so the job is kept and retried exactly as before.
+#[cfg(unix)]
+#[test]
+fn a_basis_job_that_cannot_read_its_file_is_retried_as_before() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, path) = owed_basis(tmp.path(), "alpha\n");
+    let file = tmp.path().join("src/a.rs");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    drain_jobs(repo.git_dir.to_str(), LockWait::None);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(path.exists(), "kept for a retry");
+    let (_, _, state) = crate::agent_queue::retry_states(&repo.git_dir).remove(0);
+    assert_eq!(state.attempts, 1);
+    assert!(!state.parked);
+    assert_eq!(crate::agent_queue::unavailable_count(&repo.git_dir), 0);
+}

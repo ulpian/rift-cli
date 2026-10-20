@@ -146,7 +146,8 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 /// The receipts and call facts in the shape the store reader takes. The call
-/// id is never known here, since the hook receipt rows carry none.
+/// id is known only where the window's answer line and call sidecar tie a
+/// read to one emitted call.
 fn stage_inputs(live: &LiveReads) -> (Vec<ReadReceipt<'_>>, Vec<CallEmission<'_>>) {
     let receipts = live
         .reads
@@ -156,7 +157,7 @@ fn stage_inputs(live: &LiveReads) -> (Vec<ReadReceipt<'_>>, Vec<CallEmission<'_>
             path: &r.path,
             content_sha256: &r.content_sha256,
             received_at: r.received_at,
-            invocation_id: None,
+            invocation_id: r.invocation_id.as_deref(),
         })
         .collect();
     let calls = live
@@ -322,6 +323,16 @@ mod tests {
         );
         assert_eq!(stuck_sentence(&fresh), None);
         assert_eq!(summary_json(None), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn read_stages_ingest_stamped_zero_is_queryable_with_no_lag_and_no_anomaly() {
+        let summary = summarize(&[facts(100, at(150), at(0))], NOW);
+        let json = summary_json(Some(&summary));
+        assert_eq!(json["furthest"]["queryable"], serde_json::json!(1));
+        assert_eq!(json["lag"]["query"]["p50_ms"], serde_json::Value::Null);
+        assert_eq!(json["anomalies"], serde_json::json!(0));
+        assert_eq!(json["never_queryable"], serde_json::json!(0));
     }
 
     #[test]

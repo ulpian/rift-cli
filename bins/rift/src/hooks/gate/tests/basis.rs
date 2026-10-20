@@ -6,7 +6,7 @@ use std::path::Path;
 use rift_core::Result;
 
 use crate::hooks::ingest::owed::owe_basis_snapshots;
-use crate::hooks::worker::snapshot_basis_job;
+use crate::hooks::worker::{snapshot_basis_job, BasisSnapshot};
 
 /// A work tree with a real git dir and one file in it.
 fn snapshot_fixture(rel_path: &str, body: &str) -> tempfile::TempDir {
@@ -39,7 +39,7 @@ fn basis_store_of(work_tree: &Path) -> rift_recall_serve::basis_store::BasisStor
     rift_recall_serve::basis_store::BasisStore::for_family(&family.common_dir)
 }
 
-fn run_snapshot(job: &crate::agent_queue::AgentJob) -> Result<()> {
+fn run_snapshot(job: &crate::agent_queue::AgentJob) -> Result<BasisSnapshot> {
     let crate::agent_queue::JobKind::BasisSnapshot {
         rel_path,
         content_sha256,
@@ -126,19 +126,20 @@ fn a_sensitive_path_is_never_snapshotted() {
 }
 
 /// Bytes that match neither the working file nor a blob are not kept under
-/// a guessed identity — the same ladder, and the same refusal, the
-/// deferred token count lives by.
+/// a guessed identity, and since no source can ever hold them again the job
+/// settles as unavailable rather than retrying toward a park.
 #[test]
-fn bytes_that_match_no_source_are_not_kept() {
+fn bytes_that_match_no_source_are_not_kept_and_settle_unavailable() {
     let tmp = snapshot_fixture("src/a.rs", "alpha\n");
     let work_tree = tmp.path();
     // A job naming a revision nothing here has.
     let job = snapshot_job(work_tree, "src/a.rs", "a revision nobody wrote\n");
-    assert!(
-        run_snapshot(&job).is_err(),
-        "said once, retried, never faked"
-    );
+    assert_eq!(run_snapshot(&job).unwrap(), BasisSnapshot::Unavailable);
     assert_eq!(basis_store_of(work_tree).survey().snapshots, 0);
+
+    // A deleted file is gone the same way.
+    std::fs::remove_file(work_tree.join("src/a.rs")).unwrap();
+    assert_eq!(run_snapshot(&job).unwrap(), BasisSnapshot::Unavailable);
 }
 
 /// One revision read many times owes one snapshot, keyed by the revision
