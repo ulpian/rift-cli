@@ -14,6 +14,18 @@ use crate::hooks::audit::read_identified_bytes;
 use crate::hooks::git::effective_config;
 use crate::hooks::projection_db_at;
 
+/// How a basis-snapshot job settled, when it settled at all.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::hooks) enum BasisSnapshot {
+    /// Kept, already held, or skipped by policy: nothing more is owed.
+    Settled,
+    /// The bytes the read was handed are gone for good: the file changed or
+    /// was removed, no blob holds them and no snapshot of them was kept. A
+    /// retry would meet the same answer, so the job completes and says so
+    /// instead of parking.
+    Unavailable,
+}
+
 /// The deferred snapshot of one revision: keep the bytes a window was handed,
 /// so a delta against them survives the edit that follows.
 ///
@@ -42,16 +54,16 @@ pub(in crate::hooks) fn snapshot_basis_job(
     rel_path: &str,
     content_sha256: &str,
     blob_oid: &str,
-) -> Result<()> {
+) -> Result<BasisSnapshot> {
     let repo = rift_git::discover(&job.work_tree)?;
     let Some(family) = crate::family::try_at(&repo.work_tree) else {
         // No family identity from here is no family store to write to, and
         // nothing about that is this job's to repair.
-        return Ok(());
+        return Ok(BasisSnapshot::Settled);
     };
     let store = rift_recall_serve::basis_store::BasisStore::for_family(&family.common_dir);
     if store.holds(content_sha256) {
-        return Ok(());
+        return Ok(BasisSnapshot::Settled);
     }
     // The same filter every serve applies, asked before a byte is read. A
     // path the repository denies is never served, and a path it calls
@@ -62,11 +74,16 @@ pub(in crate::hooks) fn snapshot_basis_job(
         rift_recall_policy::ServePolicy::load(&repo.work_tree.join(".rift")),
     );
     if engine.is_denied_path(rel_path) || cfg.is_sensitive_path(rel_path) {
-        return Ok(());
+        return Ok(BasisSnapshot::Settled);
     }
     let Some(bytes) = t.phase("read_bytes", || {
         read_identified_bytes(&repo.work_tree, rel_path, content_sha256, blob_oid)
     }) else {
+        // The store was asked above, so the working file and the blob are the
+        // only sources left to rule out.
+        if bytes_provably_gone(&repo.work_tree, rel_path, content_sha256, blob_oid) {
+            return Ok(BasisSnapshot::Unavailable);
+        }
         return Err(rift_core::RiftError::validity(format!(
             "basis snapshot: the bytes read at {rel_path} are no longer available to keep"
         )));
@@ -74,7 +91,7 @@ pub(in crate::hooks) fn snapshot_basis_job(
     if bytes.len() > rift_recall_serve::basis_store::MAX_SNAPSHOT_BYTES
         || rift_recall_ledger::hunks::is_binary(&bytes)
     {
-        return Ok(());
+        return Ok(BasisSnapshot::Settled);
     }
     let raw_lines = rift_recall_serve::basis_store::line_count(&bytes);
     // **The one durable path.** `redact` is the sole mint of `RedactedBytes`,
@@ -84,7 +101,7 @@ pub(in crate::hooks) fn snapshot_basis_job(
         rift_shadow::redact::redact(&rift_core::SecretBytes::new(bytes.clone()))
     })?;
     if rift_recall_serve::basis_store::line_count(sealed.redacted.as_slice()) != raw_lines {
-        return Ok(());
+        return Ok(BasisSnapshot::Settled);
     }
     let meta = rift_recall_serve::basis_store::SnapshotMeta {
         schema_version: rift_recall_serve::basis_store::SNAPSHOT_SCHEMA_VERSION,
@@ -100,7 +117,38 @@ pub(in crate::hooks) fn snapshot_basis_job(
         redacted_lines: masked_line_runs(&bytes, sealed.redacted.as_slice()),
         captured_at_ms: job.queued_at_ms,
     };
-    t.phase("write_snapshot", || store.put(&sealed.redacted, &meta))
+    t.phase("write_snapshot", || store.put(&sealed.redacted, &meta))?;
+    Ok(BasisSnapshot::Settled)
+}
+
+/// Whether the recorded revision is gone from both the working file and the
+/// git objects, each answered positively: the file is missing or hashes to
+/// something else, and the blob is absent or is not those bytes. Any read
+/// that fails for another reason (a permission, a lock, a store that will
+/// not open) proves nothing, so the job keeps its ordinary retry.
+fn bytes_provably_gone(
+    work_tree: &Path,
+    rel_path: &str,
+    content_sha256: &str,
+    blob_oid: &str,
+) -> bool {
+    use rift_git::BlobReader as _;
+    let is_other = |bytes: &[u8]| rift_shadow::sha256_hex(&[bytes]) != content_sha256;
+    let file_moved_on = match std::fs::read(work_tree.join(rel_path)) {
+        Ok(bytes) => is_other(&bytes),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if !file_moved_on {
+        return false;
+    }
+    let Ok(reader) = rift_git::GixBlobReader::open(work_tree) else {
+        return false;
+    };
+    match reader.read_blob(blob_oid) {
+        Ok(None) => true,
+        Ok(Some(bytes)) => is_other(&bytes),
+        Err(_) => false,
+    }
 }
 
 /// The bytes of the revision a read recorded, from the first source that

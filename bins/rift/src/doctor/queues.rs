@@ -167,6 +167,9 @@ struct AgentJobs {
     parked: Vec<ParkedJob>,
     /// Jobs whose backoff has not elapsed at the report's clock.
     due_later: usize,
+    /// Basis snapshots that completed `unavailable`: the bytes a read was
+    /// handed were gone for good, so nothing is owed for them.
+    unavailable: usize,
 }
 
 /// One parked job as the report names it: its session and its last note,
@@ -201,13 +204,14 @@ impl AgentJobs {
             unreadable: files.saturating_sub(pending),
             parked,
             due_later,
+            unavailable: agent_queue::unavailable_count(git_dir),
         }
     }
 
     /// The journal's line, or nothing when it holds no file at all.
     fn line(&self) -> String {
         if self.files == 0 {
-            return String::new();
+            return self.unavailable_line();
         }
         let mut line = format!("\n  agent jobs:     {} owed", self.pending);
         if !self.parked.is_empty() || self.due_later > 0 {
@@ -234,7 +238,20 @@ impl AgentJobs {
                 parked.note.as_deref().unwrap_or("(no note)")
             ));
         }
+        line.push_str(&self.unavailable_line());
         line
+    }
+
+    /// The completed-unavailable count, apart from owed and parked.
+    fn unavailable_line(&self) -> String {
+        if self.unavailable == 0 {
+            return String::new();
+        }
+        format!(
+            "\n  agent jobs:     {} unavailable (the file changed before its read could be \
+             kept; nothing owed)",
+            self.unavailable
+        )
     }
 
     fn json(&self) -> serde_json::Value {
@@ -246,6 +263,7 @@ impl AgentJobs {
                 "note": p.note,
             })).collect::<Vec<_>>(),
             "due_later": self.due_later,
+            "unavailable": self.unavailable,
         })
     }
 }
@@ -853,5 +871,32 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), original);
             assert_eq!(agent_queue::read_job(&path).unwrap().1.attempts, 0);
         }
+    }
+
+    /// A basis snapshot whose bytes were gone completed: doctor counts it as
+    /// `unavailable`, never as owed or parked.
+    #[test]
+    fn doctor_counts_unavailable_basis_jobs_apart_from_owed_and_parked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let job = agent_queue::AgentJob {
+            schema_version: 1,
+            work_tree: tmp.path().to_owned(),
+            queued_at_ms: 1000,
+            attempts: 0,
+            kind: agent_queue::JobKind::BasisSnapshot {
+                rel_path: "src/a.rs".into(),
+                content_sha256: "a".repeat(64),
+                blob_oid: "b".repeat(40),
+            },
+        };
+        agent_queue::record_unavailable(tmp.path(), &job);
+        agent_queue::record_unavailable(tmp.path(), &job);
+
+        let jobs = AgentJobs::at(tmp.path(), 0);
+        assert_eq!(jobs.pending, 0);
+        assert!(jobs.parked.is_empty());
+        assert_eq!(jobs.unavailable, 1, "one job, recorded once");
+        assert!(jobs.line().contains("1 unavailable"), "{}", jobs.line());
+        assert_eq!(jobs.json()["unavailable"], 1);
     }
 }

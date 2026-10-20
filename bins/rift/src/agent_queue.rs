@@ -25,6 +25,10 @@
 //! separate delivery. Completion requires the worker's per-kind proof, not the
 //! filename alone.
 
+mod unavailable;
+
+pub(crate) use self::unavailable::{record_unavailable, unavailable_count};
+
 use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
