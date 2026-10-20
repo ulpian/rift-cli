@@ -196,6 +196,11 @@ pub(crate) enum JobKind {
     /// and renames, which is no hook's to pay for — so it asks the worker,
     /// which moves before it drains.
     MoveRunState,
+    /// Ingest the checkpoint branch into the family's recall store, after a
+    /// worker pass that wrote a checkpoint. It names nothing but the family
+    /// whose queue holds it, so every pass that asks while one is pending is
+    /// answered by that one.
+    RecallIngest,
 }
 
 /// One turn boundary a hook closed and the worker owes a snapshot of.
@@ -550,7 +555,8 @@ impl JobKind {
             | Self::BasisSnapshot { .. }
             | Self::DocSweep
             | Self::SweepIdle { .. }
-            | Self::MoveRunState => None,
+            | Self::MoveRunState
+            | Self::RecallIngest => None,
         }
     }
 
@@ -622,6 +628,9 @@ impl JobKind {
             // One move is owed per member: every hook that finds the old
             // tree asks for the same move.
             Self::MoveRunState => Some("move-run-state".to_owned()),
+            // One ingest is owed per family at a time: it reads the whole
+            // branch from its watermark, so a second ask is the same work.
+            Self::RecallIngest => Some("recall-ingest".to_owned()),
         }
     }
 
@@ -631,7 +640,11 @@ impl JobKind {
     pub(crate) fn is_repeatable(&self) -> bool {
         matches!(
             self,
-            Self::SearchIndex | Self::DocSweep | Self::SweepIdle { .. } | Self::MoveRunState
+            Self::SearchIndex
+                | Self::DocSweep
+                | Self::SweepIdle { .. }
+                | Self::MoveRunState
+                | Self::RecallIngest
         )
     }
 
@@ -644,7 +657,11 @@ impl JobKind {
     fn coalesces_while_pending(&self) -> bool {
         matches!(
             self,
-            Self::SearchIndex | Self::MoveRunState | Self::Archive(_) | Self::SealTurn { .. }
+            Self::SearchIndex
+                | Self::MoveRunState
+                | Self::RecallIngest
+                | Self::Archive(_)
+                | Self::SealTurn { .. }
         )
     }
 
@@ -668,7 +685,9 @@ impl JobKind {
             | Self::BoundarySnapshot(_)
             | Self::MoveRunState => 0,
             Self::Condense { .. } | Self::Archive(_) | Self::SealTurn(_) => 1,
-            Self::SweepIdle { .. } => 2,
+            // After the checkpoint writers, so the ingest a pass asks for
+            // sees every checkpoint that pass wrote.
+            Self::SweepIdle { .. } | Self::RecallIngest => 2,
         }
     }
 }

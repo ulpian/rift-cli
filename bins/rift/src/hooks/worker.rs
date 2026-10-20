@@ -8,6 +8,7 @@ mod boundary;
 pub(in crate::hooks) mod linehash;
 mod ownership;
 mod reads;
+mod recall_ingest;
 mod repair_skip;
 
 use std::path::Path;
@@ -296,6 +297,10 @@ fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: Drain
             tracing::debug!(?levelled, "projection levelled under queue owner");
             #[cfg(test)]
             LEVELS.with(|levels| levels.set(levels.get() + 1));
+            // The new checkpoint is recall's to ingest too. Asked for here and
+            // run as a job, so the pending check below takes it in this
+            // worker's next pass and many such passes owe one ingest.
+            recall_ingest::owe_recall_ingest(git_dir);
         }
         #[cfg(test)]
         run_state_tests::pause_before_owner_release();
@@ -478,6 +483,7 @@ fn run_job_kind(
         JobKind::DocSweep => sweep_documents_job(t, job).map(|()| Landed::Nothing),
         JobKind::SweepIdle { floor_ms } => Ok(sweep_idle_job(t, owner, job, *floor_ms)),
         JobKind::MoveRunState => move_run_state_job(owner),
+        JobKind::RecallIngest => recall_ingest::recall_ingest_job(job).map(|()| Landed::Nothing),
         JobKind::BoundarySnapshot(snapshot) => {
             ownership::require_new_boundary(job, snapshot)?;
             boundary::boundary_snapshot_job(t, job, snapshot).map(|()| Landed::Nothing)

@@ -63,10 +63,10 @@ fn a_session_condense_without_a_recall_projection_archives_once() {
     assert!(!path.exists());
     assert!(crate::capture_queue::peek_errors(&repo.git_dir).is_empty());
     assert!(drain_jobs(Some(git_dir), LockWait::None).is_empty());
-    assert!(!recall.exists());
-    let mut marker = recall.as_os_str().to_owned();
-    marker.push(".lock");
-    assert!(!Path::new(&marker).exists());
+    // The condense never opens recall; the store exists afterwards only
+    // because the checkpoint it wrote asked for one recall ingest.
+    assert!(recall.exists());
+    assert_eq!(crate::agent_queue::job_file_count(&repo.git_dir), 0);
 }
 
 #[test]

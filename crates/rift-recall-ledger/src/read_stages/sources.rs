@@ -260,6 +260,11 @@ async fn sealed_at(capture: &dyn CanonicalStore, checkpoint: &str) -> Result<Opt
 }
 
 /// The earliest ingest whose walk position reached `checkpoint`'s ordinal.
+///
+/// A watermark stamped [`super::UNKNOWN_INGEST_TIME`] wins the minimum on
+/// purpose: when the earliest pass that reached the checkpoint has no known
+/// time, the readiness time is unknown, and a later pass's stamp would
+/// overstate the lag. The report withholds that lag without calling it skew.
 async fn ingested_at(recall: &dyn CanonicalStore, checkpoint: &str) -> Result<Option<i64>> {
     let sql = "SELECT MIN(w.ingested_at) FROM ingest_watermark w \
                JOIN ingest_watermark_position p ON p.watermark_id = w.watermark_id \

@@ -111,7 +111,7 @@ pub fn report(times: ReadStageTimes) -> ReadStageReport {
     let query_lag_ms = match times.captured_at {
         Some(captured_at) => step_lag(
             captured_at,
-            times.queryable_at,
+            times.queryable_at.filter(|&at| at != UNKNOWN_INGEST_TIME),
             Stage::Queryable,
             &mut anomalies,
         ),
@@ -135,6 +135,12 @@ pub fn report(times: ReadStageTimes) -> ReadStageReport {
         anomalies,
     }
 }
+
+/// The readiness instant an ingest stamped before the ingest took an injected
+/// clock: the checkpoint did become queryable, but when is not known. Its lag
+/// is withheld and it is never reported as clock skew, because nothing was
+/// stamped early; the stamp is simply missing.
+pub(crate) const UNKNOWN_INGEST_TIME: i64 = 0;
 
 /// The furthest archive stage reached without a hole before it.
 fn archived_to(times: ReadStageTimes) -> ArchiveStage {
@@ -188,6 +194,18 @@ mod tests {
             (None, None, None)
         );
         assert!(r.anomalies.is_empty());
+    }
+
+    #[test]
+    fn an_ingest_stamped_zero_is_queryable_at_an_unknown_time_and_never_skew() {
+        let r = report(ReadStageTimes {
+            captured_at: Some(RECEIVED + 30_000),
+            queryable_at: Some(UNKNOWN_INGEST_TIME),
+            ..times()
+        });
+        assert_eq!(r.archived_to, ArchiveStage::Queryable);
+        assert_eq!(r.query_lag_ms, None);
+        assert!(r.anomalies.is_empty(), "{:?}", r.anomalies);
     }
 
     #[test]
