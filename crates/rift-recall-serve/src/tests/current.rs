@@ -290,3 +290,52 @@ fn a_delta_list_with_no_checkout_books_zero_and_says_unverified() {
     assert_eq!(resp.estimated_tokens_avoided, 0);
     assert_eq!(resp.avoided_basis, AvoidedBasis::Unverified);
 }
+
+/// The projection holding two revisions of `src/a.rs`: A read in an older
+/// checkpoint and B read in a newer one.
+fn two_revision_projection() -> SqliteStore {
+    let store = projection();
+    seed_checkpoint(&store, "c2", 2);
+    let b = sha256_hex(B_BYTES);
+    seed_revision(&store, "rev_a2", PATH, &b, &b, 10);
+    seed_read(&store, "c2", "rev_a2", A_TOKENS, 1);
+    store
+}
+
+/// The rows of a delta list that name `path`, whether bare or tagged.
+fn rows_for(list: &serde_json::Value, path: &str) -> Vec<serde_json::Value> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row == &&json!(path) || row["path"] == json!(path))
+        .cloned()
+        .collect()
+}
+
+/// A file with two stored revisions is one row, decided against the bytes on
+/// disk: stating the current hash is unchanged only, and stating the older
+/// hash is one changed row that names the current hash.
+#[test]
+fn diff_since_reports_one_row_per_path_against_the_checkout() {
+    let store = two_revision_projection();
+    let checkout = Checkout::holding(&[(PATH, B_BYTES), (OTHER, OTHER_BYTES)]);
+    let reader = checkout.reader();
+    let b = sha256_hex(B_BYTES);
+    let holding_b = ToolRequest {
+        known_hashes: vec![b.clone()],
+        ..holding_a()
+    };
+    let current = serve(&store, &reader, ToolName::DiffSince, &holding_b);
+    assert_eq!(rows_for(&current.payload["unchanged"], PATH).len(), 1);
+    assert_eq!(
+        rows_for(&current.payload["changed"], PATH),
+        Vec::<serde_json::Value>::new(),
+        "{}",
+        current.payload
+    );
+    let older = serve(&store, &reader, ToolName::DiffSince, &holding_a());
+    assert_eq!(rows_for(&older.payload["unchanged"], PATH).len(), 0);
+    let changed = rows_for(&older.payload["changed"], PATH);
+    assert_eq!(changed.len(), 1, "{}", older.payload);
+    assert_eq!(changed[0]["new_sha256"], json!(b));
+}

@@ -66,6 +66,13 @@ pub(crate) struct StageSummary {
     joins: Joins,
     anomalies: usize,
     stuck_after_ms: i64,
+    /// Reads whose capture or ingest could not be pinned to one checkpoint:
+    /// the window read the same file at the same hash more than once, or
+    /// several checkpoints hold it. Counted apart because such a read is not
+    /// known to be stuck, only not attributable.
+    ambiguous: usize,
+    /// Reads past the stuck window that are not queryable, never counting an
+    /// ambiguous one.
     never_queryable: usize,
 }
 
@@ -181,7 +188,9 @@ fn summarize(facts: &[ReadStageFacts], now_ms: i64) -> StageSummary {
             ArchiveStage::Queryable => summary.furthest.queryable += 1,
         }
         let overdue = now_ms.saturating_sub(fact.received_at) >= STUCK_AFTER_MS;
-        if read.archived_to < ArchiveStage::Queryable && overdue {
+        if is_ambiguous(fact) {
+            summary.ambiguous += 1;
+        } else if read.archived_to < ArchiveStage::Queryable && overdue {
             summary.never_queryable += 1;
         }
         summary.delivered += usize::from(read.delivered);
@@ -199,6 +208,14 @@ fn summarize(facts: &[ReadStageFacts], now_ms: i64) -> StageSummary {
         delivery: lag(delivery),
     };
     summary
+}
+
+/// Whether the read's capture or ingest matched more than one candidate, so
+/// its archive stage cannot be told apart from a stuck one.
+fn is_ambiguous(fact: &ReadStageFacts) -> bool {
+    [fact.captured, fact.queryable]
+        .into_iter()
+        .any(|stage| matches!(stage, StageFact::Ambiguous { .. }))
 }
 
 fn count_join(joins: &mut Joins, stage: StageFact) {
@@ -286,7 +303,8 @@ mod tests {
                 "joins": { "invocation_id": 1, "path_hash": 3, "ambiguous": 1 },
                 "anomalies": 0,
                 "stuck_after_ms": STUCK_AFTER_MS,
-                "never_queryable": 2,
+                "ambiguous": 1,
+                "never_queryable": 1,
             })
         );
     }
@@ -296,7 +314,7 @@ mod tests {
         let stuck = summarize(&mixed(), NOW);
         assert_eq!(
             stuck_sentence(&stuck).as_deref(),
-            Some("2 of the last 4 reads never became queryable within 5 min")
+            Some("1 of the last 4 reads never became queryable within 5 min")
         );
         let fresh = summarize(
             &[facts(NOW - 1000, StageFact::Absent, StageFact::Absent)],
@@ -304,6 +322,18 @@ mod tests {
         );
         assert_eq!(stuck_sentence(&fresh), None);
         assert_eq!(summary_json(None), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn read_stages_ambiguous_read_is_counted_apart_and_never_called_stuck() {
+        let ambiguous = StageFact::Ambiguous {
+            join: StageJoin::PathHash,
+        };
+        let summary = summarize(&[facts(100, ambiguous, ambiguous)], NOW);
+        let json = summary_json(Some(&summary));
+        assert_eq!(json["ambiguous"], serde_json::json!(1));
+        assert_eq!(json["never_queryable"], serde_json::json!(0));
+        assert_eq!(stuck_sentence(&summary), None);
     }
 
     #[test]
