@@ -517,6 +517,17 @@ pub(crate) fn owner_path(git_dir: &Path) -> std::io::Result<PathBuf> {
 }
 
 pub(crate) fn acquire_owner(git_dir: &Path) -> std::result::Result<QueueLock, OwnerBlock> {
+    let owner = lock_owner(git_dir)?;
+    if legacy_barrier(owner.git_dir()) {
+        return Err(OwnerBlock::LegacyBarrier);
+    }
+    Ok(owner)
+}
+
+/// The owner flock alone, with the legacy markers left unread. Only the
+/// doctor's retirement of a stale legacy marker takes it this way: holding
+/// it proves no current-format capture runs while the marker is judged.
+pub(crate) fn lock_owner(git_dir: &Path) -> std::result::Result<QueueLock, OwnerBlock> {
     let git_dir = std::fs::canonicalize(git_dir).map_err(|_| OwnerBlock::Unavailable)?;
     let path = owner_path(&git_dir).map_err(|_| OwnerBlock::Unavailable)?;
     if path
@@ -544,17 +555,20 @@ pub(crate) fn acquire_owner(git_dir: &Path) -> std::result::Result<QueueLock, Ow
     })?;
     let owner = QueueLock { file, git_dir };
     owner.check_current().map_err(|_| OwnerBlock::Unavailable)?;
-    if legacy_barrier(owner.git_dir()) {
-        return Err(OwnerBlock::LegacyBarrier);
-    }
     Ok(owner)
+}
+
+/// The old-format lock file in the legacy capture-queue directory. It holds
+/// a timestamp and no pid, so nothing in it says whether its writer lives.
+pub(crate) fn legacy_queue_lock(git_dir: &Path) -> PathBuf {
+    rift_shadow::hooks::run_state::RunRoot::CaptureQueue
+        .legacy_under(git_dir)
+        .join(LOCK_FILE)
 }
 
 fn legacy_barrier(git_dir: &Path) -> bool {
     let mut markers = vec![
-        rift_shadow::hooks::run_state::RunRoot::CaptureQueue
-            .legacy_under(git_dir)
-            .join(LOCK_FILE),
+        legacy_queue_lock(git_dir),
         queue_dir(git_dir).join(LOCK_FILE),
     ];
     markers.extend(crate::family::run_state::legacy_move_marker(git_dir));
