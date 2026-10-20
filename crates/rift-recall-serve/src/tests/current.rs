@@ -376,7 +376,7 @@ fn diff_since_names_the_checkout_hash_when_the_store_lags_the_edit() {
     let checkout = Checkout::holding(&[(PATH, B_BYTES), (OTHER, OTHER_BYTES)]);
     let reader = checkout.reader();
     let holding_other = ToolRequest {
-        known_hashes: vec![sha256_hex(b"something else entirely")],
+        known_hashes: vec![sha256_hex(b"some other bytes")],
         ..holding_a()
     };
     let resp = serve(&store, &reader, ToolName::DiffSince, &holding_other);
