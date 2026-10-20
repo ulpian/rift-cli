@@ -141,7 +141,7 @@ fn the_pull_verb_serves_hunks_from_the_cli_on_a_live_projection() {
 
     let doc = pull_as_the_hint_spells_it(&repo, &home, &held_hash);
     the_changed_lines_are_served(&doc, &held_hash);
-    the_provenance_rides_with_the_delta(&doc, session);
+    a_hand_edit_is_not_credited_to_the_agent(&doc, session);
     the_answer_is_a_saving(&doc);
 }
 
@@ -262,12 +262,10 @@ fn the_changed_lines_are_served(doc: &serde_json::Value, held_hash: &str) {
     assert!(hunks[0]["lo"].as_u64().unwrap() >= 1);
 }
 
-/// The story rides with the delta, joined across both projections by the
-/// process that owns them. What is asserted is the SHAPE and the source of
-/// each fact, never a wall-clock instant or a token figure: a suite that
-/// pinned those would be pinning this machine's clock and this tokenizer's
-/// table rather than the channel.
-fn the_provenance_rides_with_the_delta(doc: &serde_json::Value, session: &str) {
+/// The story rides with the delta, and it names no one the capture does not
+/// credit. What is asserted is the SHAPE and the source of each fact, never a
+/// wall-clock instant or a token figure.
+fn a_hand_edit_is_not_credited_to_the_agent(doc: &serde_json::Value, session: &str) {
     let p = &doc["result"]["provenance"];
     assert!(p.is_object(), "a delta carries where it came from: {doc:#}");
     // The bracket's `from` end is the checkpoint that recorded the revision
@@ -290,24 +288,24 @@ fn the_provenance_rides_with_the_delta(doc: &serde_json::Value, session: &str) {
         Some("rift why src/a.rs:4 --json"),
         "the handle to why is the exact command, at the first changed line"
     );
-    // The session is named by its ROW id, which is the capture projection's own
-    // identity for the session and not the client's `session_id` — the two
-    // differ by construction, and `rift why` reports the same row id.
-    assert!(
-        p["session"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty() && s != session),
-        "who: the session row the capture projection bound to that checkpoint: {p:#}"
-    );
-    assert_eq!(
-        p["agent"].as_str(),
-        Some("claude-code"),
-        "…and the agent family that ran it"
-    );
-    assert!(
-        p["recorded_at_ms"].as_i64().is_some_and(|ms| ms > 0),
-        "when: the capture event's own recorded time: {p:#}"
-    );
+    // The edit was made by hand after the session's turn, so no checkpoint
+    // recorded it and no attribution credits an agent with it. The checkpoint
+    // that recorded the held revision did not make the change, so its session,
+    // agent, time and cost stay out, and the object says the author is unknown
+    // rather than naming whoever ran last.
+    for key in [
+        "session",
+        "agent",
+        "token_usage",
+        "cost_micros",
+        "recorded_at_ms",
+    ] {
+        assert!(
+            p.get(key).is_none(),
+            "a hand edit is not credited to the session {session}: `{key}` in {p:#}"
+        );
+    }
+    assert_eq!(p["author"].as_str(), Some("unknown"), "{p:#}");
     // The commit half is a git fact: the oid the recall projection mirrored,
     // and the subject this checkout's history carries for it.
     assert_eq!(

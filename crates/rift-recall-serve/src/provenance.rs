@@ -36,7 +36,7 @@
 //! [`git_subject`]: crate::provenance::git_subject
 //! [`downgraded`]: crate::provenance::downgraded
 
-use rift_recall_types::{CheckpointFacts, ProvenanceOracle};
+use rift_recall_types::{Author, CheckpointFacts, ProvenanceOracle};
 use serde_json::{json, Value};
 
 /// The tag a provenance object downgrades to when the facts will not fit.
@@ -233,14 +233,11 @@ pub fn object(
     }
     out.insert("checkpoints".to_owned(), Value::Object(checkpoints));
 
-    // The capture half, asked about the checkpoint the change landed in — the
-    // later end of the bracket, because that is the turn that made it.
-    let facts = bracket
-        .to
-        .or(bracket.from)
-        .and_then(|id| oracle.checkpoint(id))
-        .unwrap_or_default();
+    let (facts, withheld) = capture_half(oracle, bracket, path, line);
     insert_facts(&mut out, &facts);
+    if let Some(author) = withheld {
+        out.insert("author".to_owned(), json!(author.as_str()));
+    }
 
     if let Some(oid) = bracket.commit {
         let mut commit = serde_json::Map::new();
@@ -252,6 +249,52 @@ pub fn object(
     }
     out.insert("why".to_owned(), json!(why_command(path, line)));
     Some(Value::Object(out))
+}
+
+/// The capture half and who it credits.
+///
+/// Asked only of the later end of the bracket, the checkpoint that recorded
+/// the change. The earlier end recorded the revision the caller held, so its
+/// session did not make this change and lending its name would fabricate an
+/// author. Even the later end names a session, agent and cost only when its
+/// attribution credits the agent: an edit a person made between turns is
+/// recorded by the same checkpoint. The recorded time is a fact about the
+/// checkpoint, so it stays either way.
+///
+/// The second half names the author only when a known session, agent or cost
+/// was held back, so a reader learns why it is missing; an oracle that knew
+/// nothing adds no key, which keeps a hook payload's size where it was.
+fn capture_half(
+    oracle: &dyn ProvenanceOracle,
+    bracket: &Bracket<'_>,
+    path: &str,
+    line: Option<u32>,
+) -> (CheckpointFacts, Option<Author>) {
+    let (facts, author) = match bracket.to {
+        Some(to) => (
+            oracle.checkpoint(to).unwrap_or_default(),
+            oracle.author(to, path, line),
+        ),
+        None => (
+            bracket
+                .from
+                .and_then(|id| oracle.checkpoint(id))
+                .unwrap_or_default(),
+            Author::Unknown,
+        ),
+    };
+    if author == Author::Agent {
+        return (facts, None);
+    }
+    let credited = facts.session.is_some()
+        || facts.agent.is_some()
+        || facts.tokens.is_some()
+        || facts.cost_micros.is_some();
+    let dated = CheckpointFacts {
+        recorded_at_ms: bracket.to.and(facts.recorded_at_ms),
+        ..CheckpointFacts::default()
+    };
+    (dated, credited.then_some(author))
 }
 
 /// Write the capture half into the object, one key per recorded fact.
@@ -307,6 +350,16 @@ mod tests {
 
         fn commit_subject(&self, oid: &str) -> Option<String> {
             (oid == "9f3c1a2b").then(|| "fix(recall): one /-spelling chokepoint".to_owned())
+        }
+
+        /// The agent wrote `schema.rs` from line 400 on; the rest of that
+        /// checkpoint was edited between turns.
+        fn author(&self, id: &str, path: &str, line: Option<u32>) -> Author {
+            match (id, path, line) {
+                ("ck-to", "crates/rift-store/src/schema.rs", Some(n)) if n >= 400 => Author::Agent,
+                ("ck-to", _, _) => Author::Human,
+                _ => Author::Unknown,
+            }
         }
     }
 
@@ -366,6 +419,46 @@ mod tests {
         assert_eq!(
             object(&Fixed, &Bracket::default(), "src/a.rs", Some(1)),
             None
+        );
+    }
+
+    /// A change the attribution does not credit to the agent names no session,
+    /// agent or cost, and neither does a change no checkpoint recorded, whose
+    /// only checkpoint is the one that recorded the revision the caller held.
+    #[test]
+    fn provenance_names_the_agent_only_where_the_attribution_credits_it() {
+        let both = Bracket {
+            from: Some("ck-from"),
+            to: Some("ck-to"),
+            commit: None,
+        };
+        let human = object(&Fixed, &both, "crates/rift-store/src/schema.rs", Some(12)).unwrap();
+        assert_eq!(
+            human,
+            json!({
+                "checkpoints": { "from": "ck-from", "to": "ck-to" },
+                "recorded_at_ms": 1_757_894_400_000_i64,
+                "author": "human",
+                "why": "rift why crates/rift-store/src/schema.rs:12 --json"
+            })
+        );
+        let held_only = Bracket {
+            from: Some("ck-to"),
+            ..Bracket::default()
+        };
+        let untracked = object(
+            &Fixed,
+            &held_only,
+            "crates/rift-store/src/schema.rs",
+            Some(412),
+        );
+        assert_eq!(
+            untracked.unwrap(),
+            json!({
+                "checkpoints": { "from": "ck-to" },
+                "author": "unknown",
+                "why": "rift why crates/rift-store/src/schema.rs:412 --json"
+            })
         );
     }
 

@@ -71,6 +71,38 @@ impl CheckpointFacts {
     }
 }
 
+/// Who the capture's attribution credits with a change, as a recorded fact.
+///
+/// The checkpoint that recorded a change is not proof of who made it: a
+/// person's edit between two agent turns lands in the next checkpoint too. So
+/// a session, an agent and a cost are named only when the attribution split
+/// credits the agent, and everything else stays unknown rather than borrowing
+/// the name of whoever ran last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Author {
+    /// The attribution credits only the agent's turn.
+    Agent,
+    /// The attribution credits only edits made between turns.
+    Human,
+    /// Both wrote here, and the record cannot split them finer.
+    Mixed,
+    /// Nothing recorded says who wrote it.
+    Unknown,
+}
+
+impl Author {
+    /// The word a caller reads, the same vocabulary `rift why` reports.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "ai",
+            Self::Human => "human",
+            Self::Mixed => "mixed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The capture-and-git facts a delta's provenance rides on.
 ///
 /// Both questions are answered from state the serving handler cannot reach:
@@ -84,6 +116,12 @@ pub trait ProvenanceOracle {
     /// the revision is not committed, is outside whatever history the answerer
     /// resolved, or carries a subject it will not render.
     fn commit_subject(&self, oid: &str) -> Option<String>;
+
+    /// Who the attribution recorded at `checkpoint_id` credits with `path`,
+    /// at `line` when one is known. Unknown unless an answerer has the record.
+    fn author(&self, _checkpoint_id: &str, _path: &str, _line: Option<u32>) -> Author {
+        Author::Unknown
+    }
 }
 
 /// An oracle that knows nothing — every question answers *unknown*.
