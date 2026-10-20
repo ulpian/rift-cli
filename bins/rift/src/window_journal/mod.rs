@@ -98,6 +98,7 @@ mod fold;
 mod frozen;
 mod housekeeping;
 mod journal;
+mod receipts;
 mod seen;
 
 use std::path::{Path, PathBuf};
@@ -110,6 +111,7 @@ pub(crate) use family::{live_sibling_journals, FamilyQuery};
 pub(crate) use frozen::session_window_facts;
 pub(crate) use housekeeping::{survey, sweep_expired};
 pub(crate) use journal::WindowJournal;
+pub(crate) use receipts::{live_reads, LiveReads};
 pub(crate) use seen::last_read_turns;
 
 /// The largest row this will write in one call.

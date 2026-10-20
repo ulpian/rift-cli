@@ -148,6 +148,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("turn_seals", doctor_turn_seals(root));
     report.leg("completeness", doctor_capture_completeness(root));
     report.leg("session_gaps", session_gaps::doctor_session_gaps(root));
+    report.leg("read_stages", crate::read_stages::doctor_leg(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
     // Every leg has read the said-once markers; only a repair run clears them.

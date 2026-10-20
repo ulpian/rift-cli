@@ -86,6 +86,10 @@ pub(crate) fn run(cmd: &RecallCmd, repo: &Path) -> rift_core::Result<Outcome> {
             // beside it is the reason the two were ever read apart.
             let savings = crate::memory::savings_report(repo)?;
             render_savings_shares(&mut human, &savings);
+            let stages = crate::read_stages::summary(repo, crate::read_stages::now_ms());
+            if let Some(sentence) = stages.as_ref().and_then(crate::read_stages::stuck_sentence) {
+                human.push_str(&format!("\nRead stages: {sentence}\n"));
+            }
             Ok(Outcome::ok(
                 human.trim_end().to_owned(),
                 serde_json::json!({
@@ -93,6 +97,7 @@ pub(crate) fn run(cmd: &RecallCmd, repo: &Path) -> rift_core::Result<Outcome> {
                     "health": health_json,
                     "policy": policy_json(&policy),
                     "savings": crate::memory::savings_json(&savings),
+                    "read_stages": crate::read_stages::summary_json(stages.as_ref()),
                 }),
             ))
         }
