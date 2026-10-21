@@ -117,6 +117,56 @@ impl Fixture {
         self.strand_tickets(lock);
     }
 
+    /// The owner's live shape: every session ended and its condense ran, but
+    /// one condense ticket stayed queued beside the old per-session marker and
+    /// no completion marker, so no condense is admissible and no session is
+    /// active at a current boundary.
+    fn seed_ended_backlog_with_legacy_condense(&self) {
+        let lock = hold_drain_lock(&self.repo);
+        self.seed_prompts();
+        for session in SESSIONS {
+            let transcript = write_agent_transcript(self.tmp.path(), session, &prompt_line());
+            self.hook("SessionEnd", session, &transcript);
+        }
+        self.hooks.await_workers(|| true);
+        let queue = agent_queue_of(&self.repo);
+        let stash = self.tmp.path().join("stash");
+        std::fs::create_dir_all(&stash).unwrap();
+        let boundaries = agent_jobs_named(&self.repo, "boundary-");
+        for name in &boundaries {
+            std::fs::rename(queue.join(name), stash.join(name)).unwrap();
+        }
+        let kept = agent_jobs_named(&self.repo, "condense-").remove(0);
+        let ticket = std::fs::read_to_string(queue.join(&kept)).unwrap();
+        std::fs::copy(queue.join(&kept), stash.join(&kept)).unwrap();
+        drop(lock);
+        self.drain();
+        for name in boundaries.iter().chain([&kept]) {
+            std::fs::rename(stash.join(name), queue.join(name)).unwrap();
+        }
+        for entry in std::fs::read_dir(&queue).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if name.starts_with("completed-") {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let session = SESSIONS.into_iter().find(|s| ticket.contains(s)).unwrap();
+        let key = rift_shadow::sha256_hex(&[session.as_bytes()]);
+        std::fs::write(queue.join(format!("condensed-{key}")), b"").unwrap();
+    }
+
+    /// Two sessions end while no worker drains: two admissible condenses.
+    fn seed_backlog_with_two_carriers(&self) {
+        let lock = hold_drain_lock(&self.repo);
+        self.seed_prompts();
+        for session in &SESSIONS[1..] {
+            let transcript = write_agent_transcript(self.tmp.path(), session, &prompt_line());
+            self.hook("SessionEnd", session, &transcript);
+        }
+        self.strand_tickets(lock);
+    }
+
     fn seed_prompts(&self) {
         for session in SESSIONS {
             let transcript = write_agent_transcript(self.tmp.path(), session, &prompt_line());
@@ -285,4 +335,44 @@ fn capture_recovery_fix_carries_the_gap_on_its_own_baseline_when_no_session_is_e
     let again = stdout(&f.rift(&["doctor", "--fix"]));
     assert!(again.contains("nothing to recover"), "{again}");
     assert_eq!(checkpoint_shards(&f.repo), shards, "no new checkpoint");
+}
+
+#[test]
+fn capture_recovery_fix_names_the_missing_baseline_when_no_session_is_active() {
+    let f = Fixture::initialized();
+    f.seed_ended_backlog_with_legacy_condense();
+    assert_eq!(agent_jobs_named(&f.repo, "condense-").len(), 1);
+    assert!(agent_jobs_named(&f.repo, "boundary-").len() >= 2);
+    let shards = checkpoint_shards(&f.repo);
+
+    let said = stdout(&f.rift(&["doctor", "--fix"]));
+    assert!(said.contains("baseline-unreserved"), "{said}");
+    assert!(!said.contains("carrier-owed"), "{said}");
+    assert!(
+        said.contains("none admissible: LegacyCondensed 1"),
+        "{said}"
+    );
+    assert!(!f.hold().exists(), "the hold is released: {said}");
+    assert_eq!(
+        checkpoint_shards(&f.repo),
+        shards,
+        "nothing archived: {said}"
+    );
+}
+
+#[test]
+fn capture_recovery_fix_refuses_two_admissible_carriers_and_never_takes_the_baseline() {
+    let f = Fixture::initialized();
+    f.seed_backlog_with_two_carriers();
+    assert_eq!(agent_jobs_named(&f.repo, "condense-").len(), 2);
+
+    let said = stdout(&f.rift(&["doctor", "--fix"]));
+    assert!(said.contains("carrier-owed"), "{said}");
+    assert!(said.contains("2 admissible, none picked"), "{said}");
+    assert!(!f.hold().exists(), "the hold is released: {said}");
+    let roots = [f.repo.clone(), f.cache()];
+    let intents = roots.iter().flat_map(|r| tree(r));
+    assert!(!intents
+        .into_iter()
+        .any(|p| p.ends_with("archive-intent.json")));
 }
