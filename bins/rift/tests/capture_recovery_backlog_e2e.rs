@@ -130,6 +130,11 @@ impl Fixture {
         for name in &owed {
             std::fs::rename(stash.join(name), queue.join(name)).unwrap();
         }
+        // The live queue's shape: markers the queue leaves beside its
+        // tickets, which recovery must count and never refuse.
+        let h64 = "f".repeat(64);
+        std::fs::write(queue.join(format!("unavailable-basis-{h64}")), b"").unwrap();
+        std::fs::write(queue.join(format!("completed-{h64}.done")), b"{}").unwrap();
     }
 
     /// One worker pass over everything but the stashed tickets.

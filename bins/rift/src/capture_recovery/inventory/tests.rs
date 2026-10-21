@@ -150,6 +150,41 @@ fn every_shape_outside_the_closed_classes_is_counted_then_refuses_with_its_reaso
 }
 
 #[test]
+fn every_marker_the_queue_writes_is_counted_by_kind_and_only_an_unknown_name_refuses() {
+    use crate::agent_queue::names::{self, Marker};
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let dir = queue_dir(&rig.fixture);
+    enqueue(&rig.fixture, "n-1", 1, BoundaryEdge::Start);
+    let h64 = "c".repeat(64);
+    for name in [
+        names::condensed(&h64),
+        names::completed(&h64),
+        names::unavailable(&format!("basis-{h64}")),
+        names::unavailable(&format!("basis-{}", "d".repeat(64))),
+        "agent-x.error".to_owned(),
+    ] {
+        std::fs::write(dir.join(name), b"").unwrap();
+    }
+    let queue = hold.agent_queue_namespace().unwrap();
+    let inventory = enumerate(&queue).unwrap();
+    let counts = &inventory.counts;
+    let kinds = [
+        (Marker::Condensed, 1),
+        (Marker::Completed, 1),
+        (Marker::Unavailable, 2),
+        (Marker::Error, 1),
+    ];
+    assert_eq!(counts.markers, kinds.into_iter().collect());
+    assert_eq!(counts.ancillary, 5);
+    assert_eq!(counts.entries_counted, 6);
+    assert_eq!(inventory.sources.len(), 1, "a marker is never a boundary");
+    std::fs::write(dir.join("unavailable.txt"), b"").unwrap();
+    let counts = refused(enumerate(&queue));
+    assert_eq!(counts.refused.get(&Refusal::UnknownName), Some(&1));
+}
+
+#[test]
 fn a_repeated_name_and_an_iterator_error_refuse_the_listing_without_deduplicating() {
     fn listed(
         items: Vec<Result<(&'static str, EntryKind), ()>>,

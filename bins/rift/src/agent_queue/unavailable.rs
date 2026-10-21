@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use super::names::{self, Marker, QueueName};
 use super::{logical_stem, queue_dir, AgentJob};
 
 /// The marker a basis-snapshot job leaves when it completed `unavailable`:
@@ -15,7 +16,7 @@ pub(crate) fn record_unavailable(git_dir: &Path, job: &AgentJob) {
     };
     let dir = queue_dir(git_dir);
     if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(dir.join(format!("unavailable-{stem}")), b"");
+        let _ = std::fs::write(dir.join(names::unavailable(&stem)), b"");
     }
 }
 
@@ -26,7 +27,7 @@ pub(crate) fn unavailable_count(git_dir: &Path) -> usize {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("unavailable-"))
+                .is_some_and(|name| names::classify(name) == QueueName::Marker(Marker::Unavailable))
         })
         .count()
 }

@@ -17,6 +17,7 @@ use super::carrier::QueuedCondense;
 use super::codec::{self, Shape, MAX_BYTES};
 use super::files::{self, EntryKind, PhysicalIdentity};
 use super::hold::ReadyQueue;
+use crate::agent_queue::names::{self, Marker, QueueName};
 use crate::agent_queue::BoundarySnapshot;
 
 /// Why an inventory is not actionable, as a static identifier.
@@ -48,6 +49,8 @@ pub(crate) struct Counts {
     pub(crate) tickets: u32,
     pub(crate) understood_other: u32,
     pub(crate) ancillary: u32,
+    /// The markers among the ancillary entries, by kind.
+    pub(crate) markers: BTreeMap<Marker, u32>,
     pub(crate) refused: BTreeMap<Refusal, u32>,
 }
 
@@ -87,7 +90,7 @@ pub(crate) struct CondenseTicket {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
     Ticket(String),
-    Ancillary,
+    Marker(Marker),
     Refused(Refusal),
 }
 
@@ -116,6 +119,30 @@ impl Refusal {
             Self::TicketShape => "ticket-shape",
             Self::SourceAlias => "source-alias",
             Self::Resource => "resource",
+        }
+    }
+}
+
+impl Refusal {
+    /// The selection-owed words when this refusal stopped the inventory.
+    pub(crate) fn selection_owed(self) -> &'static str {
+        match self {
+            Self::QueueUnavailable => "selection-owed (inventory: the queue is unavailable)",
+            Self::EntriesOverflow => "selection-owed (inventory: too many entries)",
+            Self::DuplicateName => "selection-owed (inventory refused a repeated name)",
+            Self::NameNotAscii => "selection-owed (inventory refused a non-ASCII name)",
+            Self::Stage => "selection-owed (inventory: a publish is still staging)",
+            Self::Symlink => "selection-owed (inventory refused a symlink)",
+            Self::Directory => "selection-owed (inventory refused a directory)",
+            Self::NotRegular => "selection-owed (inventory refused a non-regular file)",
+            Self::UnknownName => "selection-owed (inventory refused an unknown name)",
+            Self::TicketOversize => "selection-owed (inventory: a ticket is over its cap)",
+            Self::TicketUnreadable => "selection-owed (inventory: a ticket is unreadable)",
+            Self::AggregateOverflow => "selection-owed (inventory: the ticket budget is spent)",
+            Self::TicketMalformed => "selection-owed (inventory: a ticket is malformed)",
+            Self::TicketShape => "selection-owed (inventory: a ticket's shape is unsupported)",
+            Self::SourceAlias => "selection-owed (inventory: two tickets share one file)",
+            Self::Resource => "selection-owed (inventory: out of resources)",
         }
     }
 }
@@ -162,7 +189,10 @@ fn list_entries(
         let entry = classify_entry(ascii, kind);
         match &entry {
             Entry::Refused(reason) => counts.refuse(*reason),
-            Entry::Ancillary => counts.ancillary += 1,
+            Entry::Marker(marker) => {
+                counts.ancillary += 1;
+                *counts.markers.entry(*marker).or_insert(0) += 1;
+            }
             Entry::Ticket(_) => (),
         }
         entries.push(entry);
@@ -170,9 +200,9 @@ fn list_entries(
     entries
 }
 
-/// The closed name and type classes: an executable `*.json` ticket, an
-/// understood immutable marker or note, a stage or temp, or a shape this
-/// selection does not understand.
+/// The closed type classes, then the agent queue's own name grammar: an
+/// executable ticket, a marker the queue writes (counted, never a boundary),
+/// a stage or temp, or a name the queue never writes.
 fn classify_entry(name: &str, kind: EntryKind) -> Entry {
     match kind {
         EntryKind::Symlink => return Entry::Refused(Refusal::Symlink),
@@ -180,33 +210,19 @@ fn classify_entry(name: &str, kind: EntryKind) -> Entry {
         EntryKind::Other => return Entry::Refused(Refusal::NotRegular),
         EntryKind::Regular => (),
     }
-    if name.starts_with('.') || has_extension(name, "stage") || has_extension(name, "tmp") {
+    let class = names::classify(name);
+    if class == QueueName::Stage {
         return Entry::Refused(Refusal::Stage);
     }
     if codec::basename(OsStr::new(name)).is_err() {
         return Entry::Refused(Refusal::UnknownName);
     }
-    if has_extension(name, "json") {
-        return Entry::Ticket(name.to_owned());
+    match class {
+        QueueName::Ticket => Entry::Ticket(name.to_owned()),
+        QueueName::Marker(marker) => Entry::Marker(marker),
+        QueueName::Stage => Entry::Refused(Refusal::Stage),
+        QueueName::Unknown => Entry::Refused(Refusal::UnknownName),
     }
-    let condensed = name.strip_prefix("condensed-").is_some_and(|key| {
-        key.len() == 64
-            && key
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    });
-    if condensed || has_extension(name, "error") {
-        return Entry::Ancillary;
-    }
-    Entry::Refused(Refusal::UnknownName)
-}
-
-/// The queue spells its extensions in lowercase; an upper-case twin is not
-/// the same class, so the comparison is deliberately exact.
-fn has_extension(name: &str, extension: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .is_some_and(|actual| actual == extension)
 }
 
 /// The whole inventory: the queue rechecked, every entry listed and counted,

@@ -480,6 +480,31 @@ fn publish(
     Ok(publication)
 }
 
+impl Deferred {
+    /// The words `rift doctor` prints for this selection: `selection-owed`
+    /// and the specific reason, so a stalled recovery says why it stalled.
+    pub(crate) fn reason(&self) -> &'static str {
+        match &self.owed {
+            Owed::HoldUnavailable => "selection-owed (the hold is unavailable)",
+            Owed::QueueUnavailable => "selection-owed (the agent queue is unavailable)",
+            Owed::SessionsUnavailable => "selection-owed (the sessions are unavailable)",
+            Owed::PolicyMismatch => "selection-owed (the plan's policy differs)",
+            Owed::Inventory => self.counts.refused.keys().next().map_or(
+                "selection-owed (the inventory is not actionable)",
+                |refusal| refusal.selection_owed(),
+            ),
+            Owed::PassUnavailable(_) => "selection-owed (the eligibility pass is unavailable)",
+            Owed::CandidateUnavailable(_) => "selection-owed (a candidate is unavailable)",
+            Owed::ReservationTie => "selection-owed (two boundaries tie for the reservation)",
+            Owed::SelectedOverflow => "selection-owed (too many tickets selected)",
+            Owed::IntentOversize => "selection-owed (the intent is over its cap)",
+            Owed::IntentConflict => "selection-owed (a different intent is recorded)",
+            Owed::PublishFailed => "selection-owed (the intent could not be published)",
+            Owed::Resource => "selection-owed (out of resources)",
+        }
+    }
+}
+
 /// The whole selection, under an admitted hold: the policy checked, the
 /// inventory complete and actionable, one pass, the reservation and the
 /// historical slots frozen, the intent measured under its caps, every
