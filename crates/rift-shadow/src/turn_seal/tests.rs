@@ -43,7 +43,7 @@ fn chain_of(seal: &TurnSeal) -> PriorChain {
             })
             .collect(),
         raw_lines: segments.raw_lines(),
-        leaf: rift_hashchain::leaf_hash(body.as_slice()),
+        leaf: Some(rift_hashchain::leaf_hash(body.as_slice())),
         packs: segments.packs().map(str::to_owned),
         fallbacks: segments.fallbacks().to_vec(),
     }
@@ -158,12 +158,24 @@ fn a_transcript_shorter_than_the_sealed_frontier_breaks_the_chain() {
 }
 
 #[test]
+fn a_chain_read_from_its_own_blobs_carries_the_same_parts_without_a_second_leaf() {
+    let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
+    let lines = doc(&records(0..8));
+    let with_leaf = seal_turn(&lines, Some(chain_of(&first)), &packs()).unwrap();
+    let mut chain = chain_of(&first);
+    chain.leaf = None;
+    let without = seal_turn(&lines, Some(chain), &packs()).unwrap();
+    assert!(matches!(without, TurnSeal::Appended { .. }));
+    assert_eq!(segments_of(&without), segments_of(&with_leaf));
+}
+
+#[test]
 fn an_earlier_part_whose_bytes_miss_its_recorded_oid_reseals_whole_with_the_note() {
     let first = seal_turn(&doc(&records(0..4)), None, &packs()).unwrap();
     let mut chain = chain_of(&first);
     // Same line count, a consistent leaf, but not the blob the tree records.
     chain.parts[0].bytes = records(20..23).concat().into_bytes();
-    chain.leaf = rift_hashchain::leaf_hash(&chain.parts[0].bytes);
+    chain.leaf = Some(rift_hashchain::leaf_hash(&chain.parts[0].bytes));
     let lines = records(20..26);
     let seal = seal_turn(&doc(&lines), Some(chain), &packs()).unwrap();
     let TurnSeal::Whole { body, broken, .. } = seal else {

@@ -234,7 +234,7 @@ pub(super) fn sealed_line(transcript: &[u8], index: usize) -> Option<&[u8]> {
 fn result_lines<'a>(raw: &[u8], wanted: &BTreeSet<&'a str>) -> BTreeMap<&'a str, usize> {
     let mut found = BTreeMap::new();
     for (index, line) in raw.split(|b| *b == b'\n').enumerate() {
-        if !line.windows(11).any(|w| w == b"tool_result") {
+        if !super::spills::mentions(line, "tool_result") {
             continue;
         }
         let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
