@@ -100,20 +100,32 @@ impl Fixture {
     /// every prompt's boundary ticket is left owed in the agent journal.
     fn seed_backlog(&self) {
         let lock = hold_drain_lock(&self.repo);
-        let line = format!(
-            "{}\n",
-            serde_json::json!({"type": "user", "message": {"role": "user", "content": "add a feature"}})
-        );
-        for session in SESSIONS {
-            let transcript = write_agent_transcript(self.tmp.path(), session, &line);
-            self.hook("SessionStart", session, &transcript);
-            self.hook("UserPromptSubmit", session, &transcript);
-        }
+        self.seed_prompts();
         // One session ends while the lock is still held: its queued condense
         // is the carrier the gap rides, as in the incident.
         let last = SESSIONS[SESSIONS.len() - 1];
-        let transcript = write_agent_transcript(self.tmp.path(), last, &line);
+        let transcript = write_agent_transcript(self.tmp.path(), last, &prompt_line());
         self.hook("SessionEnd", last, &transcript);
+        self.strand_tickets(lock);
+    }
+
+    /// The live machine's shape: no session is mid-end, so no condense can
+    /// carry and the gap rides on recovery's own baseline.
+    fn seed_backlog_without_carrier(&self) {
+        let lock = hold_drain_lock(&self.repo);
+        self.seed_prompts();
+        self.strand_tickets(lock);
+    }
+
+    fn seed_prompts(&self) {
+        for session in SESSIONS {
+            let transcript = write_agent_transcript(self.tmp.path(), session, &prompt_line());
+            self.hook("SessionStart", session, &transcript);
+            self.hook("UserPromptSubmit", session, &transcript);
+        }
+    }
+
+    fn strand_tickets<L>(&self, lock: L) {
         self.hooks.await_workers(|| true);
         // The incident's shape: the capture queue drains, the boundary
         // tickets stay behind for a worker that never took them.
@@ -185,6 +197,22 @@ fn plan_dirs(cache: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn prompt_line() -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": "add a feature"}})
+    )
+}
+
+/// The one record named `name` anywhere under `roots`, read whole.
+fn record_named(roots: &[PathBuf], name: &str) -> String {
+    let found = roots
+        .iter()
+        .flat_map(|root| tree(root))
+        .find(|p| p.ends_with(name));
+    std::fs::read_to_string(found.unwrap_or_else(|| panic!("no {name}"))).unwrap()
+}
+
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -232,4 +260,29 @@ fn capture_recovery_fix_archives_a_seeded_backlog_once_and_then_says_complete() 
     let after = stdout(&f.rift(&["doctor"]));
     assert!(!after.contains("capture recovery"), "{after}");
     assert!(after.contains("capture queue:  empty"), "{after}");
+}
+
+#[test]
+fn capture_recovery_fix_carries_the_gap_on_its_own_baseline_when_no_session_is_ending() {
+    let f = Fixture::initialized();
+    f.seed_backlog_without_carrier();
+    assert!(agent_jobs_named(&f.repo, "condense-").is_empty());
+    assert!(agent_jobs_named(&f.repo, "boundary-").len() >= 2);
+
+    let fix = f.rift(&["doctor", "--fix"]);
+    let said = stdout(&fix);
+    assert!(said.contains("capture recovery complete"), "{said}");
+    assert!(!f.hold().exists(), "the hold is released: {said}");
+    let left = agent_jobs_named(&f.repo, "boundary-");
+    assert!(left.is_empty(), "{left:?} {said}");
+    let roots = [f.repo.clone(), f.cache()];
+    let intent = record_named(&roots, "archive-intent.json");
+    assert!(intent.contains("carrier_baseline_checkpoint"), "{intent}");
+    record_named(&roots, "publication-receipt.json");
+    let shards = checkpoint_shards(&f.repo);
+    assert!(!shards.is_empty(), "the backlog is archived: {said}");
+
+    let again = stdout(&f.rift(&["doctor", "--fix"]));
+    assert!(again.contains("nothing to recover"), "{again}");
+    assert_eq!(checkpoint_shards(&f.repo), shards, "no new checkpoint");
 }

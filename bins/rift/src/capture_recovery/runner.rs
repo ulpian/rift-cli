@@ -14,15 +14,17 @@ use sha2::{Digest, Sha256};
 use super::archive::resume::resume_intent;
 use super::archive::retire::{retire, write_retire_intent};
 use super::archive::run::{archive_recovered, RecoveryRun};
-use super::archive::{Delegation, RecoveryBackend, INTENT_NAME as ARCHIVE_INTENT_NAME};
-use super::carrier::load::{admit_carrier, Sources};
+use super::archive::{Carrier, Delegation, RecoveryBackend, INTENT_NAME as ARCHIVE_INTENT_NAME};
+use super::carrier::load::{admit_carrier, LoadOwed, Sources};
+use super::carrier::CarrierOwed;
 use super::controller::{drive, owed_words, HoldProgress, Recovery};
 use super::controller::{Refused, Stage, Stages};
 use super::cut::{pin_all, resume_pins, CutOutcome, Pinned, MAX_CUT_BYTES};
 use super::gap::{publish_gap, GapOutcome};
 use super::hold::OwnHold;
 use super::inventory::enumerate;
-use super::observation::{attempt_observation, BoundaryCollector, ObservationOwed, Reservation};
+use super::observation::{attempt_observation, collect_baseline, BoundaryCollector};
+use super::observation::{ObservationOwed, Reservation};
 use super::record::{self, RecordError};
 use super::selection::intent::SelectionIntent;
 use super::selection::{select, Selected, INTENT_NAME};
@@ -33,6 +35,7 @@ use crate::hooks::Historical;
 /// A complete inventory with no historical member: nothing is owed.
 const NOTHING_TO_RECOVER: &str = "nothing-to-recover";
 const ABSENT: &str = "record-absent";
+const CARRIER_OWED: &str = "carrier-owed";
 
 /// What every stage reads from outside the hold: one runtime, the open
 /// projection, the adapters, the native backend and the native tree reader.
@@ -56,6 +59,8 @@ pub(crate) struct LiveStages<'a, B, R> {
     /// The ticket names the selection classified historical, once a stage
     /// has read them from this run's selection or the durable intent.
     historical: Option<BTreeSet<String>>,
+    /// What the carrier road found when it refused, counts and all.
+    carrier_refusal: Option<String>,
 }
 
 impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
@@ -66,6 +71,7 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
             selected: None,
             pinned: None,
             historical: None,
+            carrier_refusal: None,
         }
     }
 
@@ -133,28 +139,10 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
 
     fn archive_carrier(&mut self) -> Result<(), Refused> {
         let batch = self.batch()?;
-        let unavailable = |_| Refused("archive-evidence-unavailable");
-        let queue = self.hold.agent_queue_namespace().map_err(unavailable)?;
-        let sessions = self.hold.sessions_namespace().map_err(unavailable)?;
-        let inventory = enumerate(&queue).map_err(|_| Refused("inventory-owed"))?;
-        let sources = Sources {
-            queue: queue.queue(),
-            sessions: sessions.sessions(),
-        };
+        let carrier = self.carrier()?;
         let cx = &self.cx;
-        let repo_id = sessions.repo_id().as_str();
-        let admission = cx
-            .rt
-            .block_on(admit_carrier(
-                cx.store,
-                &sources,
-                repo_id,
-                &inventory.condenses,
-            ))
-            .map_err(|_| Refused("carrier-owed"))?;
-        let backend =
-            RecoveryBackend::new(cx.backend, self.hold, admission.admitted.carrier, batch)
-                .map_err(|_| Refused("artifact-invalid"))?;
+        let backend = RecoveryBackend::new(cx.backend, self.hold, carrier, batch)
+            .map_err(|_| Refused("artifact-invalid"))?;
         let run = RecoveryRun {
             rt: cx.rt,
             store: cx.store,
@@ -170,9 +158,80 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
         }
     }
 
+    /// An admitted condense when one is admissible. Where no condense could
+    /// carry at all, recovery's own baseline carries instead; a refusal keeps
+    /// every count the carrier road found, for the doctor line.
+    fn carrier(&mut self) -> Result<Carrier, Refused> {
+        let unavailable = |_| Refused("archive-evidence-unavailable");
+        let queue = self.hold.agent_queue_namespace().map_err(unavailable)?;
+        let sessions = self.hold.sessions_namespace().map_err(unavailable)?;
+        let inventory = enumerate(&queue).map_err(|_| Refused("inventory-owed"))?;
+        let sources = Sources {
+            queue: queue.queue(),
+            sessions: sessions.sessions(),
+        };
+        let cx = &self.cx;
+        let repo_id = sessions.repo_id().as_str();
+        let admission = cx.rt.block_on(admit_carrier(
+            cx.store,
+            &sources,
+            repo_id,
+            &inventory.condenses,
+        ));
+        let owed = match admission {
+            Ok(admission) => return Ok(admission.admitted.carrier),
+            Err(owed) => owed,
+        };
+        let baseline = if baseline_may_carry(&owed) {
+            self.baseline_carrier()
+        } else {
+            Err(Refused(CARRIER_OWED))
+        };
+        baseline.inspect_err(|_| self.carrier_refusal = Some(carrier_refusal(&owed)))
+    }
+
+    /// The reserved current boundary, collected now with its actual time and
+    /// before the archive, carries the gap; a rerun after a crash reads the
+    /// collected checkpoint back rather than collecting again. The gap entries
+    /// stay unknown: the baseline claims no historical attribution.
+    fn baseline_carrier(&self) -> Result<Carrier, Refused> {
+        let hold = self.hold;
+        self.with_reservation(|reservation, collector| {
+            let Some(reservation) = reservation else {
+                return Err(Refused(CARRIER_OWED));
+            };
+            let checkpoint = collect_baseline(hold, reservation, collector)
+                .map_err(|owed| Refused(observation_reason(owed)))?;
+            let expectation = &reservation.observation.expectation;
+            let known = &expectation.known_boundary;
+            Carrier::baseline(
+                &known.agent,
+                &known.native_session,
+                &expectation.context_sha256,
+                &expectation.ticket_sha256,
+                &checkpoint,
+            )
+            .map_err(|_| Refused("artifact-invalid"))
+        })?
+    }
+
     /// Collect the reserved boundary the durable selection intent names, as
     /// the hold's last act; with no reservation only the completion is written.
     fn observe(&mut self) -> Result<(), Refused> {
+        let hold = self.hold;
+        self.with_reservation(|reservation, collector| {
+            attempt_observation(hold, reservation, collector)
+        })?
+        .map(|_| ())
+        .map_err(|owed| Refused(observation_reason(owed)))
+    }
+
+    /// The durable selection intent's reservation, if any, and a boundary
+    /// collector over the working tree, handed to one step.
+    fn with_reservation<T>(
+        &self,
+        step: impl FnOnce(Option<Reservation<'_>>, &mut BoundaryCollector<'_>) -> T,
+    ) -> Result<T, Refused> {
         let bytes = self.read_private(INTENT_NAME)?;
         let intent =
             SelectionIntent::decode(&bytes).map_err(|_| Refused("selection-intent-invalid"))?;
@@ -195,9 +254,7 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
             repo: cx.repo,
             reader: &reader,
         };
-        attempt_observation(self.hold, reservation, &mut collector)
-            .map(|_| ())
-            .map_err(|owed| Refused(observation_reason(owed)))
+        Ok(step(reservation, &mut collector))
     }
 
     fn selection_intent(&self) -> Result<SelectionIntent, Refused> {
@@ -280,10 +337,12 @@ pub(crate) fn recover_naming_historical<B: ShadowBackend, R: SubstrateReader>(
         ) => Historical::Named(BTreeSet::new()),
         (_, None) => Historical::Unclassified,
     };
-    Recovered {
-        words: recovery_words(recovery),
-        historical,
-    }
+    let words = recovery_words(recovery);
+    let words = match stages.carrier_refusal {
+        Some(found) => format!("{words}; carrier refusals: {found}"),
+        None => words,
+    };
+    Recovered { words, historical }
 }
 
 fn recovery_words(recovery: Recovery) -> String {
@@ -309,8 +368,33 @@ fn observation_reason(owed: ObservationOwed) -> &'static str {
     }
 }
 
+/// No condense can carry at all, so the baseline may. Two admissible
+/// condenses are a doubt the baseline never settles.
+fn baseline_may_carry(owed: &LoadOwed) -> bool {
+    matches!(
+        owed,
+        LoadOwed::Carrier(CarrierOwed::NoCondense | CarrierOwed::NoneAdmissible(_))
+    )
+}
+
+/// The carrier road's refusal in plain words, every count it kept included.
+fn carrier_refusal(owed: &LoadOwed) -> String {
+    match owed {
+        LoadOwed::Overflow => "more queued condenses than one pass reads".to_owned(),
+        LoadOwed::Evidence(reason) => format!("evidence unreadable ({reason:?})"),
+        LoadOwed::Carrier(CarrierOwed::NoCondense) => "no queued condense".to_owned(),
+        LoadOwed::Carrier(CarrierOwed::Ambiguous { admissible }) => {
+            format!("{admissible} admissible, none picked")
+        }
+        LoadOwed::Carrier(CarrierOwed::NoneAdmissible(counts)) => {
+            let named: Vec<String> = counts.iter().map(|(r, n)| format!("{r:?} {n}")).collect();
+            format!("none admissible: {}", named.join(", "))
+        }
+    }
+}
+
 /// The recovery archives as a manual commit would: the carrier is a finished
-/// condense, never a live turn.
+/// condense or recovery's own baseline, never a live turn.
 fn recovery_decision() -> ArchiveDecision {
     ArchiveDecision {
         archive: true,

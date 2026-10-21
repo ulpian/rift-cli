@@ -284,3 +284,23 @@ fn capture_recovery_a_different_file_under_the_reserved_name_is_kept_and_recorde
         Some(ReservedTicket::NameReused)
     );
 }
+
+#[test]
+fn capture_recovery_a_baseline_collected_before_the_archive_is_read_back_and_never_collected_twice()
+{
+    let rig = Rig::new();
+    enqueue(&rig.fixture, "old-a", 1, Start);
+    let hold = rig.admit();
+    let observation = reserved();
+    let mut collector = counting(&rig, Collection::Observed);
+    let first = collect_baseline(&hold, reservation(&observation), &mut collector);
+    assert_eq!(first, Ok(checkpoint_id(&observation)));
+    // A crash before the gap was published: the rerun reads the baseline's
+    // recorded checkpoint back and leaves the completion to the last stage.
+    let again = collect_baseline(&hold, reservation(&observation), &mut collector);
+    assert_eq!(again, Ok(checkpoint_id(&observation)));
+    assert!(!rig.fixture.evidence.join(COLLECTED_NAME).exists());
+    let last = attempt_observation(&hold, Some(reservation(&observation)), &mut collector);
+    assert_eq!(last, Ok(ObservationOutcome::Recognized));
+    assert_eq!((collector.collects, collector.read_backs), (1, 2));
+}

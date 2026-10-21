@@ -1,5 +1,6 @@
 //! The recovery-only archive wrapper: one frozen gap artifact carried by one
-//! admitted carrier session, and an immutable archive intent made durable
+//! admitted carrier session (a finished condense, or recovery's own fresh
+//! baseline when no condense can carry), and an immutable archive intent made durable
 //! before the native backend is called with the same archive.
 //!
 //! The intent is a crash pointer, not publication proof: it names the actual
@@ -72,6 +73,8 @@ pub(crate) struct Carrier {
     session_key: SessionKey,
     context_sha256: String,
     ticket_sha256: String,
+    /// The baseline checkpoint this carrier is, when it is recovery's own.
+    baseline_checkpoint: Option<String>,
 }
 
 /// The immutable pointer written before the one delegation.
@@ -90,6 +93,9 @@ pub(crate) struct ArchiveIntent {
     pub(crate) checkpoint_id: String,
     pub(crate) gap_artifact_sha256: String,
     pub(crate) shard_path: String,
+    /// Present only when recovery's own baseline carried the gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) carrier_baseline_checkpoint: Option<String>,
 }
 
 /// The native backend behind one recovery attempt's checks and intent.
@@ -129,6 +135,24 @@ impl Carrier {
             session_key: SessionKey::parse_hex(&key).map_err(|_| WireError)?,
             context_sha256: context_sha256.to_owned(),
             ticket_sha256: ticket_sha256.to_owned(),
+            baseline_checkpoint: None,
+        })
+    }
+
+    /// Recovery's own fresh baseline as the carrier: the reserved boundary's
+    /// session, naming the checkpoint that baseline became.
+    pub(crate) fn baseline(
+        agent: &str,
+        native_session: &str,
+        context_sha256: &str,
+        ticket_sha256: &str,
+        checkpoint: &str,
+    ) -> WireResult<Self> {
+        hex64(checkpoint)?;
+        let carrier = Self::new(agent, native_session, context_sha256, ticket_sha256)?;
+        Ok(Self {
+            baseline_checkpoint: Some(checkpoint.to_owned()),
+            ..carrier
         })
     }
 
@@ -182,7 +206,8 @@ impl ArchiveIntent {
             &self.checkpoint_id,
             &self.gap_artifact_sha256,
         ];
-        for digest in digests.into_iter().chain(&self.gap_ids) {
+        let baseline = self.carrier_baseline_checkpoint.iter();
+        for digest in digests.into_iter().chain(&self.gap_ids).chain(baseline) {
             hex64(digest)?;
         }
         let (Some(hi), Some(rest)) = (self.checkpoint_id.get(..2), self.checkpoint_id.get(2..))
@@ -269,6 +294,7 @@ impl<'a, B: ShadowBackend> RecoveryBackend<'a, B> {
             checkpoint_id: archive.checkpoint_id.clone(),
             gap_artifact_sha256: format!("{:x}", Sha256::digest(self.artifact.as_bytes())),
             shard_path: archive.shard_path(),
+            carrier_baseline_checkpoint: self.carrier.baseline_checkpoint.clone(),
         })
     }
 

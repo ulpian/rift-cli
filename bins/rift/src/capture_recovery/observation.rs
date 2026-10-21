@@ -150,6 +150,32 @@ pub(crate) fn attempt_observation(
     Ok(outcome)
 }
 
+/// Collect the reserved boundary ahead of the archive, so the recovered gap
+/// can ride on it when no condense can: the same attempt record first, and a
+/// rerun reads the collected checkpoint back instead of collecting twice. The
+/// completion and the reserved ticket's discharge stay with the last stage.
+pub(crate) fn collect_baseline(
+    hold: &OwnHold<'_>,
+    reservation: Reservation<'_>,
+    collector: &mut impl Collector,
+) -> Result<String, ObservationOwed> {
+    hold.check_current()
+        .map_err(|_| ObservationOwed::HoldUnavailable)?;
+    let queue = hold
+        .agent_queue_namespace()
+        .map_err(|_| ObservationOwed::HoldUnavailable)?;
+    let private = queue
+        .private()
+        .map_err(|_| ObservationOwed::HoldUnavailable)?;
+    let observation = reservation.observation;
+    let attempt = ObservationAttempt::of(reservation);
+    match publish(private, ATTEMPT_NAME, &attempt)? {
+        Publication::Fresh => settle(collector.collect(observation), ObservationOutcome::Observed)?,
+        Publication::Resumed => resume(collector, observation)?,
+    };
+    Ok(checkpoint_id(observation))
+}
+
 /// A spent attempt without its completion: the boundary is looked up first,
 /// and collected only when nothing durable sits under it.
 fn resume(
