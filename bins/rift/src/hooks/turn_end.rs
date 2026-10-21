@@ -118,6 +118,11 @@ fn seal_turn_pair_through(
     };
     let reconciliation = reconciliation_of(inputs.end, &seal);
     let mut said = SealRead::of(raw.as_slice().len(), &seal);
+    if inputs.end == SealEnd::Turn && said.extended_chain() {
+        said.prior_scan = last
+            .as_deref()
+            .and_then(|id| frontier::scan_after(&inputs.repo.git_dir, inputs.session, id));
+    }
     let (full, fallback, cut) = match seal {
         TurnSeal::Appended {
             body,

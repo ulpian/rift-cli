@@ -14,7 +14,7 @@ use std::path::Path;
 
 #[cfg(test)]
 pub(crate) use rift_shadow::hooks::turn_frontier::LAG_BOUND_BYTES;
-pub(crate) use rift_shadow::hooks::turn_frontier::{write, CarriedEntry, SealFallback};
+pub(crate) use rift_shadow::hooks::turn_frontier::{write, CarriedEntry, ScanCarry, SealFallback};
 use rift_shadow::turn_seal::{ChainBreak, CompactCarry, TurnSeal};
 
 /// The sidecar record as the writer knows it: with the compactor's carry.
@@ -33,6 +33,11 @@ pub(crate) struct SealRead {
     /// The subagent transcripts and originals the shard holds, for the next
     /// turn end's carry.
     pub(crate) carried: Vec<CarriedEntry>,
+    /// The previous turn end's scan, offered only when this seal extended
+    /// an unbroken chain; `None` sends the scan back to the whole file.
+    pub(crate) prior_scan: Option<ScanCarry>,
+    /// This turn end's scan, for the next turn end.
+    pub(crate) scan: Option<ScanCarry>,
 }
 
 /// The fallback a broken chain names, by doctor's closed word.
@@ -60,7 +65,15 @@ impl SealRead {
             fallback,
             compact: None,
             carried: Vec::new(),
+            prior_scan: None,
+            scan: None,
         }
+    }
+
+    /// Whether the seal appended to the earlier parts: a whole reseal or a
+    /// pack change leaves no frontier the next scan may resume from.
+    pub(super) fn extended_chain(&self) -> bool {
+        self.sealed_lines.is_some() && self.fallback.is_none()
     }
 }
 
@@ -76,6 +89,7 @@ pub(crate) fn record(git_dir: &Path, session: &str, checkpoint: &str, read: Seal
         sealed_at_ms: now,
         compact: read.compact,
         carried: read.carried,
+        scan: read.scan,
     };
     let sessions = crate::family::run_state::sessions_dir(git_dir);
     if let Err(e) = write(&sessions, &frontier) {
@@ -89,6 +103,18 @@ pub(super) fn carry_after(git_dir: &Path, session: &str, checkpoint: &str) -> Op
     let sessions = crate::family::run_state::sessions_dir(git_dir);
     match rift_shadow::hooks::turn_frontier::read_one(&sessions, session.to_owned()) {
         Recorded::Frontier(f) if f.checkpoint == checkpoint => f.compact,
+        Recorded::Frontier(_) | Recorded::Unreadable(_) => None,
+    }
+}
+
+/// The main-transcript scan the seal of `checkpoint` left for `session`;
+/// `None` when the sidecar is missing, unreadable, or names another
+/// checkpoint.
+pub(super) fn scan_after(git_dir: &Path, session: &str, checkpoint: &str) -> Option<ScanCarry> {
+    let sessions = crate::family::run_state::sessions_dir(git_dir);
+    match rift_shadow::hooks::turn_frontier::read_one::<CompactCarry>(&sessions, session.to_owned())
+    {
+        Recorded::Frontier(f) if f.checkpoint == checkpoint => f.scan,
         Recorded::Frontier(_) | Recorded::Unreadable(_) => None,
     }
 }

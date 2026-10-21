@@ -73,6 +73,34 @@ pub struct TurnFrontier<C = IgnoredAny> {
     /// redacting it again; absent from a record an older binary wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carried: Vec<CarriedEntry>,
+    /// What this turn end's scans of the main transcript found, so the next
+    /// turn end scans only the bytes past `scanned_bytes`; absent from a
+    /// record an older binary wrote.
+    #[serde(default = "none", skip_serializing_if = "Option::is_none")]
+    pub scan: Option<ScanCarry>,
+}
+
+/// The spill references and claimed originals found in the main transcript
+/// up to a line boundary. The next turn end trusts it only when the file
+/// still holds the same last bytes before that boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanCarry {
+    /// The byte just past the last complete line scanned.
+    pub scanned_bytes: u64,
+    /// Complete lines before `scanned_bytes`.
+    pub scanned_lines: u64,
+    /// SHA-256 of the last bytes before `scanned_bytes`, so a rewritten file
+    /// is noticed without hashing all of it.
+    pub tail_sha256: String,
+    /// Tool-use id and the spill address its result names, first naming
+    /// winning.
+    pub spills: Vec<(String, String)>,
+    /// The spooled tool-use ids the scan looked for; a record spooled later
+    /// was not looked for, so its arrival sends the next scan back to whole.
+    pub wanted: Vec<String>,
+    /// Tool-use id and the first line recording its result.
+    pub claimed: Vec<(String, u64)>,
 }
 
 /// One subagent transcript or spooled original a turn-end shard holds, with

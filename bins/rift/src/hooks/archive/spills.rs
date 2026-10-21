@@ -117,6 +117,24 @@ pub(super) fn of_transcript(
         .unwrap_or_default()
 }
 
+/// The spills `named` gives (tool-use id to address) for the session whose
+/// transcript is `main`, each sealed or accounted for, in tool-use-id order.
+pub(super) fn of_named(
+    main: &Path,
+    session_id: &str,
+    packs: &RulePackSet,
+    named: BTreeMap<String, String>,
+) -> Vec<ArchivedSpill> {
+    let Some(scope) = SpillScope::of(main, session_id, packs) else {
+        return Vec::new();
+    };
+    let mut budget = scope.limits.per_transcript;
+    named
+        .into_iter()
+        .map(|(id, address)| spill(&scope, id, &address, &mut budget))
+        .collect()
+}
+
 /// Every spill `transcript` names, each sealed or accounted for, in
 /// tool-use-id order.
 pub(super) fn transcript_spills(scope: &SpillScope<'_>, transcript: &[u8]) -> Vec<ArchivedSpill> {
@@ -129,7 +147,7 @@ pub(super) fn transcript_spills(scope: &SpillScope<'_>, transcript: &[u8]) -> Ve
 
 /// Tool-use id → the address its result names, the first naming winning.
 /// Only lines that can carry an address are parsed.
-fn named_spills(transcript: &[u8]) -> BTreeMap<String, String> {
+pub(super) fn named_spills(transcript: &[u8]) -> BTreeMap<String, String> {
     let mut named = BTreeMap::new();
     for line in transcript.split(|b| *b == b'\n') {
         if !mentions(line, PERSISTED_OUTPUT_PATH) && !mentions(line, ENVELOPE_OPEN) {
