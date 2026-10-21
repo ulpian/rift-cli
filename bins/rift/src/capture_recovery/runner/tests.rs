@@ -97,3 +97,31 @@ fn an_unreadable_selection_intent_stops_the_walk_at_the_selection() {
     assert!(words.contains("owed"), "{words}");
     assert!(!rig.fixture.evidence.join(ARCHIVE_INTENT_NAME).exists());
 }
+
+#[test]
+fn a_carrier_refusal_names_its_count_for_every_reason() {
+    use crate::capture_recovery::carrier::Reason;
+    let counts = [(Reason::Completed, 47), (Reason::CacheNotEnding, 10)];
+    let owed = LoadOwed::Carrier(CarrierOwed::NoneAdmissible(counts.into_iter().collect()));
+    assert_eq!(
+        carrier_refusal(&owed),
+        "none admissible: CacheNotEnding 10, Completed 47"
+    );
+    let ambiguous = LoadOwed::Carrier(CarrierOwed::Ambiguous { admissible: 2 });
+    assert_eq!(carrier_refusal(&ambiguous), "2 admissible, none picked");
+}
+
+#[test]
+fn only_a_road_with_no_condense_to_carry_falls_to_the_baseline() {
+    let none = LoadOwed::Carrier(CarrierOwed::NoneAdmissible(
+        std::collections::BTreeMap::default(),
+    ));
+    assert!(baseline_may_carry(&none));
+    assert!(baseline_may_carry(&LoadOwed::Carrier(
+        CarrierOwed::NoCondense
+    )));
+    // Two admissible condenses are a doubt the baseline never settles.
+    let ambiguous = LoadOwed::Carrier(CarrierOwed::Ambiguous { admissible: 2 });
+    assert!(!baseline_may_carry(&ambiguous));
+    assert!(!baseline_may_carry(&LoadOwed::Overflow));
+}
