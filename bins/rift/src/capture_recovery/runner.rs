@@ -36,6 +36,11 @@ use crate::hooks::Historical;
 const NOTHING_TO_RECOVER: &str = "nothing-to-recover";
 const ABSENT: &str = "record-absent";
 const CARRIER_OWED: &str = "carrier-owed";
+/// The baseline road was open but had nothing to collect: no session was
+/// active at a current boundary when the selection froze, so no boundary was
+/// reserved. Said apart from the carrier road, which already refused.
+const BASELINE_UNRESERVED: &str =
+    "baseline-unreserved (no active session holds a current boundary)";
 
 /// What every stage reads from outside the hold: one runtime, the open
 /// projection, the adapters, the native backend and the native tree reader.
@@ -198,7 +203,7 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
         let hold = self.hold;
         self.with_reservation(|reservation, collector| {
             let Some(reservation) = reservation else {
-                return Err(Refused(CARRIER_OWED));
+                return Err(Refused(BASELINE_UNRESERVED));
             };
             let checkpoint = collect_baseline(hold, reservation, collector)
                 .map_err(|owed| Refused(observation_reason(owed)))?;
