@@ -72,6 +72,7 @@ mod tests {
             sealed_at_ms: 1,
             compact: None,
             carried: Vec::new(),
+            scan: None,
         }
     }
 

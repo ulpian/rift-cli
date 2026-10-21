@@ -118,6 +118,11 @@ fn seal_turn_pair_through(
     };
     let reconciliation = reconciliation_of(inputs.end, &seal);
     let mut said = SealRead::of(raw.as_slice().len(), &seal);
+    if inputs.end == SealEnd::Turn && said.extended_chain() {
+        said.prior_scan = last
+            .as_deref()
+            .and_then(|id| frontier::scan_after(&inputs.repo.git_dir, inputs.session, id));
+    }
     let (full, fallback, cut) = match seal {
         TurnSeal::Appended {
             body,
@@ -325,9 +330,11 @@ fn prior_chain(work_tree: &Path, checkpoint: &str) -> Option<PriorChain> {
             PriorPart { oid, bytes }
         })
         .collect();
-    let joined: Vec<u8> = parts.iter().flat_map(|p| p.bytes.iter().copied()).collect();
+    // The parts were read from the blobs their tree entries name, and the
+    // seal checks each against its oid; a leaf hashed from these same bytes
+    // would be compared with itself, so none is passed.
     Some(PriorChain {
-        leaf: rift_hashchain::leaf_hash(&joined),
+        leaf: None,
         packs: meta
             .get(SEGMENT_PACKS_KEY)
             .and_then(serde_json::Value::as_str)

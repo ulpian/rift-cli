@@ -1,5 +1,6 @@
 use rift_core::RepoId;
 use rift_shadow::backend::rewrite::{render_folded, Stream};
+use rift_shadow::hooks::turn_frontier::ScanCarry;
 
 use super::super::super::originals::{spool_untimed, RewriteSite, SpoolReceipt, ToolOriginal};
 use super::*;
@@ -317,4 +318,123 @@ fn corrupt_spool_evidence_stays_corrupt_when_its_content_needs_fallback() {
     assert!(rift_shadow::redact::is_fallback_placeholder(
         std::str::from_utf8(body.as_slice()).unwrap()
     ));
+}
+
+/// A result line whose file the client says it spilled.
+fn spill_line(call: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": call, "content": "preview",
+        }]},
+        "toolUseResult": { "persistedOutputPath": format!("/nowhere/tool-results/{call}.txt") },
+    })
+    .to_string()
+}
+
+/// The spill ids and the claimed originals' ids and lines a scan found.
+type Sets = (Vec<String>, Vec<(String, Option<u64>)>);
+
+/// Scan `raw` from `prior` and say how many bytes the scan read.
+fn scanned(
+    repo: &Repo,
+    spool: &Spool,
+    raw: &str,
+    prior: Option<&ScanCarry>,
+) -> (Sets, ScanCarry, usize) {
+    use super::super::main_scan::{scan, MainScan, SCANNED_BYTES};
+    let packs = RulePackSet::builtin();
+    let path = repo.paths.work_tree.join("main.jsonl");
+    let ctx = MainScan {
+        path: &path,
+        session_id: SESSION,
+        packs: &packs,
+        spool,
+    };
+    let (_, pair) = sealed_pair(raw);
+    SCANNED_BYTES.with(|n| n.set(0));
+    let out = scan(&ctx, raw.as_bytes(), pair.full.as_slice(), prior);
+    let spills = out.spills.iter().map(|s| s.tool_use_id.clone()).collect();
+    let originals = out
+        .originals
+        .iter()
+        .map(|o| (o.tool_use_id.clone(), o.line))
+        .collect();
+    (
+        (spills, originals),
+        out.carry,
+        SCANNED_BYTES.with(std::cell::Cell::get),
+    )
+}
+
+/// Two turns of a transcript naming spills and spooled results.
+fn two_turns() -> (String, String) {
+    let first = format!(
+        "{{\"type\":\"user\"}}\n{}\n{}\n",
+        result_line(MAIN_CALL, &folded(OUTPUT)),
+        spill_line("toolu_spillA"),
+    );
+    let second = format!(
+        "{first}{}\n{}\n{}\n",
+        spill_line("toolu_spillB"),
+        result_line(SUB_CALL, &folded(OUTPUT)),
+        result_line(MAIN_CALL, "again"),
+    );
+    (first, second)
+}
+
+#[test]
+fn a_second_turn_end_scans_only_new_bytes_and_finds_what_a_whole_scan_finds() {
+    let repo = repo();
+    spool(&repo, MAIN_CALL, None, OUTPUT);
+    spool(&repo, SUB_CALL, None, OUTPUT);
+    let spool = Spool::load(&repo.paths.common_dir, SESSION, &RulePackSet::builtin());
+    let (first, second) = two_turns();
+
+    let (_, carry, _) = scanned(&repo, &spool, &first, None);
+    let (resumed, _, read) = scanned(&repo, &spool, &second, Some(&carry));
+    let (whole, _, whole_read) = scanned(&repo, &spool, &second, None);
+
+    assert_eq!(read, second.len() - first.len());
+    assert_eq!(whole_read, second.len());
+    assert_eq!(resumed, whole);
+    assert_eq!(resumed.0, ["toolu_spillA", "toolu_spillB"]);
+    assert_eq!(resumed.1.len(), 2);
+}
+
+#[test]
+fn a_carry_that_no_longer_matches_the_file_falls_back_to_the_whole_scan() {
+    let repo = repo();
+    spool(&repo, MAIN_CALL, None, OUTPUT);
+    let packs = RulePackSet::builtin();
+    let spool_now = Spool::load(&repo.paths.common_dir, SESSION, &packs);
+    let (first, second) = two_turns();
+    let (_, carry, _) = scanned(&repo, &spool_now, &first, None);
+
+    let rewritten = second.replacen("\"user\"", "\"usex\"", 1);
+    let (_, _, read) = scanned(&repo, &spool_now, &rewritten, Some(&carry));
+    assert_eq!(
+        read,
+        rewritten.len(),
+        "a rewritten prefix is rescanned whole"
+    );
+
+    let mut ahead = carry.clone();
+    ahead.scanned_bytes = u64::try_from(second.len() + 1).unwrap();
+    let (_, _, read) = scanned(&repo, &spool_now, &second, Some(&ahead));
+    assert_eq!(
+        read,
+        second.len(),
+        "a frontier past the file is rescanned whole"
+    );
+
+    spool(&repo, SUB_CALL, None, OUTPUT);
+    let grown = Spool::load(&repo.paths.common_dir, SESSION, &packs);
+    let (sets, _, read) = scanned(&repo, &grown, &second, Some(&carry));
+    assert_eq!(
+        read,
+        second.len(),
+        "a newly spooled id is looked for in the whole file"
+    );
+    assert_eq!(sets, scanned(&repo, &grown, &second, None).0);
 }

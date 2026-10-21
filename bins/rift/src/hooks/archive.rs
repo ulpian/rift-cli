@@ -5,6 +5,7 @@
 
 mod assembly;
 mod carry;
+mod main_scan;
 mod originals;
 mod outlines;
 mod spills;
@@ -1130,9 +1131,22 @@ fn session_transcript(
             .map(|(pair, lines)| (pair, u64::try_from(lines).unwrap_or(u64::MAX), None)),
     };
     match sealed {
-        Ok((mut pair, raw_lines, read)) => {
-            pair.spills = spills::of_transcript(path, session_id, packs, raw.as_slice());
-            pair.originals = spool.claimed_by(raw.as_slice(), pair.full.as_slice());
+        Ok((mut pair, raw_lines, mut read)) => {
+            // Only a turn end offers the previous scan; every other road
+            // scans the whole file and keeps no carry.
+            let ctx = main_scan::MainScan {
+                path,
+                session_id,
+                packs,
+                spool,
+            };
+            let prior = read.as_ref().and_then(|r| r.prior_scan.as_ref());
+            let scanned = main_scan::scan(&ctx, raw.as_slice(), pair.full.as_slice(), prior);
+            pair.spills = scanned.spills;
+            pair.originals = scanned.originals;
+            if let Some(read) = read.as_mut() {
+                read.scan = Some(scanned.carry);
+            }
             Some((pair, raw_lines, read))
         }
         Err(e) => {

@@ -127,12 +127,23 @@ impl Spool {
         if self.records.is_empty() {
             return Vec::new();
         }
-        let ids: BTreeSet<&str> = self
-            .records
-            .iter()
-            .map(|r| r.tool_use_id.as_str())
-            .collect();
-        let lines = result_lines(raw, &ids);
+        let ids = self.ids();
+        let wanted: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        self.claimed_at(&result_lines(raw, &wanted), sealed)
+    }
+
+    /// The spooled tool-use ids.
+    pub(super) fn ids(&self) -> BTreeSet<String> {
+        self.records.iter().map(|r| r.tool_use_id.clone()).collect()
+    }
+
+    /// The originals whose result line `lines` names, each judged against
+    /// `sealed`, the transcript through the gate.
+    pub(super) fn claimed_at(
+        &self,
+        lines: &BTreeMap<String, usize>,
+        sealed: &[u8],
+    ) -> Vec<ArchivedOriginal> {
         self.records
             .iter()
             .filter_map(|record| {
@@ -231,10 +242,10 @@ pub(super) fn sealed_line(transcript: &[u8], index: usize) -> Option<&[u8]> {
 
 /// Tool-use id → the first line of `raw` recording a result for it, for the
 /// ids in `wanted`. Only lines that can carry a result are parsed.
-fn result_lines<'a>(raw: &[u8], wanted: &BTreeSet<&'a str>) -> BTreeMap<&'a str, usize> {
+pub(super) fn result_lines(raw: &[u8], wanted: &BTreeSet<&str>) -> BTreeMap<String, usize> {
     let mut found = BTreeMap::new();
     for (index, line) in raw.split(|b| *b == b'\n').enumerate() {
-        if !line.windows(11).any(|w| w == b"tool_result") {
+        if !super::spills::mentions(line, "tool_result") {
             continue;
         }
         let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
@@ -250,7 +261,7 @@ fn result_lines<'a>(raw: &[u8], wanted: &BTreeSet<&'a str>) -> BTreeMap<&'a str,
             }
             let id = block.get("tool_use_id").and_then(serde_json::Value::as_str);
             if let Some(id) = id.and_then(|id| wanted.get(id)) {
-                found.entry(*id).or_insert(index);
+                found.entry((*id).to_owned()).or_insert(index);
             }
         }
     }

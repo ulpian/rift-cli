@@ -117,6 +117,24 @@ pub(super) fn of_transcript(
         .unwrap_or_default()
 }
 
+/// The spills `named` gives (tool-use id to address) for the session whose
+/// transcript is `main`, each sealed or accounted for, in tool-use-id order.
+pub(super) fn of_named(
+    main: &Path,
+    session_id: &str,
+    packs: &RulePackSet,
+    named: BTreeMap<String, String>,
+) -> Vec<ArchivedSpill> {
+    let Some(scope) = SpillScope::of(main, session_id, packs) else {
+        return Vec::new();
+    };
+    let mut budget = scope.limits.per_transcript;
+    named
+        .into_iter()
+        .map(|(id, address)| spill(&scope, id, &address, &mut budget))
+        .collect()
+}
+
 /// Every spill `transcript` names, each sealed or accounted for, in
 /// tool-use-id order.
 pub(super) fn transcript_spills(scope: &SpillScope<'_>, transcript: &[u8]) -> Vec<ArchivedSpill> {
@@ -129,11 +147,10 @@ pub(super) fn transcript_spills(scope: &SpillScope<'_>, transcript: &[u8]) -> Ve
 
 /// Tool-use id → the address its result names, the first naming winning.
 /// Only lines that can carry an address are parsed.
-fn named_spills(transcript: &[u8]) -> BTreeMap<String, String> {
+pub(super) fn named_spills(transcript: &[u8]) -> BTreeMap<String, String> {
     let mut named = BTreeMap::new();
     for line in transcript.split(|b| *b == b'\n') {
-        let mentions = |needle: &str| line.windows(needle.len()).any(|w| w == needle.as_bytes());
-        if !mentions(PERSISTED_OUTPUT_PATH) && !mentions(ENVELOPE_OPEN) {
+        if !mentions(line, PERSISTED_OUTPUT_PATH) && !mentions(line, ENVELOPE_OPEN) {
             continue;
         }
         let Ok(serde_json::Value::Object(record)) = serde_json::from_slice(line) else {
@@ -148,6 +165,17 @@ fn named_spills(transcript: &[u8]) -> BTreeMap<String, String> {
         }
     }
     named
+}
+
+/// Whether `line` holds `needle`. Every turn end runs this over each line of
+/// the whole transcript, so a UTF-8 line takes the standard library's
+/// substring search rather than a byte-window comparison per offset; a line
+/// that is not UTF-8 keeps the window scan, with the same answer.
+pub(super) fn mentions(line: &[u8], needle: &str) -> bool {
+    match std::str::from_utf8(line) {
+        Ok(text) => text.contains(needle),
+        Err(_) => line.windows(needle.len()).any(|w| w == needle.as_bytes()),
+    }
 }
 
 /// The spills one record names. The structured field speaks for the record's

@@ -43,8 +43,13 @@ pub struct PriorChain {
     pub parts: Vec<PriorPart>,
     /// Its `segment_raw_lines` metadata member.
     pub raw_lines: Vec<u64>,
-    /// Its recorded full-transcript leaf (`leaf_hash` over the concatenation).
-    pub leaf: Sha256Id,
+    /// A full-transcript leaf recorded apart from the parts (`leaf_hash` over
+    /// the concatenation), checked when present. `None` when the parts were
+    /// read from the very blobs their oids name: no leaf is stored apart from
+    /// the shard root, and a leaf computed from the same bytes would only
+    /// hash 28 MB twice to compare a value with itself; each part's oid is the
+    /// check that binds its bytes.
+    pub leaf: Option<Sha256Id>,
     /// Its `segment_packs` member: the fingerprint of the packs its parts
     /// were sealed under, `None` where it records none.
     pub packs: Option<String>,
@@ -323,16 +328,21 @@ fn check_layout(chain: &PriorChain, available: usize) -> std::result::Result<(),
     if !counts_match || chain.parts.is_empty() {
         return Err(ChainBreak::LineCount);
     }
-    let joined: Vec<u8> = chain
-        .parts
-        .iter()
-        .flat_map(|p| p.bytes.iter().copied())
-        .collect();
-    if rift_hashchain::leaf_hash(&joined) != chain.leaf {
-        return Err(ChainBreak::LeafMismatch);
+    if let Some(recorded) = &chain.leaf {
+        let joined = chain
+            .parts
+            .iter()
+            .map(|p| p.bytes.as_slice())
+            .collect::<Vec<_>>()
+            .concat();
+        if rift_hashchain::leaf_hash(&joined) != *recorded {
+            return Err(ChainBreak::LeafMismatch);
+        }
     }
-    let sealed: usize = chain.parts.iter().map(|p| line_count(&p.bytes)).sum();
-    if sealed > available {
+    // Each part was just proven to hold its declared count, so the sum of the
+    // declarations is the sealed line count without a third pass.
+    let sealed = chain.raw_lines.iter().sum::<u64>();
+    if usize::try_from(sealed).map_or(true, |n| n > available) {
         return Err(ChainBreak::Truncated);
     }
     Ok(())
