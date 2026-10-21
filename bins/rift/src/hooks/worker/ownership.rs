@@ -184,10 +184,8 @@ pub(super) fn completed_condense(
     context: &serde_json::Value,
     work_tree: &Path,
 ) -> Result<bool> {
-    let name = format!(
-        "completed-{}.done",
-        crate::capture_queue::delivery::context_id(context)?
-    );
+    let name =
+        crate::agent_queue::names::completed(&crate::capture_queue::delivery::context_id(context)?);
     let path = crate::agent_queue::queue_dir(owner.git_dir()).join(name);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -240,10 +238,8 @@ pub(super) fn record_condense(
     checkpoint_exists(work_tree, checkpoint)?;
     let record =
         serde_json::json!({"schema_version":1, "context":context, "checkpoint_id":checkpoint});
-    let name = format!(
-        "completed-{}.done",
-        crate::capture_queue::delivery::context_id(context)?
-    );
+    let name =
+        crate::agent_queue::names::completed(&crate::capture_queue::delivery::context_id(context)?);
     crate::capture_queue::delivery::publish_completion(
         &crate::agent_queue::queue_dir(owner.git_dir()),
         &name,

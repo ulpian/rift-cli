@@ -79,7 +79,7 @@ impl<'a, B: ShadowBackend, R: SubstrateReader> LiveStages<'a, B, R> {
         let selected = cx
             .rt
             .block_on(select(cx.store, self.hold, cx.registry))
-            .map_err(|_| Refused("selection-owed"))?;
+            .map_err(|deferred| Refused(deferred.reason()))?;
         self.note_historical(&selected.intent);
         self.selected = Some(selected);
         Ok(())

@@ -17,6 +17,7 @@ use rift_store::{CanonicalStore, Row, Value};
 use sha2::{Digest as _, Sha256};
 
 use super::{choose_carrier, Admitted, CarrierFacts, CarrierOwed, Completion, EndEvent};
+use crate::agent_queue::names;
 use crate::capture_recovery::codec::MAX_BYTES;
 use crate::capture_recovery::eligibility::{
     cache, rows, Budget, CacheProjection, Reason as ReadReason, MAX_CURRENT_CANDIDATES,
@@ -187,11 +188,8 @@ fn completion(queue: &Namespace, context_id: &str, native_session: &str) -> Comp
     if queue.recheck().is_err() {
         return Completion::Unknown;
     }
-    let delivery = format!("completed-{context_id}.done");
-    let legacy = format!(
-        "condensed-{}",
-        rift_shadow::sha256_hex(&[native_session.as_bytes()])
-    );
+    let delivery = names::completed(context_id);
+    let legacy = names::condensed(&rift_shadow::sha256_hex(&[native_session.as_bytes()]));
     match (marker(queue, &delivery), marker(queue, &legacy)) {
         (Some(true), _) => Completion::Completed,
         (_, Some(true)) => Completion::LegacyCondensed,

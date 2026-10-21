@@ -54,6 +54,37 @@ fn a_second_walk_over_the_same_records_resumes_and_reports_the_same_words() {
 }
 
 #[test]
+fn a_queue_holding_only_markers_has_nothing_to_recover() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let dir = queue_dir(&rig.fixture);
+    let h64 = "e".repeat(64);
+    let names = [
+        crate::agent_queue::names::unavailable(&format!("basis-{h64}")),
+        crate::agent_queue::names::completed(&h64),
+    ];
+    for name in names {
+        std::fs::write(dir.join(name), b"").unwrap();
+    }
+    assert_eq!(
+        recover_once(&rig, &hold),
+        "capture recovery: nothing to recover"
+    );
+}
+
+#[test]
+fn a_selection_owed_names_its_reason_in_the_doctor_line() {
+    let rig = Rig::new();
+    let hold = rig.admit();
+    let dir = queue_dir(&rig.fixture);
+    std::fs::write(dir.join("readme.txt"), b"").unwrap();
+    assert_eq!(
+        recover_once(&rig, &hold),
+        "capture recovery owed at selection: selection-owed (inventory refused an unknown name); the gap stays owed"
+    );
+}
+
+#[test]
 fn an_unreadable_selection_intent_stops_the_walk_at_the_selection() {
     let rig = Rig::new();
     let hold = rig.admit();

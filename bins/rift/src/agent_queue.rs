@@ -25,6 +25,7 @@
 //! separate delivery. Completion requires the worker's per-kind proof, not the
 //! filename alone.
 
+pub(crate) mod names;
 mod unavailable;
 
 pub(crate) use self::unavailable::{record_unavailable, unavailable_count};
@@ -828,7 +829,7 @@ pub(crate) fn retry_states(
 )> {
     let mut out: Vec<_> = rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
         .into_iter()
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter(|p| is_ticket(p))
         .filter_map(|p| {
             let (value, job) = read_job(&p).ok()?;
             let state = crate::capture_queue::delivery::retry_state(&value).ok()?;
@@ -870,7 +871,7 @@ pub(crate) fn unpark_owned(
 pub(crate) fn job_file_count(git_dir: &Path) -> usize {
     rift_shadow::hooks::run_state::list_entries(&queue_dir(git_dir))
         .iter()
-        .filter(|path| path.extension().is_some_and(|x| x == "json"))
+        .filter(|path| is_ticket(path))
         .count()
 }
 
@@ -909,10 +910,17 @@ pub(crate) fn record_failure_owned(
     Ok(next)
 }
 
+/// Whether `path` names a job ticket in the queue's one name grammar.
+fn is_ticket(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| names::classify(name) == names::QueueName::Ticket)
+}
+
 /// The marker a finished condense leaves, keyed by session: the worker that
 /// finds it does not condense again, however the job came back.
 fn done_marker(git_dir: &Path, session_id: &str) -> PathBuf {
-    queue_dir(git_dir).join(format!("condensed-{}", session_key(session_id)))
+    queue_dir(git_dir).join(names::condensed(&session_key(session_id)))
 }
 
 /// Record that `session_id`'s condense landed.
@@ -934,7 +942,7 @@ pub(crate) fn clear_condensed(git_dir: &Path, session_id: &str) {
 
 /// Whether `session_id`'s condense already landed.
 pub(crate) fn is_condensed(git_dir: &Path, session_id: &str) -> bool {
-    let name = format!("condensed-{}", session_key(session_id));
+    let name = names::condensed(&session_key(session_id));
     rift_shadow::hooks::run_state::read_path(&queue_dir(git_dir), &name).exists()
 }
 
