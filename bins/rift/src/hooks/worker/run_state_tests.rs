@@ -327,3 +327,65 @@ fn a_draining_worker_yields_to_a_recovery_request_and_the_next_drain_takes_what_
         "the drain after recovery takes what arrived"
     );
 }
+
+thread_local! {
+    static AFTER_JOB: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) struct JobPause(Option<Box<dyn FnOnce()>>);
+impl Drop for JobPause {
+    fn drop(&mut self) {
+        AFTER_JOB.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
+pub(super) fn after_first_job(callback: impl FnOnce() + 'static) -> JobPause {
+    JobPause(AFTER_JOB.with(|slot| slot.replace(Some(Box::new(callback)))))
+}
+pub(super) fn pause_after_job() {
+    let callback = AFTER_JOB.with(std::cell::RefCell::take);
+    if let Some(callback) = callback {
+        callback();
+    }
+}
+
+/// One pass over many owed jobs outlasts the wait `--fix` gives it, so a
+/// request placed after the first job stops the pass there: the job in
+/// flight finished, the rest are still queued untouched, and the lock is free
+/// for recovery.
+#[test]
+fn a_recovery_request_placed_mid_pass_stops_the_pass_after_the_job_in_flight() {
+    let (checkout, git_dir) = checkout();
+    let queued: Vec<_> = (0..5u8)
+        .map(|n| {
+            let mut job = refused_job(checkout.path());
+            job.queued_at_ms = i64::from(n) + 1;
+            if let JobKind::ToolResultTokens { tool_result_id, .. } = &mut job.kind {
+                *tool_result_id = format!("{n:064}");
+            }
+            crate::agent_queue::enqueue(&git_dir, &job).unwrap()
+        })
+        .collect();
+    let before: Vec<_> = queued
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    let held_dir = git_dir.clone();
+    let pause = after_first_job(move || {
+        let request = crate::capture_queue::request::request_path(&held_dir);
+        std::fs::write(request, b"1").unwrap();
+    });
+    super::drain_jobs(git_dir.to_str(), super::LockWait::None);
+    drop(pause);
+    let left: Vec<_> = queued.iter().filter(|path| path.exists()).collect();
+    assert_eq!(left.len(), 4, "only the job in flight ran");
+    for (path, bytes) in queued.iter().zip(&before) {
+        if path.exists() {
+            assert_eq!(
+                &std::fs::read(path).unwrap(),
+                bytes,
+                "a queued job stays untouched"
+            );
+        }
+    }
+    let recovery = crate::capture_queue::acquire_owner(&git_dir);
+    assert!(recovery.is_ok(), "the worker released the owner lock");
+}

@@ -220,47 +220,27 @@ fn drain_locked(
     drained.ready = true;
     loop {
         let now = now_ms();
+        // A path joins `attempted` only when its job runs, so a pass that
+        // yields leaves the rest owed to whichever drain comes next.
         let agent_jobs: Vec<_> = policy
             .agent_jobs(git_dir, now)
             .into_iter()
-            .filter(|(path, _)| attempted.insert(path.clone()))
+            .filter(|(path, _)| !attempted.contains(path))
             .collect();
         let commits: Vec<_> = policy
             .commits(git_dir, now)
             .into_iter()
-            .filter(|(path, _)| attempted.insert(path.clone()))
+            .filter(|(path, _)| !attempted.contains(path))
             .collect();
         if agent_jobs.is_empty() && commits.is_empty() {
             return drained;
         }
-        for (path, job) in agent_jobs {
-            match run_agent_job(t, git_dir, &path, &job, owner) {
-                Landed::Nothing => (),
-                Landed::Checkpoint => drained.minted = true,
-                Landed::Condensed(session, checkpoint) => {
-                    drained.minted = true;
-                    drained.condensed.push((session, checkpoint));
-                }
-            }
+        let pass = Pass { t, git_dir, owner };
+        if pass.run_agent_jobs(agent_jobs, attempted, &mut drained) == Step::Yield {
+            return drained;
         }
-        for (path, entry) in commits {
-            let result = ownership::validate_capture(owner, &path, &entry)
-                .and_then(|()| condense_queued(t, git_dir, &entry, &path));
-            match result {
-                Ok(()) => {
-                    let _ = crate::capture_queue::remove_owned(&path, owner);
-                }
-                Err(e) if projection_busy(&e) || crate::capture_queue::is_deferred(&e) => (),
-                Err(e) => {
-                    let _ = crate::capture_queue::record_failure_owned(
-                        &path,
-                        &entry,
-                        &e.to_string(),
-                        owner,
-                        now_ms(),
-                    );
-                }
-            }
+        if pass.run_commits(commits, attempted) == Step::Yield {
+            return drained;
         }
         if recovery_requested(git_dir) {
             return drained;
@@ -268,8 +248,84 @@ fn drain_locked(
     }
 }
 
+/// What one pass runs under: the hook's clock, the git dir and the lock.
+struct Pass<'a> {
+    t: &'a crate::hooktime::HookTimer,
+    git_dir: &'a Path,
+    owner: &'a crate::capture_queue::QueueLock,
+}
+
+/// Whether a pass goes on to its next job or lets go of the queue.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    Next,
+    Yield,
+}
+
+impl Pass<'_> {
+    /// Run the journaled jobs in order. A recovery request seen after a job
+    /// stops the pass there: each job is atomic, so the boundary between two
+    /// is safe, and one pass over a long queue would outlast `--fix`'s wait.
+    fn run_agent_jobs(
+        &self,
+        jobs: Vec<(std::path::PathBuf, crate::agent_queue::AgentJob)>,
+        attempted: &mut std::collections::BTreeSet<std::path::PathBuf>,
+        drained: &mut Drained,
+    ) -> Step {
+        for (path, job) in jobs {
+            attempted.insert(path.clone());
+            match run_agent_job(self.t, self.git_dir, &path, &job, self.owner) {
+                Landed::Nothing => (),
+                Landed::Checkpoint => drained.minted = true,
+                Landed::Condensed(session, checkpoint) => {
+                    drained.minted = true;
+                    drained.condensed.push((session, checkpoint));
+                }
+            }
+            #[cfg(test)]
+            run_state_tests::pause_after_job();
+            if recovery_requested(self.git_dir) {
+                return Step::Yield;
+            }
+        }
+        Step::Next
+    }
+
+    /// Run the queued commits in order, yielding between them as the jobs do.
+    fn run_commits(
+        &self,
+        commits: Vec<(std::path::PathBuf, crate::capture_queue::QueueEntry)>,
+        attempted: &mut std::collections::BTreeSet<std::path::PathBuf>,
+    ) -> Step {
+        for (path, entry) in commits {
+            attempted.insert(path.clone());
+            let result = ownership::validate_capture(self.owner, &path, &entry)
+                .and_then(|()| condense_queued(self.t, self.git_dir, &entry, &path));
+            match result {
+                Ok(()) => {
+                    let _ = crate::capture_queue::remove_owned(&path, self.owner);
+                }
+                Err(e) if projection_busy(&e) || crate::capture_queue::is_deferred(&e) => (),
+                Err(e) => {
+                    let _ = crate::capture_queue::record_failure_owned(
+                        &path,
+                        &entry,
+                        &e.to_string(),
+                        self.owner,
+                        now_ms(),
+                    );
+                }
+            }
+            if recovery_requested(self.git_dir) {
+                return Step::Yield;
+            }
+        }
+        Step::Next
+    }
+}
+
 /// Whether `rift doctor --fix` waits for the queue: a worker then lets go at
-/// the next pass boundary, never inside a job.
+/// the next job boundary, never inside a job. A stat of the marker only.
 fn recovery_requested(git_dir: &Path) -> bool {
     crate::capture_queue::request::requested(git_dir, std::time::SystemTime::now())
 }
@@ -296,7 +352,8 @@ fn drain_owned_passes(git_dir: &Path, wait: LockWait, sweep: bool, policy: Drain
             return all;
         }
         all.ready = true;
-        if sweep {
+        // A pass that yielded to recovery skips the sweep: recovery is waiting.
+        if sweep && !recovery_requested(git_dir) {
             let swept = super::sweep::sweep_idle_family(&owner, now_ms(), None);
             minted |= !swept.condensed_checkpoints.is_empty();
         }
