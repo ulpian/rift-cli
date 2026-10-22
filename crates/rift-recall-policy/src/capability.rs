@@ -253,7 +253,7 @@ pub fn resolve(policy: &ServePolicy, family: &str, capability: FamilyCapability)
     }
 }
 
-/// Q88: a family's own entry for a lever replaces the repository's value for
+/// A family's own entry for a lever replaces the repository's value for
 /// that family alone, and the result is still never above the read lever it
 /// qualifies — which rule 2 has already capped by the reason channel.
 fn per_family(own: Option<Mode>, repository: Mode, read_deny: Mode) -> Mode {
@@ -880,7 +880,7 @@ mod tests {
         ]
     }
 
-    /// Q88: one lever may enforce for one harness while every other harness
+    /// One lever may enforce for one harness while every other harness
     /// of the repository keeps observing it.
     #[test]
     fn a_per_lever_entry_enforces_one_lever_for_one_family_while_the_others_observe() {

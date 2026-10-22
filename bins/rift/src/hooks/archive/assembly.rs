@@ -51,7 +51,8 @@ pub(crate) fn assemble_session(
 /// Assemble a turn-end checkpoint's inputs. Everything is as
 /// [`assemble_session`] builds it except the main transcript, whose earlier
 /// lines are carried from the previous shard and never pass the gate again
-/// (ruling "L-5 turn-end assembly must not re-redact").
+/// (re-redacting them each turn would make a turn's cost grow with the
+/// transcript).
 pub(crate) fn assemble_turn_end(
     t: &HookTimer,
     rt: &tokio::runtime::Runtime,

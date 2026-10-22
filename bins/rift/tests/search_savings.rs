@@ -103,7 +103,7 @@ fn the_hundred_file_cap_is_the_tools_own_pinned_figure() {
 /// pool below says so — but only where an artifact in this tree states the
 /// number, which is the same discipline that governs what may be written on a
 /// channel. Codex and Antigravity document no result ceiling here, so their
-/// listings take Claude Code's ceilings by the owner's consistency ruling — an
+/// listings take Claude Code's ceilings by a deliberate consistency choice — an
 /// assumption the code states as one, not those clients' documentation.
 #[test]
 fn the_shell_result_ceiling_is_the_clients_own_pinned_figure() {
@@ -132,7 +132,7 @@ fn the_shell_result_ceiling_is_the_clients_own_pinned_figure() {
             Ceiling::of(family, "listing answer"),
             Ceiling::InlineChars(NATIVE_INLINE_CHARS),
             "{family} states no result ceiling in this tree and takes the one \
-             above, by the owner's consistency ruling rather than by a pin of \
+             above, by a deliberate consistency choice rather than by a pin of \
              its own"
         );
         assert_eq!(
@@ -1117,7 +1117,7 @@ fn check_the_figure_a_person_is_shown(repo: &Path, cache: &Path, priced: &[Price
 /// line, minus the ones this repository refuses to name, cut at the ceiling the
 /// client the call was made on documents — a hundred files for a `Glob`, thirty
 /// thousand characters for a shell result, and Claude Code's ceilings for the
-/// two clients that document none, by the owner's consistency ruling. Declared,
+/// two clients that document none, by a deliberate consistency choice. Declared,
 /// never measured: the listing never ran.
 ///
 /// **What the product claims, beside it.** The same pool, priced the same way:

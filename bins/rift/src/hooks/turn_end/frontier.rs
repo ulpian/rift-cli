@@ -1,6 +1,6 @@
-//! The turn-seal frontier sidecar (L-5 slice 5): what each turn-end
+//! The turn-seal frontier sidecar: what each turn-end
 //! checkpoint sealed, so the lag between the live transcript and the last
-//! seal can be said without opening a store or a shard (design Q9: the cut is
+//! seal can be said without opening a store or a shard (the cut is
 //! the last complete record the worker read, the frontier recorded, the lag
 //! said).
 //!

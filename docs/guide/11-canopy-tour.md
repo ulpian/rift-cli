@@ -112,7 +112,7 @@ minutes are **event-anchored**: the window ends at the last event Rift saw, not
 the wall clock, so an idle repository keeps its last real reading instead of
 decaying to zero. `—` is unknown, never `0`.
 
-**Recall** shows the savings headline (`saved 110.8M tokens · 1.4% · ~$412.30`),
+**Recall** shows the savings headline (`saved 110.8M tokens · 1.4% · ~$803.11`),
 serves, a period row, a read-vs-saved bar chart and a per-channel rate chart
 ([07-serving-and-injection.md](07-serving-and-injection.md)).
 
@@ -129,6 +129,9 @@ serves, a period row, a read-vs-saved bar chart and a per-channel rate chart
   measured zero differ.
 - *The headline is the door* to a read-only breakdown of the dollar estimate by
   model with its assumptions ([08-cost-and-savings.md](08-cost-and-savings.md)).
+  Under the share it lists the shell-result classes, `held` and `folded`: the
+  results each would save on, beside the share and never in it, and those it
+  acted on, whose tokens the share already holds.
 
 With Recall off it says `recall off — open Project Settings`. **Dispatch** is what
 was captured (checkpoints, sessions, the agent / mixed / human split, the files

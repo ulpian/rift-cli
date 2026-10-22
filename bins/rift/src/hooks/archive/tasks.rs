@@ -3,8 +3,8 @@
 //!
 //! Claude Code keeps every subagent's conversation in its own file,
 //! `<dir of the session transcript>/<session id>/subagents/agent-<id>.jsonl`.
-//! The subtree is part of the checkpoint shard, never a ledger of its own
-//! (Q37): it is sealed through the same redaction gate as the main transcript,
+//! The subtree is part of the checkpoint shard, never a ledger of its own:
+//! it is sealed through the same redaction gate as the main transcript,
 //! bound by the same Merkle root, and re-derived from the files at every
 //! archive, so an unchanged session re-archives to the same id.
 //!

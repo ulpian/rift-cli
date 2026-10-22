@@ -99,12 +99,10 @@ stays in the checkout's `.rift/` ([02-configuration.md](02-configuration.md)), a
 finds sibling members from git's own files
 ([07-serving-and-injection.md §7.4](07-serving-and-injection.md#a-read-another-window-holds)).
 
-Run-state readers use the new directory first and the unmoved legacy directory
-for missing names. Queue migration and sweeps require the matching checkout owner
-and a ready migration. Conflicting tickets remain visible debt. Private queue
-publication stages remain as evidence of unfinished publication and are never
-deleted merely for being old. File contents are synced, but directory updates
-are not guaranteed to survive power loss.
+A run directory an older binary left in the git directory is read for any name the
+new one lacks and moved only under the checkout's owner lock; a conflicting ticket
+stays visible, and an unfinished publish stage is never deleted for its age. File
+contents are synced; directory updates may not survive power loss.
 
 **The push queue** is the exception, and its reasoning is the test for anything else that might
 move: an entry names a **reference**, and references live in the object store the family shares.
@@ -148,9 +146,17 @@ later deleted.
 effect* (`rift init`, `rift enable`, Project Settings, adoption) keeps the hooks when every
 managed hook and its target exist and the target is executable; only a dangling link or a
 vanished binary causes a repair, printed, never silent. A managed link counts as managed **even when its target is gone**, so it is healed in place, not
-chained aside as a stranger's hook. 
+chained aside as a stranger's hook.
 
-**Replacement is a separate verb**, `rift hooks install --repoint --binary PATH`, refused when the
+**The record follows a lasting binary, with its hooks.** `rift init`, `rift enable` and `rift
+doctor --fix` in the main work tree move hooks and record together to the running binary when
+the record names another; a record moved alone was undone by the next `init`. A member's own
+commands never move it (their build lives in a checkout `git worktree remove` deletes), except
+`post-checkout`: the binary a git hook runs as already *is* the family's. A debug build
+(rewritten by every `cargo test`) and any transient path below never become the record, and the
+printed line says why the hooks stayed.
+
+**Deliberate replacement is its own verb**, `rift hook install --repoint --binary PATH`, refused when the
 path is **transient**: `temp-root` (a root the system empties), `build-artifact` (a profile's
 `deps/` or `build/` executable, replaced by the next `cargo test`) or `linked-member` (inside a
 linked member's tree, which `git worktree remove` deletes; the main checkout's `target/` is
@@ -248,7 +254,9 @@ registered when it was not. `rift init` inside a member registers the **root** a
 
 `rift doctor` enumerates every member's git directory, and `--fix` drains and adopts across
 members; its family legs are `phantom_gitdirs`, `orphan_projections`, `family_identity`,
-`push_queue`, `prunable_worktrees`, `hooks_target`, `binary_of_record` and `worktree_wiring`. The
+`push_queue`, `prunable_worktrees`, `obsolete_checkouts` (a registry row whose checkout is proven
+gone, removed from this machine's index under `--fix`), `hooks_target`, `binary_of_record` and
+`worktree_wiring`. The
 dashboard shows members as child rows with the **family total by default**, decomposable by
 worktree ([11-canopy-tour.md](11-canopy-tour.md)).
 

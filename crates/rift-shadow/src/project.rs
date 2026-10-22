@@ -893,7 +893,7 @@ mod tests {
         assert_eq!(by_path.get("src/other.rs"), Some(&None));
     }
 
-    /// The late-count contract (2026-08-30 ruling): a `file_read_tokens` row
+    /// The late-count contract: a `file_read_tokens` row
     /// appended AFTER the read fact, at the read's own row id, joins back
     /// through `session_read_facts` exactly as an inline one — no UPDATE, no
     /// second table — and appending it again writes nothing.

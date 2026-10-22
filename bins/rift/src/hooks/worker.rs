@@ -46,7 +46,7 @@ pub(super) enum LockWait {
     Brief,
 }
 
-/// Which deliveries a drain runs (L-0A §4.2): the ordinary worker runs what
+/// Which deliveries a drain runs: the ordinary worker runs what
 /// is due and unparked; the repair roads — the idle sweep's rescue, `rift
 /// doctor --fix`, `rift session retry` — run everything, backoff and park
 /// notwithstanding. Two listings, never a flag a caller passes as a literal.
@@ -180,7 +180,7 @@ pub(super) fn drain_queues(git_dir: Option<&str>, wait: LockWait) -> Result<Vec<
     };
     let git_dir = Path::new(git_dir);
     // The ordinary worker: due and unparked only, so a not-due job costs no
-    // attempt and a parked one waits for a hand (§4.2).
+    // attempt and a parked one waits for a hand.
     Ok(drain_owned_passes(git_dir, wait, true, DrainPolicy::Due).condensed)
 }
 
@@ -935,7 +935,7 @@ fn owe_idle_sweep(git_dir: &Path, work_tree: &Path) -> bool {
 /// The deferred half of `SessionEnd`: settle the session's last turn (no
 /// later hook will — `SettleMode::Final`, exactly as the doctor sweep does),
 /// archive — against HEAD when there is one, anchorless on an unborn HEAD
-/// (Q78: a condense never needs a commit) — under `ArchiveReason::SessionEnd`,
+/// (a condense never needs a commit) — under `ArchiveReason::SessionEnd`,
 /// and drive Ending → Ended on the checkpoint that exists. This is verbatim
 /// the work that used to run inside the hook itself; only *when* it runs
 /// changed, and the clock it reads is the job's queue time.
@@ -1017,8 +1017,8 @@ fn condense_agent_job(
     Ok(Some((session.to_owned(), checkpoint.as_str().to_owned())))
 }
 
-/// The session-end cleanup (§4.3), run once after the final archive landed
-/// **and** the machine answered `Ended`. Any other answer is the CFX-3
+/// The session-end cleanup, run once after the final archive landed
+/// **and** the machine answered `Ended`. Any other answer is the
 /// re-activation window — a stale completion closing a session that is
 /// active again — and then the spool, claims and settled `.usage` stay, said
 /// once; `.usage` goes only after `SettleMode::Final` settled, which the
@@ -1077,7 +1077,7 @@ fn interval_archive_job(
 }
 
 /// [`interval_archive_job`]'s work: the commit to anchor to (none on an
-/// unborn HEAD — the interval lands anchorless, Q10), the decision, and the
+/// unborn HEAD — the interval lands anchorless), the decision, and the
 /// archive the session-end condense and the sweep also run. `true` when it
 /// wrote a checkpoint, and only then: never a no-HEAD skip.
 fn archive_if_still_owed(

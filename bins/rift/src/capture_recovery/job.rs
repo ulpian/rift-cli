@@ -35,7 +35,7 @@ pub(crate) struct Member<'a> {
 /// Resume the hold already in the member's git dir, or write a new plan and
 /// then the hold, both no-clobber. Holding the owner lock is the proof that
 /// the process which wrote an existing hold is gone, so resuming it is the
-/// takeover the ruling allows.
+/// one takeover recovery allows.
 pub(crate) fn begin(
     owner: &QueueLock,
     member: &Member<'_>,

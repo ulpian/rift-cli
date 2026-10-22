@@ -889,11 +889,11 @@ mod tests {
     /// here at the type level and end-to-end in
     /// `hooks_worktree_e2e::a_worktree_adopts_only_the_shared_session_that_names_it`.
     #[test]
-    fn a_pre_ruling_cache_file_deserializes_with_no_claim() {
-        let pre_ruling = br#"{"schema":1,"session_id":"old","state":"active",
+    fn a_cache_file_from_before_the_discriminator_deserializes_with_no_claim() {
+        let legacy = br#"{"schema":1,"session_id":"old","state":"active",
             "agent":"claude-code","current_turn_ordinal":1,"turn_open":false,
             "compaction_boundary":null,"updated_at_ms":9,"native_id_map":{}}"#;
-        let c: SessionCache = serde_json::from_slice(pre_ruling).unwrap();
+        let c: SessionCache = serde_json::from_slice(legacy).unwrap();
         assert_eq!(
             c.work_tree, None,
             "no field means no claim, never a default"

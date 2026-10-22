@@ -189,7 +189,7 @@ struct Case {
 /// the owner reserves; the owner took that decision, and the
 /// row is now `AtParity` with the label naming the firing detector. What made it
 /// safe to take was already recorded here as the reason it was refused —
-/// `report.by_detector` has carried the granularity all along, so the ruling
+/// `report.by_detector` has carried the granularity all along, so the
 /// decision moved an existing distinction into the output rather than inventing one.
 ///
 /// **1 → 0 at `custom.pack_rule_unloadable`, and it closes from outside this
@@ -956,7 +956,7 @@ const CASES: &[Case] = &[
         needle: "01J8ZKX9QW3ER7TY2UI8OP1AS5",
         outcome: Outcome::Removed,
         verdict: Verdict::Divergence,
-        note: "same ruling, same reason: the legacy backend skips *id/*ids, path-like keys and \
+        note: "same decision, same reason: the legacy backend skips *id/*ids, path-like keys and \
                image/base64 payloads; Rift skips nothing by key name. What survives here \
                survives on its own merits instead -- a transcript UUID's Shannon entropy is \
                under the 4.0 floor, so `uuid`/`parentUuid` are untouched with no rule about \
@@ -974,7 +974,7 @@ const CASES: &[Case] = &[
         note: "READ THE OUTCOME CAREFULLY -- this is the one row whose needle is the WANTED \
                output and not a secret, so `Present` is the passing state and means the \
                whole redacted line came back byte for byte. It is the walker's remaining \
-               purpose under the ruling: the replacement lands inside the string value and \
+               purpose once nothing is skipped by key name: the replacement lands inside the string value and \
                every other byte -- quoting, key order, spacing -- is the input's. The legacy \
                backend \
                walks JSONL for the same reason (`JSONLContent` substitutes per leaf); flat \

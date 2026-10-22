@@ -1,12 +1,12 @@
-//! The turn-end checkpoint (L-5 SealTurn ruling, 2026-10-18): a `Stop`
+//! The turn-end checkpoint: a `Stop`
 //! journals a [`SealTurn`] and the worker mints one checkpoint per turn end
 //! through the interval-archive road, under its own reason `turn-end`.
 //!
 //! The full transcript is sealed by [`rift_shadow::turn_seal::seal_turn`] over the session's previous
 //! shard, read back from git with each part's blob oid, so only the turn's new
 //! lines pass the gate. The commit anchor is absent when HEAD is unborn or is
-//! the commit the previous checkpoint already anchors to (Q10). No turn end is
-//! ever synthesised (Q11).
+//! the commit the previous checkpoint already anchors to. No turn end is
+//! ever synthesised: only the agent's own `Stop` closes a turn.
 
 pub(crate) mod frontier;
 
@@ -72,14 +72,14 @@ pub(crate) enum SealEnd {
     Turn,
     /// The session: its final archive seals the tail past the last turn-end
     /// part and carries every earlier part, so no turn-end content is sealed
-    /// twice. With no turn-end part on record it seals whole, as before L-5.
+    /// twice. With no turn-end part on record it seals whole, as before per-turn seals.
     Session,
 }
 
 /// A turn-end archive's transcript pair, built from the turn's segmented seal
 /// alone: the main transcript's earlier lines are carried from the previous
-/// shard and never pass the gate again (ruling "L-5 turn-end assembly must not
-/// re-redact"). Returns the pair, the raw-line count and what the seal read,
+/// shard and never pass the gate again, so a turn's cost does not grow with the
+/// transcript. Returns the pair, the raw-line count and what the seal read,
 /// for [`frontier::record`] once the shard lands. `None` when the seal fails,
 /// and the caller then seals the whole file as every other road does.
 pub(super) fn seal_turn_pair(
@@ -174,7 +174,7 @@ fn seal_turn_pair_through(
 }
 
 /// A session end's seal: the tail past the last turn-end part, then the
-/// comparison with the whole file sealed once (design §3.4), so a difference
+/// comparison with the whole file sealed once, so a difference
 /// leaves the whole seal as the final body. `None` sends the caller to its
 /// whole seal: a session that never sealed a turn, or whose file ends inside
 /// a record the parts cannot hold.

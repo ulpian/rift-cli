@@ -33,7 +33,7 @@
 //!   answer, never serves a stale list. A sensitive path is never indexed at
 //!   all, so it cannot be ranked, named or grepped by anything downstream.
 //!
-//! There is no daemon and no watcher here, by ruling: the index is persisted
+//! There is no daemon and no watcher here, deliberately: the index is persisted
 //! and rebuilt by the detached worker at the two moments the path set can have
 //! changed, and a cold caller with no index answers from a bounded walk or
 //! leaves the tool alone.

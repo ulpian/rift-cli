@@ -278,7 +278,7 @@ A **projection** per repository family holds the derived facts:
 
 The append-only discipline of [Chapter 13](13-storage-and-schema.md) applies in
 full — no updates or deletes, corrections as superseding rows, a mutation guard on
-each of its 32 canonical tables. Three families of table explain what is safe to
+each of its 34 canonical tables. Three families of table explain what is safe to
 throw away:
 
 - **Derived graph facts** — a node/edge graph with each node kind's payload in its
@@ -304,7 +304,12 @@ Node and edge kinds are `CHECK`-constrained to a deliberately narrow mechanical
 set, which a migration must widen.
 
 Ingest is incremental and idempotent (a watermark per branch) and runs before
-every pull verb. A history walk records a proof per revision git does not hold, so
+every pull verb. It also keeps level unasked: a worker pass that writes a
+checkpoint queues one ingest job, which answers every pass asking while it is
+pending, so a family worked on with no dashboard open never serves from an ever
+older checkpoint. A watermark stamps `ingested_at` from the injected clock (the
+system clock in production, a fixed one in tests and rebuilds), and `0` reads as
+*unknown*, never an instant. A history walk records a proof per revision git does not hold, so
 a fully proven pass does not walk again, and a new read or moved `HEAD` has no
 proof; one pass walks at most 64 paths, unattempted first, so bytes git never
 holds cannot starve the rest.
@@ -375,14 +380,15 @@ make a claim about. The same key names the pointer marker and the manifest
 baseline ([§7.2](07-serving-and-injection.md#72-tier-one-the-session-pointer)).
 
 **Rows are validated on the way in.** The directory sits in a tree an agent can
-write to, so a row failing its shape is dropped, never interpreted. Eight kinds
-exist: a read, a decline, an observation of a decline that would have been issued,
-the hash a write was asked to produce, an edit that landed, an eviction, an
-**announcement** (a manifest or recovery-map entry saying this window holds these
-lines) and the single **booking** it is worth once the window acts on the file
-without re-reading it ([chapter 8](08-cost-and-savings.md#86-what-avoided-actually-measures)).
-The last two are never coverage: what a window was *told* is not what it was
-handed, and only the latter may decline a read.
+write to, so a row failing its shape is dropped, never interpreted. Fifteen kinds
+exist, among them a read, a decline, an observed decline, an edit, an eviction,
+the subagent links of [§7.3](07-serving-and-injection.md#73-tier-two-the-per-turn-delta-manifest),
+an **announcement** (`hold`: a manifest or recovery-map entry saying this window
+holds these lines) and the one **booking** it is worth once the window acts on the
+file without re-reading it (`prevented`,
+[chapter 8](08-cost-and-savings.md#86-what-avoided-actually-measures)). Those two
+are never coverage: what a window was *told* is not what it was handed, and only
+the latter may decline a read.
 
 ### Coverage, and why it is deliberately pessimistic
 
@@ -502,6 +508,15 @@ checkout hashes to the bound revision and the outline fits; the pack renders it
 with names left out. Another revision answers `stale`; an older-version or absent
 binding `unavailable` with `not_bound`; an unreadable digest `unavailable` with
 `digest_unavailable` — honest absence, not a guess dressed as a digest.
+
+**A read's four stages are kept apart**: *receipt* (the gate's journal line),
+*capture* (the checkpoint that froze it), *queryable* (the first ingest covering
+that checkpoint), *delivered* (an answer built on it reached the agent). Each
+names its join, the client's `invocation_id` or else `path_hash` (window, path,
+content hash), and none is matched by time: no match is absent, two reads the key
+cannot tell apart are ambiguous. `rift recall status --json` summarises the newest
+200 reads, three lags kept apart; `rift doctor` names reads still not queryable
+after a whole five-minute sweep.
 
 Recall serves from §6.10's projection through the pull verbs and hook injection
 ([Chapter 7](07-serving-and-injection.md)); it keeps no in-session index of

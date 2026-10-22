@@ -184,7 +184,7 @@ pub struct CheckpointArchive {
     /// The repo root the archive belongs to.
     pub repo: PathBuf,
     /// The anchoring working-tree commit oid (hex); `None` when the checkpoint
-    /// was minted on an unborn HEAD. A condense never needs a commit (Q78), and
+    /// was minted on an unborn HEAD. A condense never needs a commit, and
     /// the id never read this member, so absence changes nothing but the
     /// `commit` key of `metadata.json`, which is then omitted.
     pub commit: Option<String>,
@@ -308,8 +308,8 @@ pub struct ArchivedTranscript {
     /// fallback, summed over both artifacts; recorded on the metadata
     /// document beside the pair only when non-zero.
     pub redaction_fallback: RedactionFallback,
-    /// How a session end's whole seal compared with the turn-end parts
-    /// (design §3.4); `None` on every other archive, which writes nothing.
+    /// How a session end's whole seal compared with the turn-end parts;
+    /// `None` on every other archive, which writes nothing.
     pub reconciliation: Option<Reconciliation>,
 }
 

@@ -1,7 +1,7 @@
 //! The segment guard: a transcript sealed one turn at a time must seal exactly
 //! as the whole transcript would.
 //!
-//! L-5 seals a growing transcript as per-turn segments, each redacted alone,
+//! Rift seals a growing transcript as per-turn segments, each redacted alone,
 //! and the record's leaf is the hash of their concatenation. That is only
 //! honest if the gate cannot tell the difference, so the rule this file holds
 //! is: at every cut the gate admits ([`cut_is_safe`]), the concatenation of the
@@ -9,7 +9,7 @@
 //! and every counter of the report sums. At a cut it refuses, extending to the
 //! next admitted cut (or the end of the file) always restores that equality, so
 //! a secret split across two turns inside a flat run is never judged in halves.
-//! Round 30 Q2 orders this guard to land before any segment is written.
+//! No segment may be written unless this guard holds.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::collections::BTreeMap;
@@ -262,7 +262,7 @@ fn a_private_key_pasted_across_the_cut_is_never_judged_in_halves() {
     lines.push(r#"{"type":"assistant"}"#.to_string());
     lines.push(r#"{"type":"user"}"#.to_string());
     let packs = RulePackSet::builtin();
-    // The cut just past the run is refused too: R1 asks both sides to be
+    // The cut just past the run is refused too: the cut rule asks both sides to be
     // records, so a run never ends a segment.
     for k in 2..lines.len() - 1 {
         assert!(!cut_is_safe(&lines[k - 1], &lines[k], &packs), "cut {k}");

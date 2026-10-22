@@ -160,8 +160,8 @@ pub(crate) fn attempts(value: &Value) -> Result<u32> {
 
 /// The members of a delivery that change on a retry, and nothing else does.
 ///
-/// They live **beside** the typed job in the retained JSON (L-0A §4.1 as
-/// amended 2026-10-17, "RetryState beside the struct"): two top-level
+/// They live **beside** the typed job in the retained JSON, so a retry
+/// never rewrites the job itself: two top-level
 /// siblings of `attempts` — `next_due_ms` (epoch ms; 0 or absent = due now)
 /// and `parked` (absent = false) — read through [`retry_state`] alone and
 /// written through [`replace_retry_state`] alone. All three are stripped from
@@ -185,7 +185,7 @@ impl RetryState {
 
     /// The state after one more execution failure at `failed_at_ms`: the
     /// backoff doubles from 30 s and is capped at an hour, and the third
-    /// failure parks (§4.1).
+    /// failure parks.
     pub(crate) fn after_failure(self, failed_at_ms: i64) -> Self {
         let attempts = self.attempts.saturating_add(1);
         let doublings = attempts.saturating_sub(1).min(16);

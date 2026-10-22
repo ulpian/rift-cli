@@ -225,7 +225,8 @@ it does not erase the past ([05-ledger-and-verification.md](05-ledger-and-verifi
 rules: the binary written into another member is the family's **binary of record**, never the
 executable that ran the command (a throwaway build must not wire the family to a build that will be
 deleted); a member that refuses is **named, not overwritten**, and does not fail an enable that
-succeeded locally; tracked files and git hooks are untouched. `disable` is symmetric, so an agent
+succeeded locally; tracked files are untouched, and the git hooks move only with the binary of
+record (§10.10). `disable` is symmetric, so an agent
 cannot stay live in a worktree nobody is looking at.
 
 ---
@@ -259,9 +260,17 @@ function and print a headline per finding with its remedy, or `integration healt
 reasons: `codex-hooks-skipped` and `codex-trust-unverifiable` (§10.5), `lifecycle-hooks-missing` (tool
 calls arrived with no session start or prompt; restart the client, then `rift enable --agent <agent>`),
 `hook-binary-missing` (re-run `rift enable` with the build the hooks should run), `hook-binary-disagrees`
-(both builds run) and `session-behind-events` (Rift's own defect, repaired by the next hook). `rift enable` alone re-points an agent's hook file at a build; `rift hooks
-install --repoint` moves the git hooks and binary of record, not the agents' files; no remedy has Rift
-change another client's trust or configuration. `rift agent-help` renders the agent-facing verbs from
+(both builds run) and `session-behind-events` (Rift's own defect, repaired by the next hook).
+
+**Hook composition** is `rift doctor`'s word for how Rift's entries sit beside everyone else's in
+each enabled client's hook file: `owned`, `missing`, `stale` (an older Rift bundle), `foreign-modified`
+(Rift-like entries no fingerprint proves: edited, unreadable or behind a symlink) or `shadowed` (a hook
+Rift does not own answers the same tool calls in the same slot). Every one of these words is
+report-only, under `--fix` too: `rift enable` is the one command that rewrites an agent's hook file,
+so each remedy names it. Run from a release or installed build in the main work tree, it also moves
+the git hooks and binary of record to that build (never a debug or throwaway one,
+[09](09-worktrees-and-families.md) §9.7); `rift hook install --repoint` moves those two alone. No
+remedy has Rift change another client's trust or configuration. `rift agent-help` renders the agent-facing verbs from
 the binary's own command tree and is what the instructions block points agents at.
 
 ---

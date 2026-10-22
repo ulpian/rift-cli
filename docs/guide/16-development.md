@@ -32,7 +32,8 @@ cd rift-cli
 `fmt`, `fmt-check`, `lint` (clippy over the workspace, all targets and features,
 `-D warnings`), `test`, `build`, `release`, `check` (the pre-push gate: `fmt-check`
 + `lint` + `test`), `run`, `tui`, `memd`, `smoke`, `docs` (rustdoc with
-`-D warnings`) and `coverage` (needs nightly, [§16.6](#166-coverage-as-a-gate-not-a-dashboard)).
+`-D warnings`), `coverage` (needs nightly, [§16.6](#166-coverage-as-a-gate-not-a-dashboard))
+and `gc` (stops detached workers and prunes stale build caches).
 [`SKILLS.md`](../../SKILLS.md) (humans), `skills.json` (machines) and `skills.sh`
 list the same tasks and must agree; a manifest that drifts from the runner is
 worse than none.
@@ -93,9 +94,10 @@ network. Its eighteen checks each return violations; any fails the command:
 17. **One cache root in the `rift` binary** (`family::cache_root`, one temp directory per test process), so a unit test cannot write into the developer's real cache.
 18. **The guide stays within 400 KiB**: the byte length of every tracked file under `docs/guide/`, refused on a scan that found none. A chapter that grows replaces older text, or raises the ceiling in a diff a reviewer reads.
 
-`xtask gate-intercept` is the read-interception guard: eight read-only text screens over the tracked tree, no build. They hold that one
+`xtask gate-intercept` is the read-interception guard: nine read-only text screens over the tracked tree, no build. They hold that one
 file composes a hook response, the answered channels are a reviewable list, no
-decision opens a store or loads the tokenizer, one module writes the sentences a
+decision opens a store or loads the tokenizer, no destructor in a hook-path crate
+does either (read directly, since a destructor runs wherever its value dies), one module writes the sentences a
 model reads, every rewrite is a pinned form, caches are keyed by family with one
 named reader, and no hook reaches a managed-region writer. They err toward
 reporting; `cargo test -p xtask` proves each catches a planted violation.
@@ -197,15 +199,18 @@ never narrow the generator to make it pass.
 ## 16.9 Fuzzing
 
 `fuzz/` is a **separate workspace**, so `cargo build --workspace` on stable never
-builds it; it needs nightly. Thirteen targets: `config_parse`, `run_hook`,
-`redact`, `redact_jsonl`, `fuzz_pack_load`, `diff`, `glob_match`,
+builds it; it needs nightly. Fifteen targets: `config_parse`, `run_hook`,
+`redact`, `redact_jsonl`, `redact_fallback`, `fuzz_pack_load`, `diff`, `glob_match`,
 `checkpoint_artifact`, `mcp_request`, `palette_parse`, `doc_convert`,
-`shell_read`, `search_query`. **An untrusted-byte parser gets a target when it
+`shell_read`, `shell_read_bash`, `search_query`. **An untrusted-byte parser gets a target when it
 lands** and must be total: a value or a typed error for any input, never a panic.
 `doc_convert` is the largest parser surface; `shell_read` guards the recogniser
 that runs first on the read path, where a panic is a hook dying on a command line;
 `search_query` covers the model's query and the index file in a tree the served
-agent can write. `mcp_request` fuzzes the serve request decoder behind the recall
+agent can write; `redact_fallback` drives the per-line fallback through a pack that
+never converges; `shell_read_bash` is differential: every line the recogniser
+accepts, `bash -n` accepts too, since a booked read the shell would not run is a
+claim about output never produced. `mcp_request` fuzzes the serve request decoder behind the recall
 skill CLI; renaming it would discard its corpus.
 
 Run one with `cd fuzz && cargo +nightly fuzz run config_parse -- -max_total_time=60`.

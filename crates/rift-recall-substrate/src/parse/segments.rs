@@ -1,6 +1,6 @@
 //! A transcript sealed turn by turn is stored as line-aligned parts under
-//! `transcript.segments/NNNNNN` instead of one `transcript.jsonl` blob (L-5,
-//! round 30 Q1). Every reader still asks for `transcript.jsonl`; this module
+//! `transcript.segments/NNNNNN` instead of one `transcript.jsonl` blob.
+//! Every reader still asks for `transcript.jsonl`; this module
 //! is the one place that answers that name for a segmented shard, so no reader
 //! grows a second rule.
 //!
@@ -74,7 +74,7 @@ pub fn compact_segment_name(index: usize) -> String {
 }
 
 /// Read the layout a metadata document declares. A document that is not an
-/// object declares nothing, which keeps every pre-L-5 reading unchanged.
+/// object declares nothing, which keeps every reading from before per-turn seals unchanged.
 #[must_use]
 pub fn declared_layout(metadata: &Value) -> Declared {
     let Some(obj) = metadata.as_object() else {

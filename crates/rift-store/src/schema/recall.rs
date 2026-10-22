@@ -772,7 +772,7 @@ const INGEST_WATERMARK_POSITION_COLUMNS: &[Column] = &[
 ///
 /// Its own relation rather than a column on `n_checkpoint_commit`: an
 /// observed head is not an anchor. The anchor stays one checkpoint per commit,
-/// and a second claimant on one commit is the cursor regression slice 4 fixed.
+/// and a second claimant on one commit is a cursor regression already fixed once.
 /// The serving scope reads this only to admit an anchorless seal to the member
 /// that wrote it, on its branch, while the seen head is still in its history.
 const N_CHECKPOINT_OBSERVED_HEAD_COLUMNS: &[Column] = &[

@@ -7,7 +7,7 @@
 //! is a record of the preview, so each such file is sealed as
 //! `tool-results/<tool-use-id>.txt` beside the transcript it belongs to — the
 //! shard's own for the session, `tasks/<id>/tool-results/` for a subagent. It
-//! is part of the checkpoint shard, never a ledger of its own (Q37): every
+//! is part of the checkpoint shard, never a ledger of its own: every
 //! sealed body is a Merkle leaf, bound by the same root as its transcript.
 //!
 //! **The manifest.** The metadata document the transcript's compact boundary is

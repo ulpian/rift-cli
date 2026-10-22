@@ -66,7 +66,7 @@ pub(crate) enum DeferCause {
     /// The machine answered the idle timeout without asking for a condense.
     NoIdleEdge,
     /// **Retired, read-only.** HEAD is unborn. No writer emits it since a
-    /// condense stopped needing a commit (L-4: an anchorless checkpoint lands
+    /// condense stopped needing a commit (an anchorless checkpoint lands
     /// with the member absent); the variant stays so a journaled old token
     /// still parses as itself rather than as a corrupt document.
     #[allow(dead_code)] // retired: read back by `parse`, constructed by no writer
@@ -502,7 +502,7 @@ fn finalize_idle_session(ctx: &SweepCtx<'_>, cache: &SessionCache, sweep: &mut S
     sweep.condensed_checkpoints.push(checkpoint);
     if mark_swept_condensed(ctx, cache) {
         // The final archive landed and the session closed: what it left
-        // behind goes now, never on a turn seal or an interval (§4.3).
+        // behind goes now, never on a turn seal or an interval.
         let _ = crate::family::run_state::cleanup_session(
             &crate::family::run_state::sessions_dir(&ctx.repo.git_dir),
             &super::family_state::family_state_dir(&ctx.repo.common_dir),
@@ -583,7 +583,7 @@ fn settle_last_turn(ctx: &SweepCtx<'_>, cache: &SessionCache) {
 /// the checkpoint it minted.
 ///
 /// An unborn HEAD is not a deferral: the archive names no anchor and lands
-/// (Q78 — a condense never needs a commit). An archive that returned without
+/// (a condense never needs a commit). An archive that returned without
 /// minting is not a condense, however successfully it returned: only a minted
 /// checkpoint id counts, and anything else answers the cause the session is
 /// deferred under.
@@ -701,7 +701,7 @@ mod tests {
     /// Six tokens, each distinct and each parsing back to itself; only the
     /// held lock is a worker's to finish; and exactly one token is retired —
     /// `no-commit-to-anchor` still reads from an old journal, and no writer in
-    /// this file names it (L-4: a condense never needs a commit).
+    /// this file names it (a condense never needs a commit).
     #[test]
     fn every_defer_cause_has_its_own_token_and_only_the_lock_is_left_to_a_worker() {
         let all = [

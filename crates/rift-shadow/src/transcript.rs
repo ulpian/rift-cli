@@ -168,7 +168,7 @@ pub fn compact_jsonl(raw: &SecretBytes, start_line: usize) -> CompactTranscript 
 /// a caller that already knows how many `records` the whole compact form
 /// holds. A turn end has that count from its carried compactor, so only the
 /// lines from `start_line` on are compacted here: compacting the whole file
-/// again cost a 28 MB transcript most of its turn-end mint (L-5 slice 15).
+/// again cost a 28 MB transcript most of its turn-end mint.
 #[must_use]
 pub fn slice_start(raw: &SecretBytes, start_line: usize, records: usize) -> (usize, usize) {
     let raw_lines = raw

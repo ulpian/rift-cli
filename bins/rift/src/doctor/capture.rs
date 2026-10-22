@@ -435,7 +435,7 @@ pub(super) fn doctor_soak(repo: &Path, strict_read_only: bool) -> (String, serde
 /// no explanation available anywhere. Every doctor leg reads the markers
 /// through this one accessor and none takes them: a report that consumed a
 /// note would hide it from the next report and from the hook that owes it to
-/// the developer (CFX-7). Only `--fix` clears them, in
+/// the developer. Only `--fix` clears them, in
 /// [`consume_said_once_markers`], after every leg has said them.
 fn pending_markers(repo: &Path) -> Vec<String> {
     let Ok(paths) = rift_git::discover(repo) else {

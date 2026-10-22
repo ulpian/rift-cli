@@ -144,7 +144,7 @@ pub(super) struct WindowPane {
     /// Declines by frame, with the raw retries that followed them.
     pub(super) retries: Vec<RetryAfterDeny>,
     /// The DECLINED slices by length: under enforce the would-have-declined
-    /// pool no longer exists, so this is the distribution the floor ruling is
+    /// pool no longer exists, so this is the distribution the floor is
     /// evaluated against in its place.
     pub(super) declined_buckets: Vec<SliceBucket>,
 }

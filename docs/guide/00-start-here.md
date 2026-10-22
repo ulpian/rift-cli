@@ -43,7 +43,9 @@ stale one is structurally unservable: a stale summary reaching a model is a fals
 memory, worse than none. Recall also acts where tokens are spent: a read of
 lines the agent already holds is declined once with an actionable reason (always
 with the repeat allowed), a document is converted once, a file-name search is
-answered from an index. It measures repetition *before* optimising, so a saving
+answered from an index, and a shell result's held lines or repeated noise can be
+stood in for once its original is sealed — each lever set per repository and
+per agent. It measures repetition *before* optimising, so a saving
 comes from your repository and an upper bound is labelled as one.
 [06](./06-recall.md), [07](./07-serving-and-injection.md),
 [08](./08-cost-and-savings.md).

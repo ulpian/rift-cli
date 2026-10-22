@@ -39,11 +39,9 @@ compares the database against it, so a disagreement means the database is wrong 
 somebody edited git. Losing the database is an inconvenience; losing the git refs is
 data loss ([Chapter 14](14-sync-readiness.md)).
 
-Boundary file-kind and collection-attempt companions are local projection facts.
-Checkpoint shards do not transport them, so clone and rebuild cannot restore this
-evidence. Event and collection timestamps, and successful structural verification,
-do not establish historical authorship. Existing stored attributions may be
-incorrect; preserving or retrying those rows does not correct them.
+Boundary file-kind and collection facts are projection-only, so clone and rebuild
+cannot restore them, and neither they nor a clean verify establish who wrote a change
+([§3.10](03-capture.md#310-the-detached-worker)).
 
 | Ref | Holds | Pushed? |
 |---|---|---|
@@ -230,12 +228,10 @@ binds the *root* rather than per-artifact digests because each digest would need
 formula and accepted-derivation entry whenever an artifact is added; the root already
 commits to all of them, in order.
 
-A recovery audit requires native canon3 bytes from one immutable native tree, a valid
-redaction report, complete artifact root and path-ID binding, and a valid explicit
-carrier mapping before projection. Subject digests create only gap facts. Older
-readers that do not know this leaf cannot authenticate a gap-bearing checkpoint;
-absence preserves historical roots and IDs. Imported source commitments remain
-source provenance, never executable destination identities or retirement proof.
+A recovery audit projects only from native canon3 bytes of one immutable tree with a
+valid redaction report, root and path-id binding and an explicit carrier mapping;
+subject digests create only gap facts. An older reader cannot authenticate a
+gap-bearing checkpoint, and absence preserves historical roots and ids.
 
 ---
 

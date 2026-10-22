@@ -255,7 +255,7 @@ async fn the_doctor_sweep_settles_the_last_turn_of_a_session_no_hook_will_end() 
         "the sweep settled the last turn at its Stop event's ids"
     );
     // The settle was `Final` and the final archive landed, so the session-end
-    // cleanup (L-0A §4.3) removed the progress the sidecar carried: nothing is
+    // cleanup removed the progress the sidecar carried: nothing is
     // left to settle, and a stale frontier must not outlive the session.
     let sessions = hooks_fixture::sessions_of(&repo);
     for suffix in ["usage", "transcript"] {

@@ -73,7 +73,7 @@ pub(crate) enum JobKind {
     /// and change no lifecycle. Journaled because the redaction alone outlasts
     /// a client's hook timeout on a multi-megabyte transcript.
     Archive(IntervalArchive),
-    /// The checkpoint one turn end owes (L-5 SealTurn ruling): seal the turn's
+    /// The checkpoint one turn end owes: seal the turn's
     /// new transcript lines onto the earlier segments and archive.
     SealTurn(SealTurn),
     /// The BPE token count of one read, recorded as a late `file_read_tokens`
@@ -266,7 +266,7 @@ pub(crate) struct IntervalArchive {
 
 /// One turn end a `Stop` hook closed and the worker owes a checkpoint for.
 ///
-/// Its identity is (session, frontier), round 28's interval-identity rule
+/// Its identity is (session, frontier), the interval-identity rule
 /// applied to turns: a redelivered `Stop` names the same frontier and
 /// coalesces, and the next turn's end names a later one.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -819,7 +819,7 @@ pub(crate) fn jobs_due(git_dir: &Path, now_ms: i64) -> Vec<(PathBuf, AgentJob)> 
 
 /// Every readable job with its retry state, in [`jobs`]' order: the doctor's,
 /// the retry verb's and the drain policy's one reading of the two sibling
-/// members (L-0A §4.1 as amended 2026-10-17).
+/// members.
 pub(crate) fn retry_states(
     git_dir: &Path,
 ) -> Vec<(
@@ -876,7 +876,7 @@ pub(crate) fn job_file_count(git_dir: &Path) -> usize {
 }
 
 /// Record one execution failure at `failed_at_ms` (the worker's clock): the
-/// job is **kept** with its retry state advanced per §4.1 — the third failure
+/// job is **kept** with its retry state advanced — the third failure
 /// parks it, nothing removes it — and the reason lands on the said-once
 /// channel as `capture_queue::failure_note` spells it, rewritten past the park
 /// only when the reason changed (one note per new reason). Returns the new
@@ -956,7 +956,7 @@ pub(crate) fn note_key(job: &AgentJob) -> String {
 }
 
 /// A path-safe key for a said-once note about `session_id` that no one job
-/// owns (the cleanup a stale completion left owed, §4.3).
+/// owns (the cleanup a stale completion left owed).
 pub(crate) fn note_key_for_session(session_id: &str) -> String {
     session_key(session_id).chars().take(16).collect()
 }

@@ -1,12 +1,12 @@
 //! Private records, exact readiness admission and physical evidence; no execution authority.
 
-// The CFX-4 recovery controller (eligibility -> selection -> retirement) is the
+// The capture-recovery controller (eligibility -> selection -> retirement) is the
 // module's first production caller; until it lands, only tests reach it.
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "called by the CFX-4 recovery controller (eligibility → selection → retirement), not yet wired"
+        reason = "called by the capture-recovery controller (eligibility → selection → retirement), not yet wired"
     )
 )]
 

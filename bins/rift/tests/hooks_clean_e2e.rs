@@ -331,7 +331,7 @@ fn clean_prunes_transients_and_never_touches_canonical_refs() {
 /// only the counter. The marker is written by the detached worker and was read
 /// only by the next hook, so between commits the explanation existed on disk
 /// and nothing would print it. A report-only doctor reads it without taking
-/// it (CFX-7): a second report prints the same reason, and only `--fix`
+/// it: a second report prints the same reason, and only `--fix`
 /// consumes it, exactly once.
 #[test]
 fn report_only_doctor_says_a_pending_marker_every_run_and_fix_consumes_it_once() {
@@ -390,7 +390,7 @@ fn report_only_doctor_says_a_pending_marker_every_run_and_fix_consumes_it_once()
 /// **A planted capture note is reported by doctor as a finding on every
 /// report** (cause E of `turn_boundary`'s register, 2026-08-29). The
 /// `capture_queue` leg and the soak leg both read the note channel through
-/// `peek_errors`; a report-only doctor consumes nothing (CFX-7), so a second
+/// `peek_errors`; a report-only doctor consumes nothing, so a second
 /// report reads the same finding. Saying it once is the hook's job and
 /// `--fix`'s, never a report's.
 #[test]

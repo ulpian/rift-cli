@@ -66,6 +66,7 @@ embodies the term, so you can grep for the real thing.
 - **False-positive census** — the measured cost of the redaction pipeline firing on ordinary repository text, held per detector by a ceiling a test reads back out of the published artifact. → [04](04-redaction-and-secrets.md)
 - **Family** — one repository plus every linked checkout of it: the set sharing a git *common directory*, and therefore sharing objects, references and hooks. → [09](09-worktrees-and-families.md)
 - **Family manifest** — the small machine-local file in the common directory holding a family's minted identity, never tracked, written once and rewritten only by an explicit repair. `family.json`, `family.history.jsonl`. → [09](09-worktrees-and-families.md)
+- **Fold line** — the one line, `[rift fold: N more lines like the line above, differing only in digits]`, standing in a shell result for a run of alike lines once the original is sealed; `fold_command_output`. → [07](07-serving-and-injection.md)
 - **Four-state envelope** — the closed set of states every served artifact is in: unchanged relative to what you named, a validity-checked summary inline, exact bytes inline, or nothing inline plus a handle and a reason. `known_unchanged`, `summary_included`, `exact_included`, `available_by_handle`. → [06](06-recall.md)
 
 ---
@@ -79,6 +80,7 @@ embodies the term, so you can grep for the real thing.
 ## H
 
 - **Handle** — an unforgeable reference to content held outside the prompt: a file revision addressed by path *and* content hash, an immutable captured tool result, or a hash-bound summary key. → [06](06-recall.md)
+- **Held frame** — the one line, `[rift held: lines … of <path> at sha256:…, unchanged since turn …]`, standing in a shell result for lines the window provably holds; `substitute_held_output`. → [07](07-serving-and-injection.md)
 - **Held set** — the `(path, hash, coverage)` triples a context window holds. → [06](06-recall.md)
 - **Honesty figure** — `avoided − returned` over a class's own audit rows: the standing test that a lever's frames, maps and sidecars cost less than the reads they displaced. → [08](08-cost-and-savings.md)
 
@@ -93,6 +95,12 @@ embodies the term, so you can grep for the real thing.
 ## K
 
 - **Known-state anchor** — the manifest call opening a turn, which resets the turn's draw-down while keeping its ceilings. "What changed?" already precedes any retrieval, so anchoring imposes no new protocol, and a caller that never anchors runs under one un-reset budget rather than an unbounded one. `rift recall known-state`. → [06](06-recall.md)
+
+---
+
+## L
+
+- **Lever** — one interception decision with its mode (`off`, `observe`, `enforce`), set per repository in `serve.toml` and per family under `[interception.agents]`, never above the family's read lever. → [07](07-serving-and-injection.md)
 
 ---
 
@@ -119,6 +127,7 @@ embodies the term, so you can grep for the real thing.
 ## R
 
 - **Read record** — the append-only file per context window under `.rift/state/reads/`, holding the ranges that window was handed, the declines issued, the hashes its writes were asked to produce, and its eviction boundaries. → [06](06-recall.md)
+- **Read stages** — receipt, capture, queryable and delivered: the four timestamped facts of one read, each joined by `invocation_id` or `path_hash` and never by time. → [06](06-recall.md)
 - **Reason frame** — the sealed text of a decline: fixed phrases authored in code, variable spans through the same allowlist a manifest entry passes, no file content, no placeholder brackets, no error word. → [07](07-serving-and-injection.md)
 - **Recovery map** — the boundary-only injection after a context is emptied: the pre-eviction held set as path, hash and ranges, each labelled unchanged or changed at named lines, ranked by recency and fitted to its own budget. → [07](07-serving-and-injection.md)
 - **Redaction gate** — the one-way, total boundary between raw and durable bytes. `SecretBytes`, `RedactedBytes`, `RedactedBytes::seal`. → [04](04-redaction-and-secrets.md)
@@ -131,6 +140,7 @@ embodies the term, so you can grep for the real thing.
 
 - **Savings share** — `avoided ÷ (avoided + read)` since the last window boundary, the numerator from the audit relation and the denominator from captured read facts, computed once for every surface that prints it. `rift savings`. → [08](08-cost-and-savings.md)
 - **Scope** — the bound on what one recall query may read: repository, branch ancestry, checkout, developer, and a checkpoint window. → [06](06-recall.md)
+- **Sealed original** — the tool's own result, spooled before a rewrite stands and sealed beside the transcript, which `rift verify` holds the delivered text to. → [07](07-serving-and-injection.md)
 - **Session** — the unit capture is organised around, driven by a pure state machine: given a state and a trigger it yields the next state and a list of *requested* effects, and the caller performs or journals them. `rift session list|info|show`. → [03](03-capture.md)
 - **Shard** — a checkpoint on disk: the directory of small files under a path derived from the checkpoint's identifier — the redacted capture document, the redaction report, the transcripts, the tool calls, the four mechanical digests, the content address. → [05](05-ledger-and-verification.md)
 - **Sidecar** — the Markdown conversion of a document, keyed by the document's bytes together with the converter's version and the caps that shape its output, written once per repository family and viewed per member as a hardlink. → [07](07-serving-and-injection.md)
@@ -155,7 +165,7 @@ embodies the term, so you can grep for the real thing.
 
 ## W
 
-- **Watermark** — the dashboard's change detector, read as a pair: an append cursor moving whenever capture writes, and a rebuild epoch moving only when a projection is rebuilt. → [12](12-canopy-architecture.md)
+- **Watermark** — the dashboard's change detector, read as a pair: an append cursor moving whenever capture writes, and a rebuild epoch moving only when a projection is rebuilt. Recall's ingest watermark is another: its `ingested_at` says when a checkpoint became queryable. → [12](12-canopy-architecture.md), [06](06-recall.md)
 
 ---
 

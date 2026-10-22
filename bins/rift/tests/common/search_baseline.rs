@@ -39,8 +39,8 @@ impl Ceiling {
     /// A glob is bounded by its own tool on every family. A listing is bounded
     /// by how much of a command's result the client reads back inline, and one
     /// client's page states that figure: Claude Code's. Codex and Antigravity
-    /// state none anywhere in this tree and take the same figure by the
-    /// owner's consistency ruling — one number across the alpha clients rather
+    /// state none anywhere in this tree and take the same figure by a
+    /// deliberate consistency choice — one number across the alpha clients rather
     /// than three — which is an assumption about them and is written down as
     /// one both here and beside the constant the product reads.
     pub(super) fn of(_family: &str, lever: &str) -> Self {

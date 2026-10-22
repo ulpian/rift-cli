@@ -577,7 +577,7 @@ impl ShardWalker {
     }
 
     /// A native checkpoint's artifact with the blob oid its tree entry names,
-    /// so a caller can carry it forward by that oid (L-5 turn segments).
+    /// so a caller can carry it forward by that oid (a turn's earlier segments).
     ///
     /// # Errors
     /// [`RiftError::Substrate`] on a read failure.
