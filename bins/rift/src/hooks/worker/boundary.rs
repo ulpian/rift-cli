@@ -422,7 +422,7 @@ mod tests {
             .unwrap()
         };
         let before = facts();
-        // L-0A Q5 / design §4.1: three failures park the job — present AND
+        // Since parking replaced removal, three failures park the job — present AND
         // parked with a backoff — where they used to remove it.
         for attempt in 1..=crate::capture_queue::PARK_AFTER {
             crate::hooks::worker::drain_jobs(

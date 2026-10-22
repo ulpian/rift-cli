@@ -217,7 +217,7 @@ fn scope(plan: &Plan, queue: &Namespace, private: &Namespace) -> Result<Scope, O
     })
 }
 
-/// How the pass's verdicts partition the inventory under the ruling: eligible
+/// How the pass's verdicts partition the inventory: eligible
 /// candidates compete for the reservation; `Unsupported(_)` and a session with
 /// no cache in the current tree are historical; any other unavailability on
 /// any candidate defers the whole selection.
@@ -255,7 +255,7 @@ struct Attempt<'a> {
 
 impl Attempt<'_> {
     /// Candidates from the boundary tickets, ONE pass under the same hold's
-    /// sessions capability, then the ruling's partition.
+    /// sessions capability, then the partition.
     async fn classify_sources(
         &self,
         store: &impl CanonicalStore,

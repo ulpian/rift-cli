@@ -1138,7 +1138,7 @@ fn classification_is_not_a_whitelist_a_novel_hit_elsewhere_still_reddens() {
 /// commit that adds it, and the ceiling is deliberately generous so that
 /// only the row arm can be what fires. Without this arm the extra hit would
 /// merely rejoin the shared headroom and stay silent until the whole corpus
-/// crossed the ceiling — the weaker property the ruling refuses to claim.
+/// crossed the ceiling — the weaker property this table refuses to claim.
 #[test]
 fn growth_inside_a_classified_file_reddens_at_the_row() {
     let table = fp_classified_from(

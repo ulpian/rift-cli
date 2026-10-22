@@ -1,7 +1,7 @@
-//! The turn-end carry (L-5 slice 16): the subagent transcripts and spooled
+//! The turn-end carry: the subagent transcripts and spooled
 //! originals the previous turn-end shard already holds, so an unchanged one
 //! is written again by its blob oid instead of passing the redaction gate a
-//! second time (ruling "L-5 turn-end assembly must not re-redact", part 14b).
+//! second time: a turn end's cost must not grow with what earlier turns sealed.
 //!
 //! The frontier sidecar names each entry's raw-bytes hash and blob oids; the
 //! previous shard supplies the bytes, admitted only when the tree's oid is

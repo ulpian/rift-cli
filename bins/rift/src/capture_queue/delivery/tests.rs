@@ -42,7 +42,7 @@ fn identical_context_redelivery_preserves_the_owned_attempt_counter() {
 
 /// The context SHA — and so the file name — is identical before and after a
 /// retry-state write: all three retry members are outside the context, so a
-/// backoff or a park never renames the delivery (L-0A §4.1 as amended).
+/// backoff or a park never renames the delivery.
 #[test]
 fn a_retry_state_write_keeps_the_context_id_and_the_file_name() {
     let (_temp, owner, dir) = owned_directory();
@@ -119,7 +119,7 @@ fn legacy_deliveries_read_as_due_and_retry_members_survive_a_rewrite() {
     assert!(!state(2, 0, true).is_due(i64::MAX), "parked is never due");
 }
 
-/// The backoff as data (§4.1): 30 s, 60 s, 120 s, … capped at an hour, and
+/// The backoff as data: 30 s, 60 s, 120 s, … capped at an hour, and
 /// the third failure parks.
 #[test]
 fn a_failure_doubles_the_backoff_from_thirty_seconds_and_the_third_parks() {

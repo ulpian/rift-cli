@@ -1,7 +1,7 @@
 //! End-to-end: one read followed through the four stages on the fixture
 //! repository — the hook's receipt, the checkpoint that froze it, the recall
 //! ingest that made it queryable, and the answer a repeat read got — and the
-//! surfaces that report each read's furthest stage (CFX-6 slice 4).
+//! surfaces that report each read's furthest stage.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

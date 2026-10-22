@@ -308,7 +308,7 @@ fn observed_head(repo: &Path, reason: ArchiveReason) -> Option<String> {
 /// Condense raw shadow capture into a durable, redacted checkpoint and record the
 /// `archive_decision`. `commit_oid` is the anchoring commit (HEAD) the substrate
 /// archives against, `None` on an unborn HEAD: the checkpoint lands with the
-/// anchor absent, because a condense never needs a commit (Q78) and the id
+/// anchor absent, because a condense never needs a commit and the id
 /// never read it.
 ///
 /// # Errors
@@ -910,12 +910,12 @@ mod tests {
     ///
     /// A condense handed a sealed transcript archives it: the shard gains the
     /// pair through the durable path and the id moves. And the trailer
-    /// PREDICTION — transcript-blind by ruling (decision (b), 2026-08-29:
-    /// `prepare-commit-msg` owns the 100 ms budget and the read-side union is
+    /// PREDICTION — transcript-blind by design
+    /// (`prepare-commit-msg` owns the 100 ms budget and the read-side union is
     /// the permanent answer) — matches the transcript-less condense exactly
     /// and the transcript-carrying one not at all. If the prediction ever
     /// learns the transcript, the second half of this test reds and the
-    /// ruling above must be revisited with it.
+    /// decision above must be revisited with it.
     #[tokio::test]
     async fn a_condense_with_a_transcript_diverges_from_the_trailer_prediction() {
         let s = store();

@@ -1039,7 +1039,7 @@ fn the_window_verbs_write_only_the_marker() {
 }
 
 /// **A prevented read is inside the headline and separable from it, on every
-/// surface.** The owner's ruling is that a read Rift caused not to happen is a
+/// surface.** By decision, a read Rift caused not to happen is a
 /// saving like any other; the honesty rule is that it must never read as a
 /// second, additional one. So it enters `tokens_avoided` — the share moves —
 /// and it is reported beside it under its own name, per family and overall.

@@ -1,4 +1,4 @@
-//! What a segmented transcript owes (L-5, round 30 Q1). The leaf needs no
+//! What a segmented transcript owes. The leaf needs no
 //! check of its own: the substrate's one resolver hands the strict-Merkle and
 //! id passes the parts' concatenation, so an edited part already moves the
 //! root. These checks name the layout faults the root alone would only call

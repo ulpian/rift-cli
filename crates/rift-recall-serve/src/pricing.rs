@@ -116,7 +116,7 @@ impl SearchCeiling {
     /// reads back inline. Claude Code's page states that figure and is the one
     /// entry in this module's private per-family pin table. Codex and
     /// Antigravity state none
-    /// anywhere in this tree, and by the owner's consistency ruling they are
+    /// anywhere in this tree, and by a deliberate consistency choice they are
     /// priced at Claude Code's — the aim being one figure across the alpha
     /// clients rather than three. **That is an assumption, and it is stated
     /// here as one:** it says a shell run by those clients is cut off at

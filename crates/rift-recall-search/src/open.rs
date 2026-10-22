@@ -1,6 +1,6 @@
 //! Getting an index in hand, cold or warm, without ever making a caller wait.
 //!
-//! There is no resident process here by ruling, so the index is a file, and a
+//! There is no resident process here by design, so the index is a file, and a
 //! caller that wants one is in one of three situations:
 //!
 //! - the file is there and still answers for this checkout — load it;

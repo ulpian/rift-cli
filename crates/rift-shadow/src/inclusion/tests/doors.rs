@@ -199,7 +199,7 @@ fn a_control_file_symlinked_into_the_git_dir_is_never_read() {
 }
 
 /// The check is not only about symlinks. A directory and an absurd file are
-/// both "not a list", and both answer the way the ruling says: the empty
+/// both "not a list", and both answer the way the silent-empty rule says: the empty
 /// capture, silently, with nothing added to the document.
 #[test]
 fn a_non_regular_or_oversize_control_file_is_the_empty_list() {

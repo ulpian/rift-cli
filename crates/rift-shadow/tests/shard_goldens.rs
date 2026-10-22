@@ -178,7 +178,7 @@ fn the_fixture_exercises_every_declared_artifact() {
 
 /// The maximal fixture with every transcript it carries re-cut into one part
 /// per line — the layout a per-turn seal writes, which the frozen maximal
-/// fixture (pinned before L-5) never exercises. Each line passes the gate
+/// fixture (pinned before per-turn seals) never exercises. Each line passes the gate
 /// again, which is the identity on gate output for the builtin packs.
 fn segmented_archive() -> rift_shadow::backend::CheckpointArchive {
     use rift_shadow::backend::{ArchivedTranscript, Segments, TranscriptBody};

@@ -1,6 +1,6 @@
 //! Keeping the original of a terminal result before a rewrite of it goes out.
 //!
-//! Q72 lets a hook deliver a Bash result other than the one the tool wrote
+//! A hook may deliver a Bash result other than the one the tool wrote
 //! only when the original is spooled first, under the form the rewrite takes.
 //! Both rewrites of a result (held lines, folds) come through here, so the
 //! rule has one place to hold: the rewrite is checked against its original

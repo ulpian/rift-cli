@@ -1,6 +1,6 @@
 //! The turn-seal card: for each session a checkpoint covers, the frontier
 //! its last turn-end seal recorded and how far the live transcript has run
-//! past it (L-5, design Q9).
+//! past it.
 //!
 //! The facts come from the session's `.turn-seal` sidecar, read through the
 //! format the hook binary writes (`rift_shadow_hooks::turn_frontier`); the

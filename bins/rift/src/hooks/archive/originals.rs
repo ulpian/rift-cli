@@ -4,8 +4,8 @@
 //! Every archive re-seals the whole session, so every archive reads the whole
 //! spool of the session ([`super::super::originals`]) and seals every record
 //! again: a record is never consumed here, and the spool is not deleted —
-//! deletion at the session's final archive is the session lifecycle's (S8
-//! L-4), whose hook point is [`Spool::load_carrying`]'s caller once that archive lands.
+//! deletion at the session's final archive is the session lifecycle's,
+//! whose hook point is [`Spool::load_carrying`]'s caller once that archive lands.
 //!
 //! **Which transcript.** A record is sealed beside the transcript whose line
 //! records a `tool_result` for its call — the session's, or a subagent's when

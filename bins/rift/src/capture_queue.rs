@@ -54,7 +54,7 @@ pub(crate) struct QueueEntry {
     pub attempts: u32,
 }
 
-/// How many execution failures **park** a delivery (L-0A §4.1).
+/// How many execution failures **park** a delivery.
 ///
 /// A retry is worth having — an archive can lose a race for `index.lock` and
 /// succeed a second later. An *unbounded* retry is not: measured on a repo
@@ -381,7 +381,7 @@ pub(crate) fn remove_owned(path: &Path, owner: &QueueLock) -> Result<()> {
 }
 
 /// Record one execution failure at `failed_at_ms` (the worker's clock, not
-/// the entry's): the retry state advances per §4.1 and the reason lands
+/// the entry's): the retry state advances and the reason lands
 /// beside the entry, said as [`failure_note`] spells it. The entry is **kept**
 /// whatever the count — the third failure parks it. Returns the new state.
 pub(crate) fn record_failure_owned(
@@ -402,7 +402,7 @@ pub(crate) fn record_failure_owned(
     Ok(next)
 }
 
-/// The note one failure leaves, by where the retry state stands (§4.1):
+/// The note one failure leaves, by where the retry state stands:
 /// before the park, the reason and when it is retried; at the park, the two
 /// roads that retry it, naming the session when the job has one; past the
 /// park, the reason alone — the caller rewrites it only when it changed.
@@ -896,7 +896,7 @@ mod tests {
         assert!(acquire_lock(tmp.path(), 2).is_some());
     }
 
-    /// Re-pinned per L-0A Q5 / design §4.1: the bound is still three
+    /// Re-pinned when parking replaced removal: the bound is still three
     /// execution failures, and it still keeps the queue off the quadratic road
     /// (a parked entry is skipped by the ordinary pass, so nothing re-attempts
     /// it on every commit) — but the third failure **parks** the entry rather
@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(entry_file_count(tmp.path()), 0, "drained");
     }
 
-    /// Re-asserted per L-0A Q5 / design §4.1: three execution failures is
+    /// Re-asserted when parking replaced removal: three execution failures is
     /// still the bound (the sync-format note says so), and what it bounds is
     /// now the park, not a removal — `PARK_AFTER` has no "remove" meaning.
     #[test]

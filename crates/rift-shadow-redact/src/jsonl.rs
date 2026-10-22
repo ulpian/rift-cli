@@ -76,7 +76,7 @@
 //! reduction is *neutralised*, not *observed*.
 //!
 //! So the guard proves "nothing seals less than flat", which is the property the
-//! ruling needs, and it proves nothing about whether the machinery is gone. That
+//! no-scope rule needs, and it proves nothing about whether the machinery is gone. That
 //! second thing is a **compile-time** property instead:
 //! [`crate::redact_fragment`] takes no scope, so there is no parameter for a key
 //! name to steer and no narrowing for a test to catch. Anyone re-adding one is
@@ -235,7 +235,7 @@ fn route(line: &str, packs: &RulePackSet) -> Route {
 }
 
 /// Whether a document may be cut between `prev_line` and `next_line` with the
-/// two sides sealed apart — rule R1 of the segmented seal.
+/// two sides sealed apart — the cut rule of the segmented seal.
 ///
 /// Admitted only when both lines are sealed alone (each walks as a structure
 /// and settles), because every pass that is not line-local acts inside a flat
@@ -493,7 +493,7 @@ fn collect(value: &Value, packs: &RulePackSet, report: &mut RedactionReport) -> 
 ///
 /// Every node is judged the same way, whatever it is called: [`redact_fragment`]
 /// takes no scope and this function passes it none, so there is no state here
-/// that a key name could steer. That absence is the ruling.
+/// that a key name could steer. That absence is the rule.
 fn walk(
     value: &Value,
     anchor: &str,
@@ -730,9 +730,9 @@ mod tests {
         assert!(!m.contains("Zx9Qw3eR7tY2uI8oP1aS5dF6gH0jK4lZ3xC7vB9nM2q"));
     }
 
-    /// The ruling's cost, stated as a test rather than as a sentence: a key name
+    /// The no-scope rule's cost, stated as a test rather than as a sentence: a key name
     /// buys nothing. Every one of these was a *protected* leaf before
-    /// 2026-08-08, and each is now judged exactly as its neighbours are.
+    /// scope reduction was removed, and each is now judged exactly as its neighbours are.
     #[test]
     fn no_key_name_buys_a_leaf_any_protection() {
         let secret = "Zx9Qw3eR7tY2uI8oP1aS5dF6gH0jK4lZ3xC7vB9nM2q";
@@ -1203,7 +1203,7 @@ mod tests {
     /// **The differential guard, and it is total.** Structure may never seal
     /// less than flat text — asserted over generated documents rather than a
     /// list of the bypasses somebody already thought of, and with **no key
-    /// excluded**, which is the change the 2026-08-08 ruling requires: with no
+    /// excluded**, which is the change the no-scope rule requires: with no
     /// scope to reduce, there is no category of key the guard is allowed to look
     /// away from.
     ///

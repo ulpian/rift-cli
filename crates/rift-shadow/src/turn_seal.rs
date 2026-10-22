@@ -1,20 +1,19 @@
-//! The per-turn transcript writer (L-5 slice 3a): at a turn end it seals only
+//! The per-turn transcript writer: at a turn end it seals only
 //! the lines past the last admitted cut, as one new segment appended to the
 //! parts the previous checkpoint recorded.
 //!
 //! Two guards keep the parts equal to the whole document's seal. The cut is
-//! admitted by `rift_shadow_redact::cut_is_safe` (rule R1) and needs a line
+//! admitted by `rift_shadow_redact::cut_is_safe` (the cut rule) and needs a line
 //! after it, so a turn's last record waits for the next turn or the session-end
 //! reconciliation rather than ending a segment no one can prove safe. And the
-//! earlier parts are read back and checked before anything is appended (design
-//! §2.6): their line counts against `segment_raw_lines`, their concatenation
+//! earlier parts are read back and checked before anything is appended: their line counts against `segment_raw_lines`, their concatenation
 //! against the previous checkpoint's full-transcript leaf, and each part's
 //! bytes against the blob oid its tree records. Any miss refuses the segment
 //! path for this turn — a whole reseal plus a `segment-chain-broken` finding —
 //! and never re-bases onto whatever the tree holds.
 //!
 //! A checked part is carried forward by that oid, never passed through the
-//! gate again (L-5 ruling, 2026-10-18): re-redacting the prefix each turn
+//! gate again: re-redacting the prefix each turn
 //! would make a turn's cost O(transcript), which per-turn segments exist to
 //! remove. The chain also records the pack set's fingerprint, and a turn
 //! under a different one reseals whole rather than carry bytes other rules
@@ -83,7 +82,7 @@ pub enum ChainBreak {
     /// them would keep bytes the current rules never produced.
     PacksChanged,
     /// At a session end, the parts' concatenation differs from the whole file
-    /// sealed once (design §3.4): the whole seal supersedes them.
+    /// sealed once: the whole seal supersedes them.
     SegmentMismatch,
 }
 
@@ -179,7 +178,7 @@ pub fn seal_session_end_through(
 }
 
 /// Check a session end's parts against the whole file sealed once through
-/// the gate (design §3.4), paid once per session. Equal bytes keep the parts;
+/// the gate, paid once per session. Equal bytes keep the parts;
 /// any difference returns the whole seal in their place, named
 /// [`ChainBreak::SegmentMismatch`], so the final checkpoint holds what the
 /// whole file seals to and the earlier checkpoints stay as written. A seal
@@ -209,7 +208,7 @@ pub fn reconcile_session_end(
 /// Where the new part ends.
 #[derive(Clone, Copy)]
 enum Cut {
-    /// At the last cut R1 admits with a line after it: a turn end.
+    /// At the last cut the cut rule admits with a line after it: a turn end.
     Admitted,
     /// At the last complete line: a session end, after which nothing grows.
     EndOfFile,
@@ -302,7 +301,7 @@ fn read_back(
     fingerprint: &str,
 ) -> std::result::Result<Vec<CarriedPart>, ChainBreak> {
     // First, because no other check can make a part sealed under other rules
-    // safe to carry (00-decisions L-5 follow-up, 2026-10-18).
+    // safe to carry.
     if chain.packs.as_deref() != Some(fingerprint) {
         return Err(ChainBreak::PacksChanged);
     }
@@ -348,7 +347,7 @@ fn check_layout(chain: &PriorChain, available: usize) -> std::result::Result<(),
     Ok(())
 }
 
-/// The refused path: the whole file through the gate once, as before L-5.
+/// The refused path: the whole file through the gate once, as before per-turn seals.
 fn whole_reseal(raw: &SecretBytes, broken: ChainBreak, gate: &mut Gate<'_>) -> Result<TurnSeal> {
     let out = gate(raw, 0)?;
     Ok(TurnSeal::Whole {
@@ -358,7 +357,7 @@ fn whole_reseal(raw: &SecretBytes, broken: ChainBreak, gate: &mut Gate<'_>) -> R
     })
 }
 
-/// The largest `k` past `frontier` whose cut R1 admits, with a line after it.
+/// The largest `k` past `frontier` whose cut the cut rule admits, with a line after it.
 fn last_admitted_cut(lines: &[&[u8]], frontier: usize, packs: &RulePackSet) -> Option<usize> {
     let text = |i: usize| {
         let line = lines.get(i)?;

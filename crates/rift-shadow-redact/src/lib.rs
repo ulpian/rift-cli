@@ -419,8 +419,8 @@ pub fn redact_with_at(
 /// structure-aware caller needs to judge a piece of a document — one JSON string
 /// leaf, one object key, one run of non-JSON lines — under exactly the layers
 /// the flat path would have applied to it, with no way to ask for fewer. There
-/// is deliberately no scope parameter: the owner's 2026-08-08 ruling removes
-/// scope reduction from the crate fully, so "which layers run" is not a
+/// is deliberately no scope parameter: scope reduction is gone from the crate,
+/// because a key name must never buy a leaf a lighter pass, so "which layers run" is not a
 /// question any caller gets to answer.
 ///
 /// `report.allowlisted` counts the *last* pass of each fragment, summed across
