@@ -88,7 +88,7 @@ pub fn no_network_deps_in_capture_crates(root: &Path) -> Result<Vec<String>, Str
             if NETWORK_CRATES.contains(&key.as_str()) {
                 v.push(format!(
                     "{rel}: crate `{name}` is in the rift binary's closure and declares \
-                     network client `{key}` — invariant §1.4 (no network in capture)"
+                     network client `{key}` — capture never reaches the network"
                 ));
             }
         }
@@ -159,7 +159,7 @@ pub fn no_network_crate_in_the_resolved_graph(root: &Path) -> Result<Vec<String>
         .map(|c| {
             format!(
                 "resolved graph: `{c}` is reachable from `rift` or `rift-memd` in the \
-                 default build — invariant §1.4 (no network in capture); a network \
+                 default build — capture never reaches the network; a network \
                  client belongs behind an opt-in feature only"
             )
         })
