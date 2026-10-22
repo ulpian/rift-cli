@@ -69,7 +69,7 @@ pub enum ArchiveReason {
     SensitivePath,
     /// The session ended (the state machine's `RequestCondense` effect).
     SessionEnd,
-    /// A turn ended (the agent's `Stop`): one checkpoint per turn end (L-5).
+    /// A turn ended (the agent's `Stop`): one checkpoint per turn end.
     TurnEnd,
 }
 

@@ -178,6 +178,24 @@ fn digits_lettered_bounded(rest: &[u8]) -> Option<usize> {
     bounded_at(rest, lettered).or_else(|| bounded_at(rest, digits))
 }
 
+/// A run of digits, then at most one ASCII letter of either case, bounded on
+/// the right — a lettered id may spell its sub-part in upper case.
+fn digits_any_letter_bounded(rest: &[u8]) -> Option<usize> {
+    let digits = digit_run(rest);
+    if digits == 0 {
+        return None;
+    }
+    let lettered = digits + usize::from(rest.get(digits).is_some_and(u8::is_ascii_alphabetic));
+    bounded_at(rest, lettered).or_else(|| bounded_at(rest, digits))
+}
+
+/// Exactly two digits, bounded on the right.
+fn two_digits_bounded(rest: &[u8]) -> Option<usize> {
+    (digit_run(rest) == 2)
+        .then_some(2)
+        .and_then(|len| bounded_at(rest, len))
+}
+
 /// A run of digits, unbounded: an item number may carry a suffix.
 fn digits_any(rest: &[u8]) -> Option<usize> {
     Some(digit_run(rest)).filter(|len| *len > 0)
@@ -382,6 +400,27 @@ const RETIRED: &[Retired] = &[
         tail: ends_here,
     },
     Retired {
+        lead: concat!("CF", "X-"),
+        fold_case: false,
+        boundary_before: true,
+        refused_after: &[],
+        tail: digit,
+    },
+    Retired {
+        lead: concat!("RP", "F-"),
+        fold_case: false,
+        boundary_before: true,
+        refused_after: &[],
+        tail: digit,
+    },
+    Retired {
+        lead: concat!("00-dec", "isions"),
+        fold_case: true,
+        boundary_before: false,
+        refused_after: &[],
+        tail: nothing,
+    },
+    Retired {
         lead: "S",
         fold_case: false,
         boundary_before: true,
@@ -453,6 +492,27 @@ const SCOPED: &[Retired] = &[
         boundary_before: true,
         refused_after: &[],
         tail: digits_lettered_bounded,
+    },
+    Retired {
+        lead: concat!("L", "-"),
+        fold_case: false,
+        boundary_before: true,
+        refused_after: &[],
+        tail: digits_any_letter_bounded,
+    },
+    Retired {
+        lead: concat!("CF", "-"),
+        fold_case: false,
+        boundary_before: true,
+        refused_after: &[],
+        tail: two_digits_bounded,
+    },
+    Retired {
+        lead: concat!("FG", "-"),
+        fold_case: false,
+        boundary_before: true,
+        refused_after: &[],
+        tail: digits_bounded,
     },
     Retired {
         lead: concat!("it", "em "),
@@ -830,7 +890,7 @@ mod tests {
 
     /// The short shapes, each planted once, one per line. Spelled in halves
     /// so this file carries none of them whole.
-    const SHORT_SHAPES: [&str; 11] = [
+    const SHORT_SHAPES: [&str; 15] = [
         concat!("see ", "A", "1 here"),
         concat!("see ", "E", "9."),
         concat!("(", "D", "12)"),
@@ -842,6 +902,10 @@ mod tests {
         concat!("record ", "00", "82 says"),
         concat!("record ", "00", "92"),
         concat!("[", "C", "3]"),
+        concat!("per ", "L", "-5 and"),
+        concat!("(", "L", "-0A)"),
+        concat!("see ", "CF", "-13."),
+        concat!("under ", "FG", "-2,"),
     ];
 
     /// The program words and stream ids are retired everywhere: no tracked
@@ -861,6 +925,10 @@ mod tests {
             concat!(" ", "W", "1 "),
             concat!(" ", "W", "12,"),
             concat!(" ", "W", "1b."),
+            concat!(" ", "W", "13-1b "),
+            concat!("(", "CF", "X-4)"),
+            concat!(" ", "RP", "F-3a "),
+            concat!("the ", "00-dec", "isions", " file"),
         ] {
             assert!(hit(spelled), "missed {spelled}");
         }
@@ -873,6 +941,10 @@ mod tests {
             concat!("a", "W", "1 "),
             concat!(" ", "W", "x "),
             concat!("mini", "wind", "sup"),
+            concat!("x", "CF", "X-4"),
+            concat!(" ", "CF", "X-x"),
+            concat!("a", "RP", "F-3"),
+            concat!("00-", "decided"),
         ] {
             assert!(!hit(quiet), "false positive on {quiet}");
         }
@@ -951,6 +1023,13 @@ mod tests {
             concat!(" ", "O", "3 "),
             concat!(" ", "Q", "4X "),
             concat!(" ", "Q", "4ab "),
+            concat!(" C", "L", "-5 "),
+            concat!(" ", "L", "-x "),
+            concat!(" ", "L", "-5ab "),
+            concat!(" ", "CF", "-1 "),
+            concat!(" ", "CF", "-123 "),
+            concat!(" X", "FG", "-2 "),
+            concat!(" ", "FG", "-2x "),
             concat!("6", "D", "1"),
             "an item list",
         ] {

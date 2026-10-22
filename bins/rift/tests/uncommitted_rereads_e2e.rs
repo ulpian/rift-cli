@@ -167,7 +167,7 @@ fn seed_non_git_dir(tmp: &Path) -> PathBuf {
 /// (d) A directory with no git at all declines an unchanged re-read once the
 /// record is git-optional.
 #[test]
-#[ignore = "waits for S8 L-1"]
+#[ignore = "waits for a git-optional read record: a directory with no git has nowhere to keep the read fact yet"]
 fn a_file_in_a_directory_git_has_never_seen_is_declined_on_an_unchanged_reread() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = seed_non_git_dir(tmp.path());

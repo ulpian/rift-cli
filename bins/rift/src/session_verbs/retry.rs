@@ -1,5 +1,5 @@
 //! `rift session retry [--session <id> | --all]`: the per-session retry of
-//! parked work (L-0A §4.2, Q7).
+//! parked work.
 //!
 //! A job that failed `PARK_AFTER` times is **parked**: kept in the journal
 //! with its backoff and its note, run by no ordinary worker pass, and named

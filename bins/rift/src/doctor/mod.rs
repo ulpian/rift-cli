@@ -109,7 +109,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     };
     // Recovery runs before any leg that drains a queue, and the tickets it
     // classified historical stay out of every repair drain after it, so the
-    // backlog is never replayed one ticket at a time (CFX-4 ruling).
+    // backlog is never replayed one ticket at a time.
     // A stale old-format queue lock is retired first, so the recovery and
     // every queue leg after it run against an open queue.
     report.leg(

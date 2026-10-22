@@ -163,7 +163,7 @@ struct AgentJobs {
     pending: usize,
     unreadable: usize,
     /// Jobs parked after `PARK_AFTER` failures: kept, skipped by the ordinary
-    /// pass, retried by `--fix` or `rift session retry` (L-0A §4.2).
+    /// pass, retried by `--fix` or `rift session retry`.
     parked: Vec<ParkedJob>,
     /// Jobs whose backoff has not elapsed at the report's clock.
     due_later: usize,
@@ -173,7 +173,7 @@ struct AgentJobs {
 }
 
 /// One parked job as the report names it: its session and its last note,
-/// read without consuming (`peek_note`, the CFX-7 rule — a second report
+/// read without consuming (`peek_note`: a report consumes nothing, so a second report
 /// prints the same text).
 struct ParkedJob {
     session: String,

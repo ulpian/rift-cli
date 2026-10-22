@@ -1,7 +1,7 @@
 //! `rift-memd rebuild` over a checkpoint that names **no commit**.
 //!
 //! A checkpoint minted on an unborn HEAD carries no `commit` member in its
-//! `metadata.json` (L-0A §1.2: absent, never `""`). The recall projection
+//! `metadata.json` (absent, never `""`). The recall projection
 //! takes the absence as the answer: the checkpoint lands, no
 //! `n_checkpoint_commit` row is invented, no outcome row is labelled against
 //! an anchor that does not exist, and the rebuild reports no parse issue.

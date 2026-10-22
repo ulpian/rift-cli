@@ -665,7 +665,7 @@ pub(crate) fn prepare_owned(owner: &crate::capture_queue::QueueLock) -> rift_cor
     not(test),
     expect(
         dead_code,
-        reason = "called by the CFX-4 recovery controller (eligibility → selection → retirement), not yet wired"
+        reason = "called by the capture-recovery controller (eligibility → selection → retirement), not yet wired"
     )
 )]
 pub(crate) fn prepare_recovery(
@@ -808,8 +808,8 @@ pub(crate) struct SessionCleanup {
     pub(crate) turn_seal_sidecar: bool,
 }
 
-/// Remove what a session leaves behind once its **final** archive landed
-/// (L-0A §4.3): the claim markers, the originals spool and the three sidecars.
+/// Remove what a session leaves behind once its **final** archive landed:
+/// the claim markers, the originals spool and the three sidecars.
 /// The `condensed-<key>` marker and the session cache stay — the first is the
 /// completion proof the next drain reads, the second is retained as `ended`
 /// by its own rule — and no content-addressed cache (linehash, outline) or

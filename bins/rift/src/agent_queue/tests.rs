@@ -117,9 +117,9 @@ fn a_renamed_job_is_skipped_but_counted() {
     assert!(moved.exists(), "left for the doctor, not deleted");
 }
 
-/// Re-pinned per L-0A Q5 / design §4.1. Failure is loud, bounded and
+/// Re-pinned when parking replaced removal. Failure is loud, bounded and
 /// idempotent: the note lands on the shared said-once channel with the
-/// §4.1 texts, the count and the backoff are durable, and the third failure
+/// retry texts, the count and the backoff are durable, and the third failure
 /// **parks** the job — both halves proven: the file is still present after
 /// the third failure AND `parked == true` with `next_due_ms` set. Past the
 /// park the note is rewritten only for a new reason.

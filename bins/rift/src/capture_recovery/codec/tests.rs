@@ -242,7 +242,7 @@ fn the_context_digest_drops_top_level_retry_members_only_and_the_ticket_digest_i
     assert_ne!(Sha256::digest(&compact), Sha256::digest(&spaced));
 }
 
-/// The retry-member pin owed at the L-4 rebase: a ticket the delivery path
+/// The retry-member pin: a ticket the delivery path
 /// rewrites with `next_due_ms`/`parked` keeps its `stem--ctx` name valid, so
 /// recovery decodes it with the same context and digest; a changed context
 /// field under that same name still refuses.

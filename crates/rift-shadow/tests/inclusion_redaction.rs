@@ -50,7 +50,7 @@ fn shard_id(work_tree: &std::path::Path) -> String {
 /// The assertion is the strongest observable one: not "the secret is absent"
 /// but "this tree is the no-capture tree" — byte-identical empty bytes AND the
 /// same checkpoint id a repository with no control file mints, which is what
-/// keeps the silent-empty ruling free of any id-visible side effect.
+/// keeps the silent-empty rule free of any id-visible side effect.
 #[cfg(unix)]
 #[test]
 fn a_symlinked_control_file_lands_on_the_no_capture_checkpoint_id() {

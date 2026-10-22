@@ -1,6 +1,6 @@
 //! Spooling the original of a tool result a hook is about to rewrite.
 //!
-//! Q72 grants a hook two ways to deliver a Bash result other than the one the
+//! A hook has two ways to deliver a Bash result other than the one the
 //! tool produced (`held_output_substitution`, `folded_output`), on one
 //! condition: the original is kept. [`spool_original`] is the keeping, and the
 //! runtime half of the condition — a caller delivers its rewrite only on `Ok`;
@@ -35,7 +35,7 @@
 //!
 //! **Lifetime.** A record stays until it is sealed AND the session's final
 //! archive has landed, because every checkpoint re-seals the whole session.
-//! Deletion at the final archive is the session lifecycle's (S8 L-4) and is
+//! Deletion at the final archive is the session lifecycle's and is
 //! not implemented here; `rift doctor` names a spool whose session has no
 //! live state ([`spooled_sessions`]).
 
@@ -54,7 +54,7 @@ use super::subagent_claims::is_safe_id;
 
 /// The most characters an original's stdout and stderr may hold together:
 /// the client's own inline threshold, past which it spills the result to a
-/// file (CF-13) rather than deliver it inline. Measured: at this size the
+/// file rather than deliver it inline. Measured: at this size the
 /// spool's p95 stays under 40 ms in a fresh process.
 pub(crate) const MAX_REWRITE_CHARS: usize = 30_000;
 
@@ -165,7 +165,7 @@ pub(crate) struct SpooledSession {
 ///
 /// # Errors
 /// A [`SpoolRefusal`]; nothing is left on disk for any of them.
-#[must_use = "a rewrite without a spooled original is forbidden (Q72)"]
+#[must_use = "a rewrite without a spooled original is forbidden"]
 pub(crate) fn spool_original(
     site: &RewriteSite<'_>,
     original: ToolOriginal,

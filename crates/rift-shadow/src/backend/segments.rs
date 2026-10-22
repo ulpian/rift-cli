@@ -1,5 +1,5 @@
 //! The full transcript's body: one sealed blob, or the line-aligned parts a
-//! per-turn seal writes (L-5, round 30 Q1). Either way the bytes every leaf,
+//! per-turn seal writes. Either way the bytes every leaf,
 //! `content_hash.txt` input and id is computed over are the whole document —
 //! [`TranscriptBody::as_slice`] is the concatenation — so a segmented shard
 //! needs no new id rule and no canon epoch. The layout differs only in the
@@ -29,13 +29,13 @@ pub const SEGMENT_FALLBACK_KEY: &str = "segment_redaction_fallback";
 /// No `Debug`: every arm holds [`RedactedBytes`], which withholds it.
 #[derive(Clone)]
 pub enum TranscriptBody {
-    /// One `transcript.jsonl` blob — every shard written before L-5.
+    /// One `transcript.jsonl` blob — every shard written before per-turn seals.
     Whole(RedactedBytes),
     /// The parts of a transcript sealed turn by turn.
     Segments(Segments),
     /// One blob an earlier turn-end shard holds for the same raw bytes,
-    /// written again by its oid alone (ruling "L-5 turn-end assembly must not
-    /// re-redact"): an unchanged subagent transcript or spooled original.
+    /// written again by its oid alone, never re-redacted, so a turn's cost does
+    /// not grow with the session: an unchanged subagent transcript or spooled original.
     Carried(CarriedPart),
 }
 
@@ -76,8 +76,7 @@ pub enum SegmentPart {
     /// Sealed this turn by the gate; it takes the durable door.
     Sealed(RedactedBytes),
     /// An earlier turn's part, referenced by the blob the previous shard
-    /// already holds (L-5 ruling: earlier segments are reused, never
-    /// re-redacted). No bytes are written for it.
+    /// already holds: earlier segments are reused, never re-redacted. No bytes are written for it.
     Carried(CarriedPart),
 }
 
@@ -296,7 +295,7 @@ impl From<RedactedBytes> for TranscriptBody {
 }
 
 /// Record a segmented body's layout on its metadata document; a whole body
-/// writes nothing, so every shard written before L-5 keeps its bytes.
+/// writes nothing, so every shard written before per-turn seals keeps its bytes.
 pub(super) fn insert_segment_members(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     body: &TranscriptBody,

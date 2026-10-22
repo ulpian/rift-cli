@@ -561,7 +561,7 @@ const SWEEP: &[Row] = &[
                    mismatch is dead configuration rather than a wiring Rift \
                    advertises and does not honour. The gap is NOT closed: it is \
                    as real as it was, and it stays counted. What is withdrawn is \
-                   the promise to rewrite this table, which the ruling retired.",
+                   the promise to rewrite this table, retired with Cursor's capture.",
     },
     Row {
         id: "cursor.stop_tokens",

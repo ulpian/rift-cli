@@ -1,7 +1,7 @@
 //! The rewrite forms a hook may deliver in place of a tool's result, and the
 //! rendering contract the rewriter, the archive and `rift verify` share.
 //!
-//! A hook that rewrites a Bash result (Q72) hands the model a text that is not
+//! A hook that rewrites a Bash result hands the model a text that is not
 //! the one the tool produced. The original is spooled before the rewrite is
 //! delivered and sealed beside the transcript at archive
 //! ([`super::ArchivedOriginal`]); what binds the two is this module: a closed
@@ -46,7 +46,7 @@ const FOLD_CLOSE: char = ']';
 /// What opens a held frame.
 pub const HELD_FRAME_OPEN: &str = "[rift held: ";
 
-/// The two rewrite forms Q72 grants. Closed: a rewrite in any other form is
+/// The two rewrite forms a hook may deliver. Closed: a rewrite in any other form is
 /// not one a hook may deliver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RewriteForm {

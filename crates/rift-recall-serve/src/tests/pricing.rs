@@ -109,8 +109,8 @@ fn the_declared_search_baseline_prices_a_listing_and_never_a_content_grep() {
 /// the file cap prices the second as though the first tool had run it.
 ///
 /// The three alpha families price a listing alike: only Claude Code's page
-/// states the character ceiling, and the other two take it by the owner's
-/// consistency ruling rather than by an artifact of their own.
+/// states the character ceiling, and the other two take it by a deliberate
+/// consistency choice rather than by an artifact of their own.
 #[test]
 fn each_listing_shape_is_priced_at_its_own_clients_ceiling() {
     let paths: Vec<String> = (0..4_000)

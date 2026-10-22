@@ -168,7 +168,7 @@ pub struct AgentLevers {
 }
 
 /// What a family's line under `[interception.agents]` may say: the one mode it
-/// always could, or a table of per-lever modes (Q88).
+/// always could, or a table of per-lever modes.
 ///
 /// Untagged so the existing spelling keeps loading; a value that is neither a
 /// known mode nor a table of known levers matches no variant and fails the load.

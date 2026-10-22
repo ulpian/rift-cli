@@ -1,5 +1,5 @@
 //! End-to-end: a checkpoint minted on an **unborn HEAD** is a first-class
-//! record. A condense never needs a commit (L-0A §1.1, Q78): the shard names
+//! record. A condense never needs a commit: the shard names
 //! no anchor — the `commit` member is absent, never `""` — and every reader
 //! takes the absence as the answer. The anchorless shard verifies, rebuilds a
 //! projection from an empty cache with no `checkpoint_commit` row and no

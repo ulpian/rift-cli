@@ -1,5 +1,5 @@
-//! The worker's own tests, moved out of `worker.rs` by concern (L-4 commit
-//! B0, move-only): the drain, the condense, the interval archive and the
+//! The worker's own tests, moved out of `worker.rs` by concern
+//! (a move only): the drain, the condense, the interval archive and the
 //! typed-defer controls, over real `git init` fixtures.
 
 use super::*;
@@ -395,7 +395,7 @@ fn a_gone_interval_checkout_stays_owed_without_spending_an_attempt() {
     );
 }
 
-/// A session with everything the final archive cleans up (§4.3): a subagent
+/// A session with everything the final archive cleans up: a subagent
 /// claim marker, a spooled original, and the two sidecars.
 fn seed_session_leftovers(repo: &rift_git::RepoPaths, session: &str) -> [std::path::PathBuf; 5] {
     let sessions = crate::family::run_state::sessions_dir(&repo.git_dir);
@@ -421,7 +421,7 @@ fn seed_session_leftovers(repo: &rift_git::RepoPaths, session: &str) -> [std::pa
 /// The final archive (a session-end condense) removes the claims, the spool
 /// and the three sidecars (transcript, usage, turn-seal frontier), and keeps the `condensed-` marker and the cache; an
 /// interval archive of a live session — a seal that is not final — removes
-/// nothing (L-0A §4.3).
+/// nothing.
 #[test]
 fn the_final_archive_removes_claims_spool_and_sidecars_and_a_turn_seal_removes_nothing() {
     let checkout = tempfile::tempdir().unwrap();
@@ -490,7 +490,7 @@ fn a_cache_that_reads_active_after_completion_keeps_claims_spool_and_sidecars() 
     );
 }
 
-/// Q10: an interval archive lands with the anchor absent on an unborn HEAD,
+/// An interval archive lands with the anchor absent on an unborn HEAD,
 /// and `Ok(true)` means a real publication.
 #[test]
 fn an_interval_archive_lands_without_a_commit() {
@@ -567,10 +567,10 @@ fn a_second_drain_before_the_due_instant_spends_no_attempt() {
 }
 
 /// Two `SessionEnd`s for one session publish one delivery when their context
-/// is the same, and two when it changed (round 28). One condense lands; the
+/// is the same, and two when it changed. One condense lands; the
 /// changed-context delivery found after it carries no proof of its own, so it
-/// stays owed with its typed reason and spends no attempt (R1's legacy arm,
-/// until CFX-4 recovery admits it) — never a second checkpoint.
+/// stays owed with its typed reason and spends no attempt (the legacy arm of discharge by
+/// fact, until capture recovery admits it) — never a second checkpoint.
 #[test]
 fn two_session_ends_for_one_session_publish_one_condense_delivery() {
     let checkout = tempfile::tempdir().unwrap();
@@ -606,11 +606,11 @@ fn two_session_ends_for_one_session_publish_one_condense_delivery() {
     );
 }
 
-/// R1: a delivery of the final condense found again **after** it landed — the
+/// Discharge by fact: a delivery of the final condense found again **after** it landed — the
 /// same context republished, as a hook retried by its client would — is
 /// discharged by its fact: the exact-context completion and the checkpoint
 /// it names exist, so the file is removed, no second checkpoint is minted and
-/// no attempt is spent. (L-5's turn seal joins this rule with its own job.)
+/// no attempt is spent. (The turn seal joins this rule with its own job.)
 #[test]
 fn a_seal_or_condense_job_found_after_the_final_archive_is_discharged_by_its_fact() {
     let checkout = tempfile::tempdir().unwrap();

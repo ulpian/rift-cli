@@ -790,7 +790,7 @@ pub(crate) use platform::discharge::{discharge_original, Discharge};
     not(test),
     expect(
         unused_imports,
-        reason = "called by the CFX-4 recovery controller (eligibility → selection → retirement), not yet wired"
+        reason = "called by the capture-recovery controller (eligibility → selection → retirement), not yet wired"
     )
 )]
 pub(crate) use platform::{classify, preserve, DeliveryMatch, LivePin};

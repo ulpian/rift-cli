@@ -1,6 +1,6 @@
 //! The compactor's state carried from one turn-end seal to the next, so a
 //! turn compacts only the lines it added instead of the whole prefix twice
-//! (4.78 s on a 28 MB transcript, measured in L-5 slice 8).
+//! (measured at 4.78 s on a 28 MB transcript).
 //!
 //! A record can grow whenever a later line repeats its message id, so the
 //! carry keeps, for each record the last turn added or grew, where its raw

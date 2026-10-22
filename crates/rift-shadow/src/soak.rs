@@ -55,7 +55,7 @@
 //!   **This veto is PERMANENT and there is no supersede path.**
 //!   `verification_divergence` is append-only, so one recorded divergence ends
 //!   that projection's soak for good; the projection must be rebuilt from the
-//!   canonical git source to clear it. Measured before adopting the ruling:
+//!   canonical git source to clear it. Measured before adopting the strict reading:
 //!   **596 projections on the author's machine, zero divergence rows**, so the
 //!   strict reading strands no existing state.
 //!
@@ -415,7 +415,7 @@ mod tests {
     }
 
     /// **The counter restarts at zero without deleting a row.** The 39 rows on
-    /// the owner's projection are all clean and trailing, so the pre-ruling
+    /// the owner's projection are all clean and trailing, so the earlier
     /// reader already returned `soaked() == true`; scoping to witnessed runs is
     /// what resets it, and the rows stay exactly where append-only put them.
     #[tokio::test]

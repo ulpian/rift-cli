@@ -58,7 +58,7 @@ struct ArchiveCtx<'a> {
 /// Run one live archive. Capture never blocks the git op.
 ///
 /// `commit` is the anchor the shard names, `None` on an unborn HEAD: a
-/// checkpoint never needs a commit to land (Q78/Q81), and an anchorless shard
+/// checkpoint never needs a commit to land, and an anchorless shard
 /// omits the member rather than writing a sentinel.
 ///
 /// There is one archive path: the native one, which writes the shard itself.

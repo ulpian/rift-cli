@@ -50,7 +50,7 @@ fn an_admitted_interval_publication_failure_spends_three_attempts_then_parks() {
     let obstruction = repo.common_dir.join("refs/heads/rift/checkpoints/v1.lock");
     std::fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
     std::fs::write(&obstruction, b"publication-obstruction").unwrap();
-    // L-0A Q5 / design §4.1: the sweep's drain ignores the backoff, so each
+    // Since parking replaced removal, the sweep's drain ignores the backoff, so each
     // pass spends one attempt; the third parks the job — present AND parked,
     // with its backoff set — where it used to remove it.
     for attempt in 1..=crate::capture_queue::PARK_AFTER {

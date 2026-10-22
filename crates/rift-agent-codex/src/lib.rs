@@ -475,7 +475,7 @@ mod tests {
 ///
 /// The artifact is `fixtures/codex-hook-surface.rs`: repository, tag, path,
 /// git blob sha and a verbatim excerpt of
-/// `openai/codex@rust-v0.149.1:codex-rs/hooks/src/schema.rs`. The ruling makes
+/// `openai/codex@rust-v0.149.1:codex-rs/hooks/src/schema.rs`. Rift holds
 /// a supported agent's own surface authoritative for its verb table and admits
 /// that authority **only** through a committed artifact, so this module is the
 /// thing that turns a downloaded file into evidence: it parses the fixture and

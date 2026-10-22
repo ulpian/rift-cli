@@ -79,7 +79,7 @@ fn doctor_finalizes_the_crashed_session_and_leaves_its_live_neighbour() {
 
 /// `doctor --fix` on a repository with **no commit** finalizes the crashed
 /// session: the sweep archives with the anchor absent, so there is no
-/// deferral line at all (L-0A §1.1; Q78 — a condense never needs a commit).
+/// deferral line at all (a condense never needs a commit).
 ///
 /// This used to pin the opposite — `condense still owed … no commit to anchor
 /// to` — when an unborn HEAD was the one deferral cause left after the wrapper
@@ -186,7 +186,7 @@ fn a_failing_archive_with_a_commit_present_still_defers_the_close() {
          this is the guard the unborn-HEAD tests cannot reach"
     );
     // The failure is recorded as retry state on the job, not as a removal:
-    // one attempt spent, a backoff set, not yet parked (L-0A §4.1).
+    // one attempt spent, a backoff set, not yet parked.
     let (job, state) = only_condense_job(&repo);
     assert_eq!(job["attempts"], 1, "{job}");
     assert_eq!(state.attempts, 1);
@@ -251,7 +251,7 @@ fn walkdir_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// A condense never needs a commit, end to end through the real binary: a
 /// `SessionEnd` on an **unborn HEAD** closes the session at once, on a
 /// checkpoint under `refs/heads/rift/checkpoints/v1` whose metadata names no
-/// `commit`, and the user's HEAD stays unborn (L-0A §1.1, Q78/Q81).
+/// `commit`, and the user's HEAD stays unborn.
 ///
 /// This test used to pin the opposite: the unborn HEAD was, after the wrapper
 /// route died (2026-08-11), the one condition left under which the archive
@@ -359,7 +359,7 @@ fn a_session_end_that_archived_still_closes_immediately() {
 ///
 /// The condense is made deterministically unable to land by **holding the
 /// member's queue lock** from this test, rather than assumed unable. It used
-/// to be an unborn HEAD; a condense no longer needs a commit (L-0A §1.1), so
+/// to be an unborn HEAD; a condense no longer needs a commit, so
 /// the repository here stays unborn throughout and the retry lands an
 /// anchorless checkpoint — the new property, proven on the same fixture.
 #[test]
@@ -530,7 +530,7 @@ fn parked_lines(report: &str) -> Vec<String> {
 /// journal with `parked: true` and its backoff, the ordinary worker runs it
 /// no more, and report-only `rift doctor` names the parked session with its
 /// last note — twice, identically, publishing, renaming and moving nothing
-/// (R2; CFX-7: `peek_errors`, never `take_errors`).
+/// (a report reads through `peek_errors`, never `take_errors`).
 #[test]
 fn three_failures_park_the_job_and_doctor_names_it_twice_identically() {
     let tmp = tempfile::tempdir().unwrap();

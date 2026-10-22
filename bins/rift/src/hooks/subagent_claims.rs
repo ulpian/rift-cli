@@ -1,7 +1,7 @@
 //! The subagent claim marker: what an agent's `SubagentStop` said about where
 //! the subagent's own transcript is, kept until the archive reads it.
 //!
-//! Run state, not a record (Q37.3): one small file per subagent at
+//! Run state, not a record: one small file per subagent at
 //! `<sessions>/<session>.subagents/<agent_id>.json` in the member's run state, holding an
 //! address and a type and no fact the sealed shard will not hold. One file per
 //! subagent rather than a member of the session cache because subagents stop
