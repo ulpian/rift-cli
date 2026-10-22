@@ -394,7 +394,7 @@ mod tests {
     }
 
     /// A shard as read from the LEGACY checkpoint ref — the dialect whose
-    /// exemption from the native passes is invariant §1.5.
+    /// exemption from the native passes follows from read-compat being forever.
     pub(super) fn legacy_shard(id: &str, ordinal: u64) -> CheckpointShard {
         CheckpointShard {
             dialect: Dialect::Legacy,

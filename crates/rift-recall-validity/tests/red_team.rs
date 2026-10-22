@@ -52,7 +52,7 @@ const COORDINATOR_CORPUS: &str = include_str!("../fixtures/coordinator_row_corpu
 /// walk cannot succeed: this crate's `lib.rs` lives under `src/`, which is not
 /// an ancestor of `tests/`. proptest then prints a warning to stderr — invisible
 /// unless a test fails — falls back to `WithSource`, and reads and writes
-/// `tests/red_team.proptest-regressions`. The seed committed in round 3 to
+/// `tests/red_team.proptest-regressions`. A seed once committed to
 /// `proptest-regressions/red_team.txt` was therefore never loaded by anything: a
 /// regression file at a path the runner does not read is a decoration, and the
 /// claim "that seed is checked in" was true about the file and false about the
@@ -94,7 +94,7 @@ fn the_seed_file_is_the_one_the_runner_reads() {
         seeds.lines().any(|l| l.starts_with("cc ")),
         "the pinned seed file holds no seed: {SEED_FILE}"
     );
-    // Round 3's path, for THIS source file, must stay empty: a seed there is
+    // That old path, for THIS source file, must stay empty: a seed there is
     // read by nothing and would quietly re-become a decoration.
     let dead = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -557,7 +557,7 @@ fn the_alphabet_has_exactly_one_separator_the_normalizer_cannot_delete() {
 /// Pointed at the guard it replaced, it produces `system_:` in under a second:
 /// a spelling in no corpus row and in no reject report.
 ///
-/// **Round 4 closes the other half of that lesson.** The alphabet was
+/// **This test closes the other half of that lesson.** The alphabet was
 /// discovered through the guard; the vocabulary was a literal list of four
 /// words in this file — so the generator could only ever generate against the
 /// four words someone had typed here, and `human:` (this channel's own turn
@@ -581,7 +581,7 @@ fn the_alphabet_has_exactly_one_separator_the_normalizer_cannot_delete() {
 /// it. What failed instead was the corpus test over hostile manifest entries,
 /// on four append-only rows. So the two halves have
 /// different jobs and neither is redundant: derivation closes the *spelling*
-/// axis for every admitted word (round 4's ask), while the corpus and the
+/// axis for every admitted word, while the corpus and the
 /// client-family coverage test in `bins/rift/tests/role_dialect_coverage.rs`
 /// are what can fail when a word is missing or removed.
 #[test]

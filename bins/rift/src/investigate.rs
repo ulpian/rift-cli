@@ -379,10 +379,10 @@ fn is_wellformed_handle(h: &Handle) -> bool {
 ///
 /// # WHO CAN WRITE `file_revision`, measured rather than assumed
 ///
-/// Three review rounds turned on this arm and nobody had asked. Two greps and
-/// one hook call answered it, and the answer changes the security argument, so
-/// it is written HERE rather than left to be re-derived a fourth time. There
-/// are exactly **two** production writers of [`rift_store::record_file_revision`]:
+/// Who reaches this arm was long assumed, not measured. Two greps and one
+/// hook call answered it, and the answer changes the security argument, so
+/// it is written HERE rather than left to be re-derived. There are exactly
+/// **two** production writers of [`rift_store::record_file_revision`]:
 ///
 /// 1. `persist_commit_capture` in `crates/rift-shadow/src/commit_capture.rs` —
 ///    the commit path, one row per changed file at a commit boundary;

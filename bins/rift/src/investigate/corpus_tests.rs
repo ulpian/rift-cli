@@ -541,7 +541,7 @@ fn a_refused_finding_is_counted_and_never_silent() {
 /// asserted that it did.
 ///
 /// The settled trade, which the earlier version escalated instead: the seed's
-/// path is not rendered in the agent-facing set at all (§4a — a seed has no
+/// path is not rendered in the agent-facing set at all (a seed has no
 /// content address, so it cannot even be cited by one), and a finding cites its
 /// evidence by ordinal. **Resolution is unchanged** and still matches BOTH
 /// columns, which is why the two `resolves` assertions below are untouched:

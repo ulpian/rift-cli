@@ -44,8 +44,8 @@ const NETWORK_CRATES: [&str; 8] = [
     "tokio-tungstenite",
 ];
 
-/// No crate the `rift` binary links may declare a network client — invariant
-/// §1.4 ("no network in capture"), previously asserted only by argument.
+/// No crate the `rift` binary links may declare a network client — capture
+/// never touches the network — previously asserted only by argument.
 ///
 /// SCOPE, stated exactly (a mutation round rejected the universal claim this
 /// docstring used to make): the screen walks the IN-WORKSPACE dependency
@@ -120,7 +120,7 @@ fn network_crates_in_tree(listing: &str) -> Result<Vec<String>, String> {
 
 /// The DEFAULT-resolved normal-dependency graph of the two shipped binaries
 /// (`rift`, `rift-memd`) names no `NETWORK_CRATES` member — the external
-/// half of invariant §1.4 that the manifest screen cannot see, and the
+/// half of the no-network-in-capture rule that the manifest screen cannot see, and the
 /// executable form of the same rule. No workspace crate depends on an HTTP
 /// client today, and this is what reds if one is added behind an external
 /// intermediary the manifest screen cannot read.

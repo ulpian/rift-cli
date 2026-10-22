@@ -341,7 +341,7 @@ pub(crate) mod tests {
 
     proptest::proptest! {
         /// The keystone invariant: a mutated source can never resolve to Valid for
-        /// the original key (`05` §5.5).
+        /// the original key: a summary is bound to the bytes it was made from.
         ///
         /// `(?s)` is the first half; the NEAR-MISS is the second. Two
         /// independent noise draws differ almost everywhere, which is the easy

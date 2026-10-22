@@ -5,7 +5,8 @@
 //! into a Merkle *root*; checkpoints *chain* via `prev`. This is the math behind
 //! the database design's tamper-evidence rule and the engine `rift verify` runs. The
 //! construction is **SHA-256** for substrate byte-compatibility (the checkpoint
-//! `content_hash.txt` and the tamper chain are SHA-256 — see the dossier §3.6);
+//! `content_hash.txt` and the tamper chain were SHA-256 before Rift read them,
+//! and a different digest would break every comparison against them);
 //! `blake3` is deliberately *not* used here.
 //!
 //! Domain separation (`0x00` leaves, `0x01` internal nodes, `0x02` empty root,

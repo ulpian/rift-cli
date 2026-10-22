@@ -440,7 +440,8 @@ pub(crate) fn gate_step(
 /// a small JSON file whose `current_turn_ordinal` a prompt submission advances
 /// at the turn boundary, well before any tool call of that turn reaches this
 /// gate. Reading it is one `read` call — no store, no tokenizer, no
-/// projection, which is what GOAL §2.5 asks of everything on this path.
+/// projection: nothing a hook decides with may open a store or load the
+/// tokenizer, and `gate-intercept` holds this path to that.
 ///
 /// A missing, unreadable or not-yet-written cache is turn 0, the number every
 /// line carried before this: the direction of the miss is a lost distinction

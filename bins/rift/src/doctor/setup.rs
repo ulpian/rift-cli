@@ -198,8 +198,8 @@ fn sibling_tool_handlers(path: &Path) -> usize {
 /// * *checkpoints* come off the substrate, and `refs/heads/rift/checkpoints/v1`
 ///   lives in the common dir: every member of the family reads the same count,
 ///   which is why a member reporting `0` was always evidence of a broken
-///   identity rather than of an empty repository (RESEARCH §1.4 measured
-///   exactly that: 0 from a side worktree while the family's refs held 134);
+///   identity rather than of an empty repository (measured exactly
+///   that: 0 from a side worktree while the family's refs held 134);
 /// * *recall ingest* opens `recall_db`, resolved through the family manifest,
 ///   so it is one file for the repository;
 /// * *integrations* are per checkout on purpose: hook wiring is written into

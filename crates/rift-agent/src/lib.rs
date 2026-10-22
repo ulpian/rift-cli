@@ -1090,7 +1090,7 @@ pub trait AgentAdapter: Send + Sync {
 ///
 /// Deterministic over identity-defining fields (not wall-clock, not receipt
 /// order), so the *same* logical event always yields the *same* key regardless of
-/// when/how often it's delivered — making re-ingest a true no-op (§4.7). The
+/// when/how often it's delivered — making re-ingest a true no-op. The
 /// `turn_ordinal` separates the same hook fired in different turns; the
 /// `event_ordinal` separates the fan-out within one hook (e.g. `ToolCall` then
 /// `FileEdit`); the `payload_sha256` separates distinct payloads in the same slot.
