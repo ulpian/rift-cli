@@ -163,11 +163,19 @@ name from the other side (`hook_runtime.rs`, upstream lines 229-231):
 **What Rift takes from this grammar, and what it refuses to take.** One hunk
 header names one file, and the marker is a fixed prefix at the start of a line,
 so a patch carrying exactly one `*** Add File: ` or `*** Update File: ` header
-and no `*** Move to: ` names exactly one path — that path is read, and nothing
-else is. The hunk bodies are not read: a `change` block's `+`/`-`/` ` lines are
-a diff against bytes Rift does not have, and turning them into an edit site
-would be arithmetic on line numbers nobody stated. So a patch is recorded as
-*this file changed, site unknown*, which is exactly what it is.
+and no `*** Move to: ` names exactly one path — that path is read.
+
+An update's `change` lines are read for one thing only: the new side of each
+chunk. A chunk runs from one `change_context` line to the next (or to
+`eof_line`), and its context and `+` lines, in order, are the text that chunk
+leaves in the file; its context and `-` lines are what it took out. No line
+number is taken from the patch — the patch states none. The new side is looked
+for in the bytes on disk after the patch landed, under the same exact-match
+rule a single replacement is held to, and a chunk that cannot be found exactly
+once, or that overlaps another, leaves the whole patch recorded as *this file
+changed, site unknown*. A line in an update body that is none of the grammar's
+forms does the same, and so does an add section: its whole new file is not
+read here.
 
 A patch that moves a file, or touches two, is not recorded at all: one request
 carries one path, and the safe direction when a payload carries more is to say
@@ -198,7 +206,7 @@ A row exists only because an excerpt above pins it, and the
 same set in both directions.
 
 ```rift-tool-field-rows
-tool=apply_patch shape=edit kind=other command=command path=from-a-single-file-header
+tool=apply_patch shape=edit kind=regions command=command path=from-a-single-file-header regions=update-chunks
 tool=Bash shape=shell command=command grammar=composed-read-and-listing
 ```
 

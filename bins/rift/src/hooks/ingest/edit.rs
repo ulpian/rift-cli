@@ -631,8 +631,9 @@ mod edit_record_tests {
         assert!(!*full, "nothing here says this window ever read the file");
     }
 
-    /// Several edits in one call: the change is recorded, because the old
-    /// bytes must stop counting, and no coverage follows from it.
+    /// A call whose payload names no replacement Rift can read: the change is
+    /// recorded, because the old bytes must stop counting, and no coverage
+    /// follows from it.
     #[test]
     fn a_change_whose_places_do_not_follow_from_its_payload_grants_no_coverage() {
         let tmp = checkout();
@@ -653,6 +654,146 @@ mod edit_record_tests {
         };
         assert!(sites.is_empty());
         assert!(!*full);
+    }
+
+    /// A one-file patch, as the pinned argument carries one, from a session
+    /// standing in `cwd`.
+    fn patch_of(cwd: &Path, patch: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tool_name": "apply_patch",
+            "cwd": cwd.display().to_string(),
+            "tool_input": { "command": patch },
+        })
+    }
+
+    /// The re-read of a whole file, decided as a family whose edit result is
+    /// pinned would decide it, over what the window journal now holds.
+    fn re_read(
+        work_tree: &Path,
+        session: &str,
+        path: &str,
+    ) -> rift_agent::window_journal::Decision {
+        let journal = crate::window_journal::WindowJournal::open(work_tree, session, None)
+            .load()
+            .journal;
+        let text = std::fs::read_to_string(work_tree.join(path)).expect("the file");
+        let total_lines = u32::try_from(text.lines().count()).expect("a small file");
+        let read = rift_agent::window_journal::ResolvedRead {
+            path: path.to_owned(),
+            hash: rift_agent::content_sha256(text.as_bytes()),
+            range: Interval::new(1, total_lines).expect("a run"),
+            total_lines,
+            channel: rift_agent::ReadChannel::Tool,
+        };
+        rift_agent::window_journal::decide(
+            &read,
+            &journal,
+            rift_agent::window_journal::Mode::Enforce,
+            Some(rift_agent::respond::Channel::DenyWithReason {
+                reason_field: "permissionDecisionReason",
+                confirmed: true,
+            }),
+            rift_agent::window_journal::EditEcho::Pinned,
+            64,
+            // A short fixture file stands for a long one: the floor that keeps
+            // short slices allowed is its own gate, tested on its own.
+            rift_agent::window_journal::Limits {
+                min_slice_lines: 1,
+                ..rift_agent::window_journal::Limits::default()
+            },
+        )
+    }
+
+    /// ★ A patch of two chunks that landed is two sites, and the window that
+    /// held the file before holds it after: a re-read is answered exactly as a
+    /// lone edit's would be, with where the file changed.
+    #[test]
+    fn a_patch_whose_chunks_landed_covers_each_and_declines_a_re_read() {
+        let tmp = checkout();
+        let before = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\n";
+        read_in_full(tmp.path(), "s-20", "two.rs", before);
+        std::fs::write(
+            tmp.path().join("two.rs"),
+            "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nK\nK2\nm\nn\no\np\n",
+        )
+        .expect("the patch lands");
+        let patch = "*** Begin Patch\n*** Update File: two.rs\n@@\n a\n-b\n+B\n c\n@@\n j\n-k\n+K\n+K2\n-l\n m\n*** End Patch\n";
+        record(
+            &hook("codex", "PostToolUse", "s-20", patch_of(tmp.path(), patch)),
+            tmp.path(),
+        );
+        let lines = lines_of(tmp.path(), "s-20");
+        let [_, Line::Edit {
+            sites, shift, full, ..
+        }] = lines.as_slice()
+        else {
+            panic!("a read and the change that followed it, got {lines:?}");
+        };
+        assert_eq!(
+            sites.as_slice(),
+            [
+                Interval::new(1, 3).expect("a run"),
+                Interval::new(10, 13).expect("a run"),
+            ]
+        );
+        assert_eq!(*shift, 0);
+        assert!(
+            *full,
+            "it held every line before, and it wrote every difference"
+        );
+        assert!(matches!(
+            re_read(tmp.path(), "s-20", "two.rs"),
+            rift_agent::window_journal::Decision::Deny(
+                rift_agent::window_journal::DenyShape::Delta { .. }
+            )
+        ));
+
+        // The same file, the same first change, made by a lone edit.
+        read_in_full(tmp.path(), "s-21", "one.rs", before);
+        let one = tmp.path().join("one.rs");
+        std::fs::write(&one, "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\n")
+            .expect("the edit lands");
+        record(
+            &hook(
+                "claude-code",
+                "PostToolUse",
+                "s-21",
+                edit_of(&one, "b\n", "B\n", false),
+            ),
+            tmp.path(),
+        );
+        assert!(matches!(
+            re_read(tmp.path(), "s-21", "one.rs"),
+            rift_agent::window_journal::Decision::Deny(
+                rift_agent::window_journal::DenyShape::Delta { .. }
+            )
+        ));
+    }
+
+    /// ★ A patch whose bytes on disk are not what its chunks say — one chunk
+    /// failed, or something rewrote the file after — claims nothing, and the
+    /// re-read runs.
+    #[test]
+    fn a_patch_that_did_not_land_as_written_grants_no_coverage() {
+        let tmp = checkout();
+        read_in_full(tmp.path(), "s-22", "half.rs", "a\nb\nc\nd\n");
+        std::fs::write(tmp.path().join("half.rs"), "a\nB\nc\nd\n").expect("half of it");
+        let patch =
+            "*** Begin Patch\n*** Update File: half.rs\n@@\n-b\n+B\n@@\n-d\n+D\n*** End Patch\n";
+        record(
+            &hook("codex", "PostToolUse", "s-22", patch_of(tmp.path(), patch)),
+            tmp.path(),
+        );
+        let lines = lines_of(tmp.path(), "s-22");
+        let [_, Line::Edit { sites, full, .. }] = lines.as_slice() else {
+            panic!("a read and the change that followed it, got {lines:?}");
+        };
+        assert!(sites.is_empty());
+        assert!(!*full);
+        assert_eq!(
+            re_read(tmp.path(), "s-22", "half.rs"),
+            rift_agent::window_journal::Decision::Allow
+        );
     }
 
     /// A call that changed nothing leaves nothing: a tool that failed and a
