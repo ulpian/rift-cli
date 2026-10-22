@@ -2,7 +2,8 @@
 //! network I/O, one leg per concern, each leg a line and a JSON object.
 //!
 //! The legs are grouped by what they read: `setup` the repository's own
-//! configuration and the memory chain, `capture` the checkpoint record
+//! configuration, a setup plan left behind and the memory chain, `capture`
+//! the checkpoint record
 //! against its projection, `stores` the caches beside the projection,
 //! `git_hooks` the hooks git runs and the binary they name, `health` whether
 //! each wired agent's capture is arriving, `worktrees` the family's members,
@@ -147,6 +148,7 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("hook_composition", compose::doctor_hook_composition(root));
     report.leg("window_journals", doctor_window_journals(root));
     report.leg("config_load", doctor_config_load(root));
+    report.leg("setup_plan", setup::doctor_stale_setup_plan(root));
     report.leg("retired_config_keys", doctor_retired_config_keys(root));
     report.leg("document_store", doctor_document_store(root));
     report.leg("basis_store", doctor_basis_store(root));
