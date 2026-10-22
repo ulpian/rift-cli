@@ -201,7 +201,9 @@ reviewable adjacency list.
   and checkpoint carries worktree provenance (`session_worktree`,
   `checkpoint_worktree`); recall serves members through branch containment, so
   savings compound across members — including subagents in temporary
-  worktrees. Adoption is explicit (`rift worktree adopt`, or the
+  worktrees. Never run `rift verify` (or any whole-store command) against the
+  live rift-cli store or another multi-GB family from an agent loop: prove it
+  on the unit/e2e fixture repositories, which finish in under a second. Adoption is explicit (`rift worktree adopt`, or the
   `post-checkout` hook); nothing re-mints a family identity automatically.
   Minting stays in one chokepoint so a second call site cannot fork a family,
   and every durable state root is keyed by family rather than by checkout path —
@@ -286,3 +288,17 @@ reviewers enforce:
   `incremental/` caches, and stale queue locks. Prefer focused `cargo test -p
   <crate>` checks while iterating and serialize full `./skills.sh check` runs
   across worktrees.
+- **Token & subagent hygiene (hard prohibitions):**
+  1. **Never poll a background task or log file across tool turns:** never issue
+     repeated `cat`/`tail`/`grep` Bash calls to check whether a background command
+     finished. Run the command synchronously or block inside a *single* Bash tool
+     invocation (`while kill -0 "$PID" 2>/dev/null; do sleep 30; done; tail -n 30 "$LOG"`).
+  2. **Never bypass the native `Read` tool with `Bash` (`sed -n`, `cat`, `head`, `tail`, `awk`):**
+     always read source files through the harness's `Read` tool so Rift's
+     `PreToolUse` read gate can intercept, deduplicate, and bound the read.
+  3. **Retire subagents before their context balloons (≤ 200K token ceiling):**
+     `/compact` only compacts the top-level session and never compacts subagents.
+     Do not reuse long-lived subagents via `SendMessage` across multiple briefs;
+     spawn a fresh subagent per brief using `claude-opus-5-5` (`"opus"`) at
+     `medium` effort and `/compact` or rotate the coordinator session before it
+     exceeds 200K tokens.
