@@ -44,12 +44,11 @@ fn a_read_piped_into_a_filter_is_a_filtered_read_of_that_file() {
     }
 }
 
-/// **Two narrowings, or one over several reads, are filtered too.**
+/// **A narrowing over several reads is filtered too.**
 ///
 /// A narrowing over files `cat` joined cuts the joined run, a run of
-/// neither file; two narrowings compose into a range this slice does not
-/// name. Each file is still counted, which is the denominator the census
-/// was missing.
+/// neither file; so does a stack whose counts place no run. Each file is
+/// still counted, which is the denominator the census was missing.
 #[test]
 fn a_narrowing_the_arithmetic_cannot_place_leaves_each_read_filtered() {
     let both = ShellCall::Read(vec![
@@ -64,8 +63,7 @@ fn a_narrowing_the_arithmetic_cannot_place_leaves_each_read_filtered() {
         assert_eq!(recognise(command).as_ref(), Some(&both), "{command}");
     }
     for command in [
-        "cat src/lib.rs | head -n 20 | tail -n 5",
-        "cat src/lib.rs | sed -n '1,5p' | head -n 2",
+        "cat src/lib.rs | tail -n 20 | head -n 5",
         "awk 'NR>=1 && NR<=5' src/lib.rs | grep x",
     ] {
         assert_eq!(
