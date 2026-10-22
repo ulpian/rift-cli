@@ -112,6 +112,17 @@ pub fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+/// Whether `path` names an entry of `hooks_dir` itself.
+///
+/// Only the directories are canonicalized, never the entry: a hook entry is a
+/// link to the binary, so resolving it would answer with the binary's own
+/// directory and let exactly this path through.
+pub(super) fn is_in_hooks_dir(path: &Path, hooks_dir: &Path) -> bool {
+    let canonical = |dir: &Path| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    path.parent()
+        .is_some_and(|parent| canonical(parent) == canonical(hooks_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

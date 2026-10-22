@@ -618,6 +618,26 @@ mod tests {
         assert_eq!(history, vec!["/opt/rift/rift"]);
     }
 
+    /// On macOS a hook's `current_exe()` is its own `.git/hooks/<name>` link.
+    /// Followed as the binary, it pointed every hook at `post-checkout` and
+    /// `post-checkout` at itself; the hook follows the file the link names.
+    #[cfg(unix)]
+    #[test]
+    fn post_checkout_entered_through_its_hook_link_keeps_the_hooks_on_the_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, member) = family_with_member(tmp.path());
+        let bin = binary_at(&tmp.path().join("opt/release"));
+        let paths = rift_git::discover(&member).unwrap();
+        crate::hooks::follow_from_hook(&paths, &release(bin.clone())).unwrap();
+        let entry = main.join(".git/hooks/post-checkout");
+
+        let line = crate::hooks::follow_from_hook(&paths, &release(entry.clone()));
+
+        assert_eq!(line, None, "the link names the binary of record already");
+        assert_eq!(record_in(&main).path(), bin);
+        assert_eq!(std::fs::read_link(&entry).unwrap(), bin);
+    }
+
     /// The symmetry that rule requires: `disable` from ANY member removes the
     /// wiring from every member, so an agent cannot stay live in a worktree
     /// nobody is looking at.

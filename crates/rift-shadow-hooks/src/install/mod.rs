@@ -57,9 +57,10 @@ mod write;
 
 use std::path::PathBuf;
 
-use rift_core::Result;
+use rift_core::{Result, RiftError};
 
 use entry::{hook_entry, link_target_exists, HookEntry};
+use screen::is_in_hooks_dir;
 use sweep::sweep_retired_hooks;
 use write::write_hooks;
 
@@ -327,7 +328,9 @@ impl core::fmt::Display for RefusedBinary {
 /// # Errors
 /// [`RiftError::Io`](rift_core::RiftError::Io) on a filesystem failure —
 /// including the never-clobber refusal when a user hook cannot be chained aside
-/// because its `.rift-chained` name is taken.
+/// because its `.rift-chained` name is taken — and
+/// [`RiftError::Validity`](rift_core::RiftError::Validity) when `cfg.rift_bin`
+/// lies in the hooks directory itself, under every policy.
 pub fn install_hooks_with(
     cfg: &HookInstall,
     policy: HookInstallPolicy,
@@ -355,6 +358,18 @@ pub fn install_hooks_with(
                 ..HookInstallReport::default()
             });
         }
+    }
+
+    // No flag waives this one: a hook pointed at an entry of its own hooks
+    // directory runs itself, git skips the loop silently, and capture stops —
+    // what a macOS `post-checkout` did on 2026-10-22, recording the
+    // `.git/hooks/post-checkout` its `current_exe()` named as the binary.
+    if is_in_hooks_dir(&cfg.rift_bin, &dir) {
+        return Err(RiftError::validity(format!(
+            "{} is inside the hooks directory {}; a hook may not run another hook as Rift",
+            cfg.rift_bin.display(),
+            dir.display()
+        )));
     }
 
     if !policy.allows_transient() {
@@ -522,6 +537,34 @@ mod tests {
         let record = read_binary_of_record(&tmp.path().join(".git/rift-family")).unwrap();
         assert_eq!(record.path(), installed);
         assert!(record.history.is_empty(), "keeping supersedes nothing");
+    }
+
+    /// The 2026-10-22 loop: a hook entry offered as the binary is refused
+    /// under every policy, `--allow-transient` included, and nothing moves.
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_entry_is_never_installed_as_the_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed = fake_binary(&tmp.path().join("opt"), "rift");
+        install_at(tmp.path(), &installed, repoint());
+        let entry = tmp.path().join(".git/hooks/post-checkout");
+        // A healthy family keeps its hooks before any binary is looked at, so
+        // one missing hook makes the side-effect policy reach the screen too.
+        std::fs::remove_file(tmp.path().join(".git/hooks/commit-msg")).unwrap();
+
+        for policy in [repoint(), keep(true)] {
+            let mut cfg = cfg(tmp.path(), None);
+            cfg.rift_bin = entry.clone();
+            let error = install_hooks_with(&cfg, policy).unwrap_err();
+
+            assert!(
+                error.to_string().contains("inside the hooks directory"),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read_link(&entry).unwrap(), installed);
+        let record = read_binary_of_record(&tmp.path().join(".git/rift-family")).unwrap();
+        assert_eq!(record.path(), installed);
     }
 
     /// ★ `post-checkout` is installed by this chokepoint and nothing else,

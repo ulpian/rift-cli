@@ -240,11 +240,33 @@ pub(crate) fn follow_running_binary(work_tree: &Path, running: &RunningBinary) -
 /// binary it runs as is the family's hook binary, wherever the checkout is, so
 /// the record follows it before the hook wires the member from the record. The
 /// transient screen still refuses a binary that lives inside a member.
+///
+/// A hook enters through its own `.git/hooks/<name>` link, and macOS's
+/// `current_exe()` keeps that spelling. The entry is never the binary — moving
+/// the record to it pointed every hook at `post-checkout` and `post-checkout`
+/// at itself — so the binary followed is the one the link names. One link is
+/// read, not the whole path canonicalized: the target is the spelling the
+/// install wrote, and a canonical one (a Homebrew `Cellar/<version>/`) is the
+/// path an upgrade deletes.
 pub(crate) fn follow_from_hook(
     paths: &rift_git::RepoPaths,
     running: &RunningBinary,
 ) -> Option<String> {
-    follow_in_family(paths, &paths.work_tree, running)
+    let resolved = RunningBinary {
+        path: hook_link_target(&running.path).unwrap_or_else(|| running.path.clone()),
+        screen: running.screen,
+    };
+    follow_in_family(paths, &paths.work_tree, &resolved)
+}
+
+/// The binary a direct hook link names, `None` when `entry` is not a link (a
+/// shim execs the binary by its own path).
+fn hook_link_target(entry: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(entry).ok()?;
+    match entry.parent() {
+        Some(dir) if target.is_relative() => Some(dir.join(target)),
+        _ => Some(target),
+    }
 }
 
 /// The move itself, once the caller has decided this vantage may make it.
@@ -256,7 +278,9 @@ fn follow_in_family(
     let sites = family_sites(&paths.common_dir);
     let record = rift_shadow::hooks::read_binary_of_record(&sites.dir)?;
     let old = record.path();
-    if old == running.path {
+    // Two spellings of one file — `~/.local/bin/rift` and the build it links
+    // to — are one binary of record, not a move.
+    if same_file(old, &running.path) {
         return None;
     }
     if let Some(why) = never_of_record(running, &sites) {
@@ -292,8 +316,13 @@ fn follow_in_family(
 /// Whether this checkout is a linked member rather than the main work tree:
 /// only a linked member has a git dir apart from the common dir.
 fn is_linked_member(paths: &rift_git::RepoPaths) -> bool {
+    !same_file(&paths.git_dir, &paths.common_dir)
+}
+
+/// Whether two paths name one file, compared canonically where they resolve.
+fn same_file(a: &Path, b: &Path) -> bool {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    canonical(&paths.git_dir) != canonical(&paths.common_dir)
+    canonical(a) == canonical(b)
 }
 
 /// Why `running` may not become the family's binary of record, as a clause.
