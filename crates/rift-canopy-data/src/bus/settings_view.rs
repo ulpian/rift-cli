@@ -22,6 +22,7 @@ use rift_store::{projection_db_for_family_under, resolve_cache_root};
 use crate::feeds::project_family;
 
 use super::project_read::project_remedies;
+use super::setup_plan::{pending_setup_plan, setup_left_pending};
 
 /// The repository's effective configuration as the settings page reads it.
 ///
@@ -110,8 +111,12 @@ pub fn project_settings_view_under(root: &Path, dir: &Path) -> ProjectSettingsVi
         },
     );
     let mut integrations = native_settings_integrations(root, dir, initialization);
-    if let Some(plan) = pending_setup_plan(dir) {
-        restore_pending_choices(&plan, &mut settings, &mut integrations);
+    // Only a setup the predicate says is unfinished resumes from its plan; a
+    // plan left beside a set-up family pre-fills nothing.
+    if initialization == ProjectInitialization::SetupIncomplete {
+        if let Some(plan) = pending_setup_plan(dir) {
+            restore_pending_choices(&plan, &mut settings, &mut integrations);
+        }
     }
     ProjectSettingsView {
         path,
@@ -210,16 +215,6 @@ const fn setting_plan_key(id: ProjectSettingId) -> &'static str {
     }
 }
 
-fn pending_setup_plan(dir: &Path) -> Option<serde_json::Value> {
-    let bytes = std::fs::read(dir.join(".rift/state/project-setup.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    (value
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        == Some(1))
-    .then_some(value)
-}
-
 fn project_setting_rows(
     effective: Option<&rift_config::EffectiveConfig>,
     initialization: ProjectInitialization,
@@ -303,10 +298,11 @@ fn lever_row(
 /// carries one — and read as initialized, it offered no setup to the one
 /// repository that needed it most.
 fn project_initialization(root: &Path, dir: &Path) -> ProjectInitialization {
-    if dir.join(".rift/state/project-setup.json").is_file() {
+    let family = project_family(dir);
+    if setup_left_pending(root, dir, family.as_ref()) {
         return ProjectInitialization::SetupIncomplete;
     }
-    let Some(family) = project_family(dir) else {
+    let Some(family) = family else {
         return if rift_git::discover(dir).is_ok() {
             // A repository whose identity cannot be resolved from here reads
             // like one with no projection, because it has none to key.

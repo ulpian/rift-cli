@@ -26,6 +26,7 @@ use crate::store::runtime;
 
 use super::now_ms;
 use super::settings_view::{family_dir, hooks_installed_here, project_settings_view_under};
+use super::setup_plan::setup_left_pending;
 use super::watermark::Watermark;
 
 /// What one read of a project yields: its live status, its `{cursor, epoch}`
@@ -273,17 +274,18 @@ pub(super) fn read_project(root: &Path, path: &str) -> ProjectRead {
             None,
         );
     }
-    if dir.join(".rift/state/project-setup.json").is_file() {
+    // The repository family's identity: a card opened on a linked worktree
+    // reads the family's store, and a directory that is not a repository has
+    // no family, which reads exactly like no projection.
+    let family = project_family(&dir);
+    // A setup plan decides only where the family predicate fails; one left
+    // beside a set-up family is the doctor's to name, not the card's.
+    if setup_left_pending(root, &dir, family.as_ref()) {
         return ProjectRead::plain(ProjectStatus::SetupIncomplete, None);
     }
     let family_read = read_family(&dir, now_ms);
     let sessions = family_read.sessions;
     let provisioned = family_read.provisioned;
-    // The projection is the repository family's (family identity): a card opened on
-    // a linked worktree reads the family's store, and a directory that is not a
-    // repository has no family — which reads exactly like no projection,
-    // because family identity mints no per-path store to give it one.
-    let family = project_family(&dir);
     let db = family
         .as_ref()
         .map(|family| projection_db_for_family_under(root, family));
