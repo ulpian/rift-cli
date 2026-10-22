@@ -305,7 +305,8 @@ defensible reading. No file means the defaults.
 
 Nothing below is configuration. *Family state* (hooks, minted identity, push
 queue) lives in the git common directory, shared by every checkout;
-*per-checkout progress* in the git directory; *working-tree state* in `.rift/`:
+*per-checkout progress* under the family's cache root, one run directory per
+member; *working-tree state* in `.rift/`:
 policy (yours) and run markers (Rift's)
 ([09-worktrees-and-families.md](09-worktrees-and-families.md)).
 
@@ -326,11 +327,12 @@ Hook gates ask only for the projection: a running hook is its own proof.
 | `.rift/.gitignore` | Ignores `state/` and `agents/`, nothing else. Written only where none exists; an existing file or symlink is never rewritten or followed. | Yes — `init` rewrites it. |
 | `.rift/agents/` | One capture descriptor per wired agent, plus recall install and probe records. | Yes — `rift enable`. |
 | `.rift/state/` | `native-integrations.json` (ownership fingerprints), `project-setup.json`, `adoption.json`, `injection/` and `manifest/` (per-window markers), `search/index.bin` (path index). | Yes — each costs a regeneration; without the integrations file fragments read as unowned. |
-| `.rift/state/reads/` | One append-only file per window: ranges handed, declines, write hashes, evictions. Never content. | Yes — costs declines, never a wrong decision. |
+| `.rift/state/reads/` | One append-only file per window: ranges handed, declines, write hashes, evictions; beside it `<key>.calls.jsonl`, whether each decline was planned, emitted and applied. Never content. | Yes — costs declines, never a wrong decision. |
 | `.rift/state/doc/`, `doc/w/<window>/`, `search/w/<window>/` | This member's view of the family's sidecars; what a window was told about documents or did about searches. | Yes — at most one repeated redirect, bound or answer. |
-| `~/.cache/rift/<family-id>/run/<member>/sessions/` | Session caches, ownership markers, usage and transcript sidecars, subagent claims. `<member>` is the checkout's 12-hex worktree token. An older binary kept these in `<git_dir>/rift-sessions/`; a newer one moves them on its first run. | Yes; live sessions lose attribution context. |
-| `~/.cache/rift/<family-id>/run/<member>/capture-queue/`, `agent-queue/` | Commits awaiting condensing; agent-hook events for the detached worker (formerly `<git_dir>/rift-capture-queue/`, `rift-agent-queue/`). | No — pending capture work. |
+| `~/.cache/rift/<family-id>/run/<member>/sessions/` | Session caches, ownership markers, usage, transcript and turn-seal sidecars, subagent claims. `<member>` is the checkout's 12-hex worktree token. A `<git_dir>/rift-sessions/` an older binary wrote is read for names the new tree lacks and moved under the checkout's lock. | Yes; live sessions lose attribution context. |
+| `~/.cache/rift/<family-id>/run/<member>/capture-queue/`, `agent-queue/` | Commits awaiting condensing; agent-hook jobs and markers for the detached worker (read through the same fallback from `<git_dir>/rift-capture-queue/`, `rift-agent-queue/`). | No — pending capture work. |
 | `<common_dir>/hooks/` | The five git hooks, as links, plus markers. | No — capture stops. |
+| `<git_dir>/.rift-capture-recovery.hold`, `.request` | A running recovery's hold, and its request that workers yield ([03](03-capture.md) §3.10). | No — `rift doctor --fix` releases them. |
 | `<common_dir>/rift-family/` | `family.json` (minted identity: **never hand-edit**), `family.history.jsonl` (the audit trail), `binary.json` (the hooks' binary), `savings-window.json` (the `rift savings reset` boundary). | Only `binary.json` and `savings-window.json`. |
 | `<common_dir>/rift-push-queue/` | References waiting to be shipped. | No. |
 | `<common_dir>/rift-family/doc/<key>.md` | Converted-document sidecars, one per (bytes, converter version, output caps). | Yes — collected at `[doc] ttl_days`. |

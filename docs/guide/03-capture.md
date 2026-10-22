@@ -74,16 +74,14 @@ resolve**, and removes only entries Rift wrote under a name it no longer install
 ### Keep-if-healthy, and the binary of record
 
 Git resolves hooks through the *common* directory, so one install covers every
-worktree — and any worktree's `rift init` could re-point them all at whatever binary
-that process was, such as a deleted temporary build. Git skips a dangling hook
-**silently**, so capture could stop for days without an error line. So
-**keep-if-healthy is the default** for any install that is a side effect of something
-else: only a dangling link or vanished binary re-points anything, and the repair is
-reported. **The binary of record** is a small file in the family's directory naming the
-binary, when and by what act, with superseded records kept. Changing it is explicit,
-`rift hook install --repoint`; a binary under a temporary or test-build directory or a
-linked worktree is refused without `--allow-transient`, because all vanish while the
-repository lives on.
+worktree, and git skips a dangling hook **silently**: capture could stop for days
+without an error line. So an install that is a side effect of something else keeps
+healthy hooks, repairing only a dangling link or vanished binary, out loud. **The
+binary of record** (`binary.json`) names the hooks' binary, when and by what act. It
+moves only with the hooks, to a lasting build: `rift init`, `rift enable` and `rift
+doctor --fix` in the main work tree follow the running binary, a debug or transient
+build never ([09](09-worktrees-and-families.md) §9.7 has the rules), and `rift hook
+install --repoint` moves both on purpose.
 
 ---
 
@@ -211,7 +209,7 @@ trigger is **its own append-only row**, `refused-<trigger>`, because otherwise a
 refusal can hide a working session while the receipt reads "recorded".
 
 **The session cache is transient.** The phase is mirrored into
-`<git dir>/rift-sessions/<id>.json`; the transition rows are the truth. Writes use a
+the member's run state, `sessions/<id>.json` ([09](09-worktrees-and-families.md) §9.5); the transition rows are the truth. Writes use a
 per-writer temp file renamed over the cache, because a subagent shares its parent's
 session id and a shared temp would be renamed half written. A cache that still does not
 parse is renamed to `<id>.json.torn-<ms>` and the session re-opened as a
@@ -227,7 +225,7 @@ member a worker holds is left to that worker, since a sweep beside it would be a
 archiver of the same commit. Sweeping early is safe because no phase is a trap.
 
 `rift doctor` is the alarm and the manual arm (*sweepable* past the floor, **STUCK**
-past 24 hours; `--fix` sweeps under the same lock — [05](05-ledger-and-verification.md)).
+past 24 hours; `--fix` sweeps under the same lock — §3.15).
 A deferral carries one cause from a closed vocabulary (`worker-holds-lock`,
 `no-idle-edge`, `archive-produced-nothing`, `done-mark-failed`; the retired
 `no-commit-to-anchor` still reads from an old report, since a condense no longer
@@ -251,11 +249,12 @@ thinking signatures masked
 and not byte-identity, is the standard).
 A turn-end checkpoint can seal only the lines past the previous turn's cut, as one more part under `transcript.segments/`, and one resolver joins the parts back into the whole transcript every reader and every hash sees.
 
-An optional `turn_boundary_gaps.jsonl` records a checked repository/member recovery
-assertion. A genuine checkpoint session carries it; other subject session digests
-create no sessions, usage, lifecycle or attribution facts. Its commitments describe
-source provenance, not destination paths, possession of old bytes or permission to
-retire queued work. It does not restore missing historical observations.
+A checkpoint written by capture recovery (§3.10) also carries
+`turn_boundary_gaps.jsonl`: the turn boundaries this member missed, asserted as
+missing, never as authorship. Only its carrier session becomes a session; the
+other sessions it names create no session, usage, lifecycle or attribution facts.
+Its commitments describe source provenance, not destination paths, possession of
+old bytes or permission to retire queued work, and it restores no observation.
 
 **The compaction is deterministic, not a summary**: in the *compact* transcript
 only, tool calls reduce to identifiers and tool results keep their shape and lose
@@ -316,7 +315,10 @@ The **lag** is the live transcript's length past that read.
 At the session end the tail is sealed the same way, then compared once with the whole transcript sealed in one pass.
 Equal bytes keep the parts and the shard records `reconciled: true`; any difference makes the whole seal the final body, recorded as `reconciled: false` with `supersedes_segments: true` and named `segment-mismatch`.
 
-The cost is the worker's, not the hook's: on a transcript near 30 MB a turn end still spends seconds of background CPU reading back and hashing the whole document, since every leaf and id is computed over it.
+The sidecar also carries the turn end's scans of the main transcript — the spill addresses its results name and the lines recording spooled originals — up to a line boundary, with a digest of the last bytes before it, so the next turn end scans only the bytes past that frontier and joins the two.
+The carry is trusted only when the file still ends that boundary with the same bytes, the seal extended an unbroken chain, and no original was spooled that the earlier scan did not look for; anything else scans the whole file.
+Earlier parts are checked against the blob oids their tree records, never re-hashed against a leaf of themselves.
+The cost is the worker's, not the hook's, and what still grows with the session is hashing the whole document, which every leaf and id is computed over.
 
 ---
 
@@ -357,7 +359,7 @@ A turn's token usage lives in the agent's transcript, and the "turn over" hook f
 while the agent is *still writing* it, so reading then would durably record a
 truncated turn. The turn-end hook therefore never reads its own turn: it is settled by
 the next hook for that session, from a persisted byte offset in a sidecar
-(`<git dir>/rift-sessions/<id>.usage`), **stopping at the next real prompt** so windows
+(`sessions/<id>.usage`), **stopping at the next real prompt** so windows
 tile the transcript and a late settle cannot fold turn N+1 into N. Content-addressed
 identities make a redelivery, a second settle and the idle sweep idempotent; the last
 turn is settled by session end or the sweep. **Spend appears one hook later**, so a
@@ -388,25 +390,32 @@ larger files produce unknown observations. The object writer receives only the
 captured bytes, so a replaced path cannot redirect a second read.
 
 Append-only companion facts distinguish regular files, links, confirmed absence and
-unknown observations. A boundary without a file-kind fact supplies no type evidence.
-File-kind and collection facts describe observations. They do not establish who
-wrote the changes. Rift does not record closed-window hunks that assign those
-changes to a writer. Commit-diff attribution stays unchanged, and Rift generates
-no new attribution preview percentages from these observations. Existing stored attributions remain unchanged and may be
-incorrect; a retry does not repair them. Kind and collection facts share the existing
-boundary rows' projection-only lifecycle; checkpoint shards do not carry them.
+unknown observations; a boundary without one supplies no type evidence. They
+describe observations, not who wrote the changes: Rift assigns no closed-window
+hunks to a writer, commit-diff attribution is unchanged, no preview percentage
+derives from them, and a retry repairs no stored attribution. Like the boundary
+rows they are projection-only; shards do not carry them.
 
 With no daemon, the hook writes an identifier-only job into its checkout's family
 run state, spawns one detached child with its streams going nowhere, and does not
-wait. Doctor can attempt the pending work too. Each checkout’s worker holds an
-open-file lock at its canonical Git directory. Elapsed time never releases a live
-owner. Legacy lock markers defer work until a controlled handoff; the new owner
-file does not exclude older installed workers.
+wait. Doctor can attempt the pending work too. Each checkout's worker holds an
+open-file lock at its canonical Git directory, and elapsed time never releases a
+live owner. An older Rift's lock file, a timestamp with no pid, reads as a live
+owner forever; `rift doctor` names it, and `--fix` moves it aside — renamed, never
+deleted — only while holding the current lock and only when no Rift process
+started before the file was last written is still running.
 
-An owner-controlled recovery hold keeps normal worker execution, migration,
-and owned ticket removal or retry owed. Hooks may still queue new work. Any
-hold entry, or uncertainty about its absence, blocks those normal mutations;
-its age never expires it.
+A pass that wrote a checkpoint queues one **recall ingest**, so recall serves from
+the newest checkpoint without the dashboard open; the job names only the family's
+queue, so every pass that asks while one is pending is answered by that one.
+
+Every name in the agent queue belongs to one closed grammar that its writers spell
+through and every reader classifies through: a job ticket `<stem>[--<context>].json`;
+the markers `condensed-<key>` (a session's finished condense), `completed-<id>.done`
+(one condense delivery's completion), `unavailable-<stem>` (a basis snapshot that
+completed `unavailable`) and `<key>.error`; and publish stages. A marker is
+counted, never run, and a name outside the grammar is unknown — so a new marker is
+added once and no reader falls behind it.
 
 Queue context includes the full payload apart from its attempt counter. An
 identical context stays queued without resetting retries; a changed session,
@@ -423,6 +432,41 @@ An exact-context condense marker also names an existing checkpoint. Legacy
 markers, ended caches and token counts without their original inputs cannot
 certify a retry, so some work remains pending. A session claims to be ended only
 when a checkpoint exists.
+
+### Recovering a backlog: `rift doctor --fix`
+
+A turn-boundary collection queued long ago cannot be performed truthfully now: the
+worker collects *current* bytes, so collecting late would credit the present tree to an
+old turn. Recovery (Unix) records such a backlog as a gap instead, in one job.
+
+**Getting the queue.** Some worker is nearly always draining, so `--fix` leaves a
+request marker beside the owner lock and waits at most two minutes: a worker checks it
+(one `stat`) after every job and lets go, and a hook only enqueues while it is fresh. Its
+writer removes it on every exit, so one older than three minutes is ignored.
+
+**The hold.** Under the lock the job writes a hold in the member's git directory;
+while it exists ordinary execution, migration and ticket removal or retry wait, hooks
+still queue, and age never expires it. It is released on every exit; the plan
+directory stays as the receipt.
+
+**The stages**, in the only order they run, each skipped once its own durable record
+proves it finished, so a crash resumes at the next: `selection` reads the queue whole
+under caps — any entry the grammar cannot place, any cap crossed or read failed makes
+it non-actionable, never a partial list — reserves the one current boundary of a live
+session and marks every other boundary historical; `cut` pins each historical ticket
+and publishes an immutable cut; `gap` derives one checked gap batch from it; `archive`
+seals the batch on a carrier's checkpoint; `retire-intent` and `retirement` retire the
+pinned tickets; `observation` collects the reserved boundary last, inside the hold, so
+ordinary capture resumes from a truthful fresh baseline. A refusal stops the walk
+there, with the gap owed and named.
+
+**The carrier** is a queued session-end condense whose session was observed ending,
+with one capture identity, one stored `session_end` and no prior completion. Using it
+claims no ending and consumes nothing; a doubt refuses rather than choose by time. When no condense can carry, recovery's own baseline — the reserved
+boundary collected now, with its actual time — carries the gap; two admissible
+condenses are a doubt the baseline does not settle. With no live session holding a
+current boundary the refusal says `baseline-unreserved`; carrier refusals print
+their reason counts.
 
 `RIFT_CAPTURE_SYNC=1` drains inline (tests, CI); it changes **who** drains, never
 **whether**.
@@ -492,8 +536,15 @@ rules and [18](18-what-rift-does-not-do.md) lists the rest.
 ## 3.15 Seeing and repairing capture
 
 `rift status`, `rift session list|info|show`, `rift checkpoint list|explain` and
-`rift doctor [--fix]` show and repair capture ([05](05-ledger-and-verification.md)).
-`rift session stop|resume|attach` finalize, restore or adopt a session; amending a commit
+`rift doctor [--fix]` show and repair capture. Plain `rift doctor` only reports: it
+opens no lock and writes nothing, naming a recovery hold and how long it has been
+held, a stale recovery request, an old-format lock, parked tickets and turn-seal
+findings. `session_gaps` names each hole in a session's record with one word —
+`never-captured`, `boundary-missing` (unless a published gap batch already names the
+turn), `usage-absent`, `pricing-incomplete` — and stays report-only under `--fix`,
+since filling a hole would invent attribution. `--fix` retires a dead old lock first,
+then runs recovery, then drains; tickets recovery classed historical are kept out of
+that drain. `rift session stop|resume|attach` finalize, restore or adopt a session; amending a commit
 to add the trailer needs an explicit yes and never runs from a hook.
 
 ---

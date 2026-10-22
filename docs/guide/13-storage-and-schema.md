@@ -30,8 +30,8 @@ The database itself refused, from a trigger created alongside the table (§13.4)
 
 | File | Keyed by | Holds | Tables | Migrations |
 |---|---|---|---|---|
-| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | the capture tables ([Chapter 3](03-capture.md)) | 47 | 18 |
-| `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta graph and governance records ([§6.10](06-recall.md)) | 32 | 17 |
+| `~/.cache/rift/<family-id>/projection.db` | the family's capture identity | the capture tables ([Chapter 3](03-capture.md)) | 51 | 22 |
+| `~/.cache/rift/<recall-id>/recall.db` | the family's *recall* identity | the delta graph and governance records ([§6.10](06-recall.md)) | 34 | 19 |
 | `~/.cache/rift/canopy/ui-state.db` | nothing — machine-global | dashboard state | 8 | 5 |
 
 **The two per-repository stores sit in different directories.** The capture and
@@ -42,7 +42,7 @@ function taking the *family*, not a path: the wrong-key call is not spellable
 `canopy/` prefix because a dashboard spans repositories and a profile is a view
 *over* them.
 
-**Three file caches sit outside all three**, in the git common directory because
+**Four file caches sit outside all three**, in the git common directory because
 they are the *family's*: every member shares it and a linked worktree must not
 re-take its sibling's work ([Chapter 9](09-worktrees-and-families.md)). None is a
 record or in any migration; losing one costs a conversion, a delta frame or a first
@@ -117,8 +117,8 @@ BEGIN SELECT RAISE(ABORT,
 END
 ```
 
-Nobody typed that, so the guarantee holds for *every* table: 47 capture tables and
-94 triggers, 32 recall and 64, 8 dashboard and 16. Four generator decisions matter.
+Nobody typed that, so the guarantee holds for *every* table: 51 capture tables and
+102 triggers, 34 recall and 68, 8 dashboard and 16. Four generator decisions matter.
 
 **`STRICT`** makes column types engine-enforced, and keeps the DDL valid for other
 SQLite-compatible engines (§13.11). **Closed value sets are real `CHECK

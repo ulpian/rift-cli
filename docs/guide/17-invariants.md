@@ -4,7 +4,7 @@ The **rules the mechanisms exist to keep**: what Rift must always do and must
 never do, stated once, each with its reason and what fails if it is broken. Thirty-seven
 rules; each has a **Rule**, a **Why** (a rule whose reason is forgotten becomes a
 ritual, and rituals get relaxed by whoever is in a hurry) and **Enforced by**: the
-type, test or check that fails, or a statement that there is none. 
+type, test or check that fails, or a statement that there is none.
 
 ---
 
@@ -108,9 +108,10 @@ a one-shot child that exits.  **Why.** A daemon is a support and trust burden: i
 
 ### 13. Condensation is anchored to an act of yours
 
-**Rule.** A condense happens because of something you did (by default a commit; else
-a push, session-activity interval or touched sensitive path), never a clock of
-Rift's own; a session end requests one and an idle sweep condenses sessions left unclosed. **Why.** Capture on an independent schedule yields records nobody can place in a story. The sweep exists because an abandoned session would be lost work, and "sweep and count it" beat "sweep but never count it": a recovery path nobody trusts goes unused. **Enforced by** the entry points: structural, not guarded
+**Rule.** A condense happens because of something you or your agent did (a commit by
+default; else a push, session-activity interval or touched sensitive path; and every
+turn end), never a clock of Rift's own; a session end requests one and an idle sweep
+condenses sessions left unclosed. **Why.** Capture on an independent schedule yields records nobody can place in a story. The sweep exists because an abandoned session would be lost work, and "sweep and count it" beat "sweep but never count it": a recovery path nobody trusts goes unused. **Enforced by** the entry points: structural, not guarded
 ([3](03-capture.md) §3.7).
 
 ---
@@ -120,9 +121,12 @@ Rift's own; a session end requests one and an idle sweep condenses sessions left
 ### 14. Absence is stated, never filled in
 
 **Rule.** When Rift does not know something it says so, naming the reason, and never
-substitutes a default, a guess or a plausible figure.  **Why.** An agent told "unchanged" about a file Rift never saw skips a read it needed; absence costs a re-read, a fabrication costs correctness. **Enforced by** the validity
-types (a valid summary is unconstructible outside its crate) and
-`changed_file_is_never_known_unchanged` ([6](06-recall.md)).
+substitutes a default, a guess or a plausible figure.  **Why.** An agent told "unchanged" about a file Rift never saw skips a read it needed; absence costs a re-read, a fabrication costs correctness. Capture holds the same line: a missed turn boundary is published as a gap
+asserting absence, never collected late, which would credit present bytes to an old
+turn. **Enforced by** the validity
+types (a valid summary is unconstructible outside its crate),
+`changed_file_is_never_known_unchanged` ([6](06-recall.md)) and a gap batch built
+from no ticket byte ([3](03-capture.md) §3.10).
 
 ### 15. Uncertainty never widens scope
 
