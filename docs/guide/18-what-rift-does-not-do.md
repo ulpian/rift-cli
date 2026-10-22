@@ -5,7 +5,7 @@ costs more than it buys.
 
 ## 18.1 Capture
 
-- **Capture needs a git repository.** A condense no longer needs a commit, but every checkpoint is still a tree of git objects on a ref of Rift's own, found through the repository's git directory.
+- **Capture needs a git repository.** A condense needs no commit, but every checkpoint is a tree of git objects on a ref of Rift's own, found through the repository's git directory.
   A directory outside git captures nothing, and Rift keeps no object store apart from git. ([03](03-capture.md))
 - **A turn-end seal trails the live transcript.** A turn's last line waits for the next turn or the session end, and the lag is reported, never hidden.
 - **Unknown parent content attributes as `unknown`.** Attribution replays a

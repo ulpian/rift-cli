@@ -17,7 +17,11 @@ Rift makes AI-assisted engineering **legible, recoverable, and cheaper**:
   and exposes it through native hook injection plus bounded `rift recall`
   skills, so agents retrieve
   **deltas** (what changed, what's still valid, what's stale) instead of
-  re-reading the world. It instruments `repeated_context_rate` *before* it
+  re-reading the world. At the tool call it declines once a read the window
+  already holds (the identical repeat always runs), answers a large file's
+  first read with its bound outline, and can stand in for a shell result's held
+  lines or repeated noise once the original is sealed, each lever set per
+  repository and per agent. It instruments `repeated_context_rate` *before* it
   optimizes, so savings are your own measured numbers.
 - **rift-canopy** is the dashboard: a 3-column grid (projects · detail · live
   graphs), a context-fullness "nic-gauge", and a slash-command palette. Project
@@ -132,8 +136,9 @@ Common tasks run through [`skills.sh`](skills.sh) (see [SKILLS.md](SKILLS.md)):
 ./skills.sh list       # all tasks
 ```
 
-CI runs the same gate across macOS/Linux/Windows plus a release build,
-`cargo deny`, and `cargo audit`.
+CI declares fifteen required jobs: the same gate across macOS/Linux/Windows,
+the release build, `cargo deny` and `cargo audit`, and the guards on the guards
+([chapter 16](docs/guide/16-development.md)).
 
 ## Worktrees
 
@@ -149,7 +154,7 @@ subagent work.
 rift worktree status     # this member's wiring, identity and observations
 rift worktree adopt      # wire a linked worktree into its family
 rift worktree prune      # report (or, with --yes, prune) departed members
-rift projects --worktrees  # list members indented under their repository
+rift projects list --worktrees  # list members indented under their repository
 ```
 
 New worktrees are adopted automatically by the family's `post-checkout` hook;

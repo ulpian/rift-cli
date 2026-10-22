@@ -21,8 +21,11 @@ displacement sweeps (`enable-displacement/`, both orders in one run), and
 [`benchmarks/README.md`](../../benchmarks/README.md) and
 [`benchmarks/hook-latency.md`](../../benchmarks/hook-latency.md) reduce them.
 The redaction census (`redaction-fp-baseline.md`) is a regression record, not a
-speed record; its rules are [§4.9](04-redaction-and-secrets.md#49-the-false-positive-census); `benchmarks/replay-savings/` is
-[Chapter 8](08-cost-and-savings.md#813-the-bar-is-what-the-harness-measured)'s.
+speed record; its rules are [§4.9](04-redaction-and-secrets.md#49-the-false-positive-census).
+[`benchmarks/replay-savings/`](../../benchmarks/replay-savings) holds the
+transcript replay of
+[Chapter 8](08-cost-and-savings.md#813-the-bar-is-what-the-harness-measured),
+aggregates only, its declined share published over its denominator.
 
 ---
 
@@ -40,12 +43,12 @@ measuring ones write into `benchmarks/`.
 
 ## 15.3 The measurement protocol
 
-**The timed region is spawn through exit**, (startup is much of a hook's cost).   **Warmups are discarded and measured iterations kept individually**, in three
+**The timed region is spawn through exit** (startup is much of a hook's cost). **Warmups are discarded and measured iterations kept individually**, in three
 shapes each row declares: latency (3 + 30), heavy (1 + 3) and sweep (3 + 11
 commits per arm). **Percentiles are nearest-rank** (observed iterations, never interpolated), sample
 count beside each; a non-zero exit marks an iteration failed, not fast. Memory and child counts use separate untimed passes.
 
-**Work is counted.**  A rate's denominator is probed, not trusted (`rift verify` over zero checkpoints is
+**Work is counted.** A rate's denominator is probed, not trusted (`rift verify` over zero checkpoints is
 fast and a number about nothing, so the count prints beside it); where nothing
 counts the work the field is absent, not zero. **Ingest is proven** for rows meant to write. **Isolation is declared per row**:
 one repository for read-only verbs, a fresh copy per iteration for writers, the only way "cold" is cold.
@@ -66,7 +69,7 @@ reveals it, so the harness checks first. **The subject** is `$RIFT_BENCH_RIFT_BI
 `rift` on `PATH`. **A debug build is refused.** **A stale binary is refused, by
 name**: the harness compares the newest modification time of everything a build
 recompiles from with the binary's and names the file that outran it. **The subject's provenance is recorded**: the
-commit and whether the checkout was dirty.  `RIFT_BENCH_ALLOW_DEBUG=1` or `RIFT_BENCH_ALLOW_STALE=1` lets a run
+commit and whether the checkout was dirty. `RIFT_BENCH_ALLOW_DEBUG=1` or `RIFT_BENCH_ALLOW_STALE=1` lets a run
 proceed and *stamps the artifact's leg source string*, so the report carries the
 admission.
 
@@ -79,7 +82,7 @@ one-minute load average is **read per arm into the artifact** against a ceiling
 of **8.0**, derived from evidence: runs at 5.7 to 8.8 gave a curve that could be reasoned
 about, runs at 12.0 to 16.7 one that could not (a larger corpus measured
 *faster*). Eight is the host's logical CPU count. **Above the ceiling a run is void as a source of a bar**, though
-still published; so is an unread load.  One busy arm voids a sweep, since a bar is one number over a run.
+still published; so is an unread load. One busy arm voids a sweep, since a bar is one number over a run.
 
 ---
 
@@ -173,14 +176,14 @@ re-derivation and is never a compatibility claim. **The ancestry row is the whol
 cost is a *difference* with and without the branch axis
 ([Chapter 9](09-worktrees-and-families.md)), and this row is a total. **The compounding row publishes a numerator, not a
 ratio**: tokens one serve in a linked checkout avoided out of the family's shared
-store.  **Honest absence**: an unmeasured row carries null medians and zero runs, never a
+store. **Honest absence**: an unmeasured row carries null medians and zero runs, never a
 zero.
 
 ---
 
 ## 15.11 Re-measuring, end to end
 
- **Quiet the machine** (load above 8.0 voids the run as
+**Quiet the machine** (load above 8.0 voids the run as
 a source of a bar), **build the subject in release and ask `doctor`**:
 
 ```bash
@@ -201,8 +204,8 @@ moved: take a new run or keep the old as a record. Re-measuring never moves a ba
 ## 15.12 What these numbers cannot tell you
 
 They are **one machine class** (eight-core x86-64 macOS). **Process launch is an implementation term, not a hardware floor**: a preserved
-user-hook chain and non-Unix installs pay a shell shim.   **The byte columns in the git-latency record are declarations, not
-measurements**: the probe returned nothing in all 135 values.  Savings and cost figures come from another instrument with
+user-hook chain and non-Unix installs pay a shell shim. **The byte columns in the git-latency record are declarations, not
+measurements**: the probe returned nothing in all 135 values. Savings and cost figures come from another instrument with
 another honesty ladder
 ([Chapter 8](08-cost-and-savings.md#813-the-bar-is-what-the-harness-measured));
 permanent limits are in [Chapter 18](18-what-rift-does-not-do.md).
