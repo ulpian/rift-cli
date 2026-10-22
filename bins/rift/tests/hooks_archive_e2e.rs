@@ -718,7 +718,8 @@ fn a_repo_without_the_include_file_condenses_byte_identically() {
 /// A `.rift/rewrite.toml` used to route every write-side capability, and
 /// `kill_switch = true` used to force them all back to the wrapper. Deleting the
 /// wrapper (2026-08-11) turned the whole file inert — and an inert safety
-/// control that a user still believes in is exactly the silence §3 forbids.
+/// control that a user still believes in is exactly the silence a fail-loud
+/// rule forbids.
 ///
 /// So the file is now read for one thing: whether it is there. Both directions
 /// are asserted here because only the pair is a calibration — a note that always

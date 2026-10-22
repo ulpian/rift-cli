@@ -62,7 +62,7 @@
 //! linked worktree read its own admin dir, found nothing and shipped nothing,
 //! while the main checkout's queue accrued unreachably — 62 entries on the
 //! machine this was written on, with neither linked worktree holding a queue
-//! at all (RESEARCH §6) — and `git worktree remove` deleted a member's queue
+//! at all — and `git worktree remove` deleted a member's queue
 //! outright, refs and all. So the queue is `<common_dir>/rift-push-queue`
 //! one family, one queue, drainable from any member.
 //!
@@ -953,8 +953,7 @@ mod tests {
     ///
     /// The negative half is the defect this replaces: the member's admin dir
     /// holds no queue at all, so a drain keyed on it would have shipped nothing
-    /// while the work sat one directory away — 62 entries' worth, measured
-    /// (RESEARCH §6).
+    /// while the work sat one directory away — 62 entries' worth, measured.
     #[test]
     fn one_family_has_one_queue_whichever_member_names_it() {
         use rift_git::test_support::{fake_repo, fake_worktree};

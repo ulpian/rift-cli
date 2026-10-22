@@ -24,7 +24,7 @@ pub enum RoleDialect {
 /// the client families whose schema or prompt format teaches it.
 ///
 /// This is exported so that the tests which try to break the guard read the
-/// vocabulary **from the guard**. Round 3 made the generative red-team
+/// vocabulary **from the guard**. The generative red-team test already makes its
 /// instrument discover the pushed *alphabet* through the public API and then
 /// prove something about that set; the vocabulary stayed a literal in the test
 /// file, so the four words it happened to name were the four words that got

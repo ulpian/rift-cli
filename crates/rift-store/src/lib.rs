@@ -180,7 +180,7 @@ pub trait CanonicalStore: Send + Sync {
 
     /// Insert a row, **skipping a primary-key or UNIQUE conflict** — the
     /// idempotent set-union used for content-addressed ingest (re-ingesting the
-    /// same fact is a no-op, db-design §4.4/§4.7). Returns `true` if a new row was
+    /// same fact is a no-op). Returns `true` if a new row was
     /// inserted, `false` if a row with the same key was already present.
     ///
     /// Only a key conflict is skipped: a row a CHECK, NOT NULL or datatype

@@ -31,6 +31,7 @@
 mod outbox;
 mod project_read;
 mod settings_view;
+mod setup_plan;
 mod wake;
 mod watermark;
 mod worker;
@@ -49,6 +50,7 @@ use self::wake::{NotifyWatcher, PollOnlyWatcher, WakeWatcher};
 use self::worker::{viewer_only_worker, worker};
 
 pub use self::settings_view::{project_settings_view, project_settings_view_under};
+pub use self::setup_plan::{setup_plan_marker_under, SetupPlanMarker};
 pub use self::watermark::Watermark;
 
 /// Handles to a running data bus: the request sender (loop → bus) and the update

@@ -16,7 +16,7 @@ use crate::source::{classify_policy_source, PolicySource};
 const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1];
 
 /// Built-in sensitive path globs. Unioned into every config; a user may *add*
-/// to these but can never remove them (a security default, `05` §5.5).
+/// to these but can never remove them: a security default no repository may drop.
 pub const BUILTIN_SENSITIVE_PATHS: &[&str] = &[
     "**/.env*",
     "**/*secret*",

@@ -1,14 +1,14 @@
 //! Typed, validated policy-as-code loaded from the committed `.rift/` directory.
 //!
-//! The only Rift state in the working tree is a thin committed `.rift/`
-//! (system-architecture §2.4). This crate turns it into a typed
+//! The only Rift state in the working tree is a thin committed `.rift/`;
+//! everything else lives under the machine's cache root. This crate turns it into a typed
 //! [`EffectiveConfig`] downstream crates consult for security decisions: which
 //! models are allowed, which paths are sensitive, what is captured, how long
 //! things are retained.
 //!
 //! ## Format note (deliberate deviation from the step's illustrative YAML)
-//! The dossier pins `toml` (maintained, `cargo-deny`-clean) and flags
-//! `serde_yaml` as unmaintained. So Rift loads `.rift/config.toml` rather than
+//! `toml` is maintained and `cargo-deny`-clean, while `serde_yaml` is
+//! unmaintained. So Rift loads `.rift/config.toml` rather than
 //! `project.yaml` — same typed model, same `deny_unknown_fields` strictness,
 //! same secure defaults, supply-chain-clean.
 //!

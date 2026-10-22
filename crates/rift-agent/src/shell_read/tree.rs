@@ -17,11 +17,13 @@
 //! -N`, `tail -N`, `sed -n 'A,Bp'`) on exactly one read keeps the span exact:
 //! it is arithmetic on a run of lines the command line names. A **filter**
 //! (`filter.rs`) keeps the lines a pattern or a sort chose, which no
-//! interval of the file names. Every read of a pipeline that reaches a
-//! filter, or more than one narrowing, or a narrowing over several reads
-//! joined together, is [`ShellSpan::Filtered`]: still counted as a read,
-//! because the shell opened that file and its tokens were spent, and never
-//! coverage, because nothing here can say which lines arrived (rule 2). A
+//! interval of the file names. Narrowings stacked on one read compose into
+//! the one run they keep. Every read of a pipeline that reaches a filter, or
+//! a stack of narrowings whose counts place no run, or a narrowing over
+//! several reads joined together, is [`ShellSpan::Filtered`]: still counted
+//! as a read, because the shell opened that file and its tokens were spent,
+//! and never coverage, because nothing here can say which lines arrived
+//! (rule 2). A
 //! listing or a label piped anywhere is refused, so a question about names
 //! never flows into a decision about content (rule 3).
 //!
@@ -261,20 +263,102 @@ impl Downstream {
 /// The reads of a pipeline's first stage, as the stages after it left them.
 ///
 /// One narrowing on one read is the arithmetic [`ShellRead::request`]
-/// already does. Every other combination is filtered: a narrowing over two
-/// files cuts their lines *joined*, which is a run of neither; two narrowings
-/// compose into a range this slice does not yet name; and a filter keeps
-/// lines no interval names at all.
+/// already does. Several on one read are folded into the one run they keep,
+/// the read's own run first, wherever their counts alone place it. Every
+/// other combination is filtered: a narrowing over two files cuts their
+/// lines *joined*, which is a run of neither; a stack whose counts do not
+/// place a run (the first lines of the last ones) names lines only the file
+/// could; and a filter keeps lines no interval names at all.
 fn through(mut reads: Vec<ShellRead>, downstream: &[Downstream]) -> Vec<ShellRead> {
-    if let ([read], [Downstream::Narrow(narrowing)]) = (reads.as_mut_slice(), downstream) {
-        read.narrowing = Some(*narrowing);
-        return reads;
+    if let [read] = reads.as_mut_slice() {
+        if narrow_in_place(read, downstream) {
+            return reads;
+        }
     }
     for read in &mut reads {
         read.span = ShellSpan::Filtered;
         read.narrowing = None;
     }
     reads
+}
+
+/// Narrow `read` by every stage of `downstream`, when each is a narrowing
+/// and together they keep one run the counts name; whether they did.
+fn narrow_in_place(read: &mut ShellRead, downstream: &[Downstream]) -> bool {
+    let Some(stack) = downstream
+        .iter()
+        .map(|stage| match stage {
+            Downstream::Narrow(narrowing) => Some(*narrowing),
+            Downstream::Filter => None,
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let Some((first, rest)) = stack.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        read.narrowing = Some(*first);
+        return true;
+    }
+    // The read's own run joins the stack as a narrowing of the whole file
+    // where it is one; where it is not (a match, a decoration, a default
+    // count) the stack narrows it as one narrowing would, and the table in
+    // `ShellRead::request` decides what that is.
+    let (span, own) = match as_narrowing(read.span) {
+        Some(own) => (ShellSpan::WholeFile, vec![own]),
+        None => (read.span, Vec::new()),
+    };
+    let mut stages = own.into_iter().chain(stack);
+    let Some(kept) = stages
+        .next()
+        .and_then(|first| stages.try_fold(first, followed_by))
+    else {
+        return false;
+    };
+    read.span = span;
+    read.narrowing = Some(kept);
+    true
+}
+
+/// A first stage's span as the narrowing of the whole file it is, or
+/// [`None`] where no count of the file's lines spells it.
+fn as_narrowing(span: ShellSpan) -> Option<Narrowing> {
+    match span {
+        ShellSpan::FromTop { limit: Some(n) } => Some(Narrowing::First(n)),
+        ShellSpan::FromBottom { limit: Some(n) } => Some(Narrowing::Last(n)),
+        ShellSpan::Lines { lo, hi } => Some(Narrowing::Pick { lo, hi }),
+        _ => None,
+    }
+}
+
+/// The one narrowing that keeps what `next` keeps of what `kept` kept, or
+/// [`None`] when that is no run the two counts name.
+///
+/// The first `b` of the last `a` start at a line only the run's length
+/// names, and a pick that starts past the end of the run before it prints
+/// nothing; neither is a narrowing. The last `b` of lines `l` to `h` are
+/// placed as though the run reached `h`, the convention one narrowing
+/// already keeps: where the file is shorter the interval is not one of its
+/// own and is dropped where the bytes are, a lost saving and never a claim.
+fn followed_by(kept: Narrowing, next: Narrowing) -> Option<Narrowing> {
+    use Narrowing::{First, Last, Pick};
+    let pick = |lo: u32, hi: u32| (lo <= hi).then_some(Pick { lo, hi });
+    match (kept, next) {
+        (First(a), First(b)) => Some(First(a.min(b))),
+        (Last(a), Last(b)) => Some(Last(a.min(b))),
+        (First(a), Last(b)) => pick(a.saturating_sub(b).saturating_add(1).max(1), a),
+        (Last(a), First(b)) => (b >= a).then_some(Last(a)),
+        (First(a), Pick { lo, hi }) => pick(lo, hi.min(a)),
+        (Last(a), Pick { lo, hi }) => (lo == 1 && hi >= a).then_some(Last(a)),
+        (Pick { lo, hi }, First(b)) => pick(lo, hi.min(lo.saturating_add(b.saturating_sub(1)))),
+        (Pick { lo, hi }, Last(b)) => pick(lo.max(hi.saturating_sub(b.saturating_sub(1))), hi),
+        (Pick { lo, hi }, Pick { lo: l2, hi: h2 }) => pick(
+            lo.checked_add(l2.saturating_sub(1))?,
+            hi.min(lo.saturating_add(h2.saturating_sub(1))),
+        ),
+    }
 }
 
 /// Peel the optional leading `cd <dir> &&` or `cd <dir>;`, and say what is

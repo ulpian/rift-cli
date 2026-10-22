@@ -399,7 +399,7 @@ pub fn attaches_by<T>(
 /// checkpoint's real strategy (`rift rebuild`'s substrate walk, the only
 /// place that reads a checkpoint's own `metadata.json`) would find the id
 /// already present and be silently dropped — canonical tables have no
-/// `UPDATE` to correct it afterwards (§1 invariant 1).
+/// `UPDATE` to correct it afterwards (canonical tables are append-only).
 /// `a_second_writer_with_the_true_strategy_is_silently_dropped_after_the_first`
 /// measures the MECHANISM, directly against this function (it cannot see
 /// whether `cmd_import` performs the wiring, since it never calls
@@ -590,7 +590,7 @@ mod tests {
     /// whole segment. `record_checkpoint_if_new` is `INSERT OR IGNORE`: a
     /// second call for an id that already exists is silently dropped, never
     /// merged, and canonical tables have no `UPDATE` to correct it after the
-    /// fact (§1 invariant 1). `rift rebuild`'s substrate walk
+    /// fact (canonical tables are append-only). `rift rebuild`'s substrate walk
     /// (`rift_shadow::artifact_bridge`) is the ONLY place that reads a
     /// checkpoint's own `metadata.json` to learn its real strategy — so if a
     /// bundle-import writer landed a placeholder label FIRST, rebuild's true

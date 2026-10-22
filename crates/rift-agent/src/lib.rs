@@ -288,10 +288,32 @@ pub enum EditKind {
         /// Whether the caller asked for every occurrence.
         replace_all: bool,
     },
-    /// The file changed and no single before-and-after pair follows from the
-    /// payload — several edits at once, a notebook cell, a patch document. The
+    /// Several stretches replaced in one call, applied in order, all or none:
+    /// a multi-edit, or a patch whose hunks each carry their new side whole.
+    /// Each is carried so it can be located in the new bytes on its own, under
+    /// the same rule one replacement is held to.
+    Regions {
+        /// The replacements, in the order the call applied them.
+        regions: Vec<Replacement>,
+    },
+    /// The file changed and no before-and-after pair follows from the payload
+    /// — a notebook cell, a multi-edit whose fields no pin states, a patch
+    /// whose chunks Rift cannot read. The
     /// old bytes' coverage must stop counting; no new coverage is derived.
     Other,
+}
+
+/// One stretch of a [`EditKind::Regions`] call: what was written in, and how
+/// many lines it took out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Replacement {
+    /// The text the caller wrote in.
+    pub new_string: String,
+    /// How many lines the replaced text spanned, counted the way
+    /// [`EditKind::Edit`] counts them.
+    pub old_string_lines: u32,
+    /// Whether the caller asked for every occurrence.
+    pub replace_all: bool,
 }
 
 /// An edit-shaped tool call, reduced to the file it changed and how.
@@ -517,7 +539,7 @@ pub mod tool_fields {
             row(
                 "apply_patch",
                 ToolShape::Edit,
-                "kind=other command=command path=from-a-single-file-header",
+                "kind=regions command=command path=from-a-single-file-header regions=update-chunks",
             ),
         ),
         (
@@ -1090,7 +1112,7 @@ pub trait AgentAdapter: Send + Sync {
 ///
 /// Deterministic over identity-defining fields (not wall-clock, not receipt
 /// order), so the *same* logical event always yields the *same* key regardless of
-/// when/how often it's delivered — making re-ingest a true no-op (§4.7). The
+/// when/how often it's delivered — making re-ingest a true no-op. The
 /// `turn_ordinal` separates the same hook fired in different turns; the
 /// `event_ordinal` separates the fan-out within one hook (e.g. `ToolCall` then
 /// `FileEdit`); the `payload_sha256` separates distinct payloads in the same slot.

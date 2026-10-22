@@ -7,7 +7,7 @@ use rift_core::Result;
 use crate::{CanonicalStore, Value};
 
 /// A `file_revision` row: a `path@blob_oid` is one immutable, content-addressed
-/// fact (db-design §4.4).
+/// fact, so re-ingesting it is a no-op rather than a second row.
 #[derive(Debug, Clone)]
 pub struct FileRevisionRow {
     /// `= sha256(path ‖ 0x00 ‖ blob_oid)` (hex).

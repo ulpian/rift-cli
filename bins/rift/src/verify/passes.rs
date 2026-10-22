@@ -28,7 +28,7 @@ pub(super) struct ShardPasses {
     /// is visible instead of assumed.
     pub(super) vacuous_era: usize,
     /// Shards of the **pre-Rift dialect** — read from the legacy checkpoint
-    /// ref, exempt from every native-only pass by invariant §1.5.
+    /// ref, exempt from every native-only pass because read-compat is forever.
     ///
     /// Counted by DIALECT (the ref the shard was read from), never by anything
     /// the shard says about itself. A native shard whose `canon_version` was
@@ -101,7 +101,7 @@ pub(super) fn shard_passes(reader: &impl SubstrateReader) -> Result<ShardPasses>
         // Everything below is a NATIVE-only pass, gated on the DIALECT the
         // shard was read from — the one signal the shard's own bytes cannot
         // rewrite, because it is where the shard IS, not what it says. The
-        // pre-Rift dialect is exempt (invariant §1.5: those ids were never
+        // pre-Rift dialect is exempt (those ids were never
         // minted by any Rift derivation, and read-compat is forever) and
         // counted. This used to gate on the header's `canon_version`, and that
         // was the recorded escape: deleting the field moved a
@@ -373,7 +373,7 @@ mod tests {
         }
     }
 
-    /// **Read-compat is forever (invariant §1.5), pinned from the positive
+    /// **Read-compat is forever, pinned from the positive
     /// side.** An honest legacy-dialect shard — no `canon_version`, an id its
     /// own tool minted, no native artifacts at all — is exempt from every
     /// native-only pass and counted, never verdicted for what its dialect

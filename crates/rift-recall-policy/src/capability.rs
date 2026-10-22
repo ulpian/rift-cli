@@ -167,9 +167,9 @@ pub struct Effective {
 ///    the measured caveats can only hold a lever below what `[…] mode` asked
 ///    for. Nothing here lifts anything.
 /// 2. **Anything that declines a call needs a confirmed reason channel**, and
-///    ships at `observe` until its own window says otherwise (GOAL §2.10). A
+///    ships at `observe` until its own window says otherwise. A
 ///    repository that writes `enforce` gets it, capped by rule 1.
-/// 3. **The two amendments are the exception the owner decided** (O14, O16):
+/// 3. **The two amendments are the deliberate exception**:
 ///    they decline nothing, add nothing to the model's context and ask the
 ///    model for nothing, so on a family whose rows document the amendment they
 ///    act whenever their table is not `off`. `off` is still off.

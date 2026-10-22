@@ -70,6 +70,44 @@ pub(super) fn doctor_config_load(repo: &Path) -> (String, serde_json::Value) {
     )
 }
 
+/// Where the setup wizard keeps its plan while setup runs, relative to the
+/// checkout.
+const SETUP_PLAN: &str = ".rift/state/project-setup.json";
+
+/// A setup plan left beside a checkout whose family is set up on this
+/// machine: a crash before setup removed it, a failed remove, or a copied
+/// checkout.
+///
+/// The plan decides no status, so nothing else would ever mention it; this
+/// leg is where it is named. Silent when there is no plan, and silent for a
+/// plan still pending, which the dashboard already shows as setup left to do.
+/// Report-only: the plan is in the person's checkout and the leg writes
+/// nowhere.
+pub(super) fn doctor_stale_setup_plan(repo: &Path) -> (String, serde_json::Value) {
+    doctor_stale_setup_plan_under(&family::cache_root(), repo)
+}
+
+fn doctor_stale_setup_plan_under(cache_root: &Path, repo: &Path) -> (String, serde_json::Value) {
+    use rift_canopy_data::bus::SetupPlanMarker;
+    match rift_canopy_data::bus::setup_plan_marker_under(cache_root, repo) {
+        SetupPlanMarker::Stale => {
+            let remedy = rift_agent_install::health::stale_setup_plan_sentence(SETUP_PLAN);
+            (
+                format!("\n  setup plan:     stale; {remedy}"),
+                serde_json::json!({ "state": "stale", "path": SETUP_PLAN, "remedy": remedy }),
+            )
+        }
+        SetupPlanMarker::Pending => (
+            String::new(),
+            serde_json::json!({ "state": "pending", "path": SETUP_PLAN, "remedy": null }),
+        ),
+        SetupPlanMarker::Absent => (
+            String::new(),
+            serde_json::json!({ "state": "absent", "path": null, "remedy": null }),
+        ),
+    }
+}
+
 /// The two files Rift's own native installer writes and reads a Claude Code
 /// hook table into, relative to a repository.
 ///
@@ -198,8 +236,8 @@ fn sibling_tool_handlers(path: &Path) -> usize {
 /// * *checkpoints* come off the substrate, and `refs/heads/rift/checkpoints/v1`
 ///   lives in the common dir: every member of the family reads the same count,
 ///   which is why a member reporting `0` was always evidence of a broken
-///   identity rather than of an empty repository (RESEARCH §1.4 measured
-///   exactly that: 0 from a side worktree while the family's refs held 134);
+///   identity rather than of an empty repository (measured exactly
+///   that: 0 from a side worktree while the family's refs held 134);
 /// * *recall ingest* opens `recall_db`, resolved through the family manifest,
 ///   so it is one file for the repository;
 /// * *integrations* are per checkout on purpose: hook wiring is written into
@@ -626,6 +664,49 @@ mod tests {
             ))
             .as_deref(),
             Some("repair Cursor hook configuration")
+        );
+    }
+
+    /// A plan beside a family set up here is named with its remedy; the same
+    /// plan beside an unprovisioned family is pending and stays silent.
+    #[test]
+    fn a_setup_plan_left_beside_a_set_up_family_is_named_with_its_remedy() {
+        let cache = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(repo.path()).unwrap();
+        std::fs::create_dir_all(repo.path().join(".rift/state")).unwrap();
+        std::fs::write(
+            repo.path().join(SETUP_PLAN),
+            r#"{"schema_version": 1, "integrations": []}"#,
+        )
+        .unwrap();
+        let (human, json) = doctor_stale_setup_plan_under(cache.path(), repo.path());
+        assert!(human.is_empty(), "{human}");
+        assert_eq!(json["state"], "pending");
+
+        let (_, rift_git::FamilyState::Minted(family)) =
+            rift_git::family_of(repo.path(), rift_git::MintPolicy::Allow).unwrap()
+        else {
+            unreachable!("a fresh repository mints its family");
+        };
+        let db = rift_store::projection_db_for_family_under(cache.path(), &family);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        std::fs::write(&db, b"").unwrap();
+        rift_shadow::hooks::record_binary_of_record(
+            &rift_git::family::family_dir_under(|k| std::env::var(k).ok(), &family.common_dir),
+            &std::env::current_exe().unwrap(),
+            rift_shadow::hooks::RecordedBy::Init,
+        )
+        .unwrap();
+        let (human, json) = doctor_stale_setup_plan_under(cache.path(), repo.path());
+        let remedy = rift_agent_install::health::stale_setup_plan_sentence(SETUP_PLAN);
+        assert!(human.contains("setup plan:     stale"), "{human}");
+        assert!(human.contains(&remedy), "{human}");
+        assert_eq!(json["state"], "stale");
+        assert_eq!(json["remedy"], remedy.as_str());
+        assert!(
+            repo.path().join(SETUP_PLAN).is_file(),
+            "the report removes nothing"
         );
     }
 }

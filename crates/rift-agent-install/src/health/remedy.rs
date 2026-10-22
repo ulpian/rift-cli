@@ -379,3 +379,17 @@ pub fn hook_composition_sentence(agent: &str, composition: HookComposition) -> O
     };
     Some(sentence)
 }
+
+/// The sentence for a setup plan left beside a checkout whose family is set up
+/// on this machine.
+///
+/// The plan no longer decides any status, so the sentence says so and names
+/// the one act left. Doctor names it and removes nothing: the file sits in the
+/// person's checkout, and a report-only leg writes nowhere.
+#[must_use]
+pub fn stale_setup_plan_sentence(path: &str) -> String {
+    format!(
+        "setup already finished on this machine, so the setup plan left at {path} decides \
+         nothing: delete it."
+    )
+}

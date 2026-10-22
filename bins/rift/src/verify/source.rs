@@ -229,7 +229,7 @@ mod tests {
 
     /// **The abort, closed.** `Sha256Id::parse_hex(&shard.checkpoint_id)?` made
     /// the mere presence of a pre-Rift shard an internal error — exit 70, on a
-    /// repository whose readability is invariant §1.5. Both frozen short-id
+    /// repository that must stay readable forever. Both frozen short-id
     /// shapes now build a source instead of destroying one.
     ///
     /// What they do NOT do is take a chain position: a position is a
