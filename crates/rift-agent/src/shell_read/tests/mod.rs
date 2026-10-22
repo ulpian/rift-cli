@@ -16,7 +16,9 @@
 mod awk_line_pick;
 mod cd_chains;
 mod compositions;
+mod hostile_names;
 mod labels;
+mod narrowing_chains;
 mod piped_line_pick;
 mod pipelines;
 mod properties;
