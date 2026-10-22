@@ -14,11 +14,12 @@
     )
 )]
 
+mod patch_regions;
 pub mod rollout;
 
 use rift_agent::{
-    event, shell_read, AdapterError, AgentAdapter, CompatNotes, EditKind, EditRequest, HookFacts,
-    ModelFact, ModelSource, ReadRequest, SearchRequest, TokenUsage,
+    event, shell_read, AdapterError, AgentAdapter, CompatNotes, EditRequest, HookFacts, ModelFact,
+    ModelSource, ReadRequest, SearchRequest, TokenUsage,
 };
 use rift_core::{AgentId, CanonicalEvent, EventKind, Trust};
 use std::path::Path;
@@ -55,14 +56,14 @@ const SHELL_TOOL: &str = "Bash";
 /// own exec arguments spell it.
 const WORKDIR_FIELD: &str = "workdir";
 
-/// The markers a patch document opens a file section with, and the one that
-/// renames a file.
+/// The markers a patch document opens a file section with, the one that
+/// renames a file, and the three that bound an update's chunks.
 ///
 /// The grammar is pinned in `fixtures/codex-tool-field-surface.md` as its
 /// author states it: a header is a fixed prefix at the start of a line, and
-/// one header names one file. Nothing here reads a hunk body — the `+`, `-`
-/// and context lines are a diff against bytes this process does not have, and
-/// turning them into line numbers would be arithmetic nobody published.
+/// one header names one file. A hunk body is read only for each chunk's new
+/// side, never for a line number: the patch states none, and turning its
+/// lines into numbers would be arithmetic nobody published.
 mod patch {
     /// A section that creates a file.
     pub(crate) const ADD: &str = "*** Add File: ";
@@ -72,6 +73,12 @@ mod patch {
     pub(crate) const DELETE: &str = "*** Delete File: ";
     /// A rename, which makes one section name two paths.
     pub(crate) const MOVE: &str = "*** Move to: ";
+    /// A line that opens a chunk of an update, with or without a header.
+    pub(crate) const CHUNK: &str = "@@";
+    /// The line that pins the chunk before it to the end of the file.
+    pub(crate) const END_OF_FILE: &str = "*** End of File";
+    /// The line that closes the document.
+    pub(crate) const END_PATCH: &str = "*** End Patch";
 }
 
 /// The single path a patch document names, or `None` when it names anything
@@ -348,12 +355,13 @@ impl AgentAdapter for CodexAdapter {
         Self::placed(native, path)
     }
 
-    /// A patch document changed a file, and which file is all that follows.
+    /// A patch document changed a file: which file, and the new side of each
+    /// chunk it updated.
     ///
     /// The payload carries the whole patch under one argument. A single file
-    /// header names the path; the hunk bodies are a diff against bytes this
-    /// process does not have, so no site and no shift are derived and the call
-    /// is recorded as a change with no derivable site.
+    /// header names the path. An update's chunks become one region each, to be
+    /// located in the bytes the patch left behind; a patch whose chunks this
+    /// reading cannot stand behind is a change with no derivable site.
     ///
     /// The two names that look like edits — the ones a Claude-style hook
     /// matcher would use — never arrive as a tool name on this family: they
@@ -370,7 +378,7 @@ impl AgentAdapter for CodexAdapter {
             .and_then(serde_json::Value::as_str)?;
         Some(EditRequest {
             path: single_patched_path(patch_text)?,
-            kind: EditKind::Other,
+            kind: patch_regions::update_kind(patch_text),
         })
     }
 
@@ -788,7 +796,8 @@ mod pinned_tool_field_surface {
     use rift_agent::tool_fields::{pinned_fact, pinned_tool_field_rows, tool_field_rows};
     use rift_core::AgentId;
 
-    use super::{AgentAdapter, CodexAdapter, EditKind};
+    use super::{AgentAdapter, CodexAdapter};
+    use rift_agent::EditKind;
     use rift_agent::{HiKind, ReadSpan, SearchKind};
 
     /// The committed pin. `include_str!` rather than a runtime read so a
@@ -838,7 +847,8 @@ mod pinned_tool_field_surface {
         );
     }
 
-    /// A patch document naming one file is that file changed, with no site.
+    /// A patch document naming one file is that file changed, with each
+    /// chunk's new side carried to be located in the bytes it left.
     #[test]
     fn edit_request_reads_the_pinned_fields() {
         let command = pinned_fact(&AgentId::CODEX, "apply_patch", "command")
@@ -853,8 +863,14 @@ mod pinned_tool_field_surface {
         assert_eq!(request.path, "src/lib.rs");
         assert_eq!(
             request.kind,
-            EditKind::Other,
-            "the hunk bodies are a diff against bytes this process does not have"
+            EditKind::Regions {
+                regions: vec![rift_agent::Replacement {
+                    new_string: "new".to_owned(),
+                    old_string_lines: 1,
+                    replace_all: false,
+                }]
+            },
+            "one chunk, one region, and no line number taken from the patch"
         );
     }
 
