@@ -546,7 +546,7 @@ mod tests {
     /// ★ **A key already declined is never declined a second time**, however
     /// many times the same call is made.
     ///
-    /// A3 §1 is a loop: a model that answers a decline by making the identical
+    /// A repeated decline is a loop: a model that answers a decline by making the identical
     /// call again must not meet the same decline, or the conversation cannot
     /// leave the turn. The journal's memory of the decline is tested above;
     /// this is the rule that memory exists for — `decide` consulting it — and

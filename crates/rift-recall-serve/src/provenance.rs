@@ -142,7 +142,8 @@ fn is_invisible(c: char) -> bool {
 /// free of control characters.
 ///
 /// Git facts are one of the three classes that may be inlined raw
-/// (`§7.13`), and a subject is a git fact by provenance — it is what the
+/// (`docs/guide/07-serving-and-injection.md` §7.13), and a subject is a git
+/// fact by provenance — it is what the
 /// object database holds, not what a tool printed. What is still screened is
 /// the shape rather than the content: every `Cc`/`Cf` code point becomes a
 /// space, so no subject can spell a new line, move a cursor or reverse a run of

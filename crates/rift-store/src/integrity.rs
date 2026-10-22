@@ -9,7 +9,7 @@
 //!
 //! Bitemporal [`CostFact`]s are **never updated**: a reconciliation inserts a
 //! superseding row with a new `recorded_at`, so "current belief" and "belief as
-//! of X" are both answerable (§4.3 rule 4).
+//! of X" are both answerable, which an in-place update would make impossible.
 
 use rift_core::{Result, RiftError, Sha256Id};
 use rift_hashchain::{verify_chain, ChainLink};

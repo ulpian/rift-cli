@@ -2,7 +2,7 @@
 //!
 //! These mirror the DDL in [`crate::schema`] and use [`CanonicalStore::insert_or_ignore`]
 //! so re-ingesting the same content-addressed fact is a **no-op** (idempotent
-//! set-union, db-design §4.4/§4.7). They never UPDATE/DELETE — corrections are new
+//! set-union). They never UPDATE/DELETE — corrections are new
 //! superseding rows handled by the event bridge.
 //!
 //! Covers the full normalized capture model: the diff-capture relations,

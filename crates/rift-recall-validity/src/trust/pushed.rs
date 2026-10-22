@@ -197,7 +197,7 @@ pub(super) fn normalize_pushed(span: &str) -> String {
 /// either way, neither for the paths nor for their `path:LINE` forms — so the
 /// argument for leaving it open is not the cost. It is that a rule closing
 /// digits while leaving letters would read as complete without being complete,
-/// which is precisely the mistake rounds 1–3 made three times. Whether a model
+/// which is precisely the mistake the earlier, hand-closed rules made three times. Whether a model
 /// in fact reads `S1Y1S1T1E1M:` as a turn boundary is an empirical question this
 /// repository cannot answer; what it can say is which rule it holds and where
 /// that rule stops.
@@ -393,7 +393,7 @@ mod tests {
         }
     }
 
-    /// The separator family, round 3 of that review. The
+    /// The separator family. The
     /// previous delete-set was whitespace and `.`, described as closing "the
     /// separator family"; five other separators in the same allowlist spelled
     /// the same turn boundary and rendered. These are the verifier's own probe
@@ -428,8 +428,8 @@ mod tests {
         }
     }
 
-    /// The vocabulary axis, round 4 of that review. Rounds
-    /// 1–3 closed every way of spelling a word the list already knew and left
+    /// The vocabulary axis. The
+    /// earlier fixes closed every way of spelling a word the list already knew and left
     /// the list itself hand-kept, so a turn boundary in a dialect nobody had
     /// typed into a probe walked through untouched — including the dialect of
     /// the channel a manifest is injected into. Each word gets its plain
@@ -540,7 +540,7 @@ mod tests {
             "src/user.rs:12",
             "src/system.rs",
             "docs/assistant-notes.md",
-            // Round 4's words, in the shapes a repository actually uses them.
+            // The words the vocabulary axis added, in the shapes a repository actually uses them.
             // `model` is the one with a large real footprint, so it is pinned
             // in every shape: as a file, as a directory, and with a line ref.
             "src/model.rs",

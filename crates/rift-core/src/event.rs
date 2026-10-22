@@ -138,7 +138,7 @@ impl EventKind {
 }
 
 /// Source-trust classification carried on every event payload (so untrusted
-/// content is never later served as instruction-shaped text — `05` §5.4/§5.5).
+/// content is never later served as instruction-shaped text).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trust {
@@ -282,7 +282,8 @@ impl CanonicalEvent {
 mod tests {
     use super::*;
 
-    /// The canonical stored spelling is frozen. This is the pin §1.5 asks for:
+    /// The canonical stored spelling is frozen, because read-compatibility with
+    /// every ledger already written is forever:
     /// every token is written out as a literal, so a "harmless" rename shows up
     /// as a diff on this list rather than as a silently re-spelled ledger.
     #[test]

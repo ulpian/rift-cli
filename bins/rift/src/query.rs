@@ -1,7 +1,7 @@
 //! Read-only query commands over the per-repo projection: `status`,
 //! `checkpoint list/show`, `session list/show`, `explain`, and `gc`'s selection.
 //!
-//! These are the Go-writes / Rust-reads half of the architecture (§2.2): every
+//! These are the read half of the projection: every
 //! function here only reads the projection — never mutates the canonical record.
 
 use rift_core::Result;
