@@ -21,6 +21,7 @@ mod hooks;
 mod legacy;
 mod lifecycle;
 mod manifest;
+pub mod permissions;
 mod skill;
 
 use std::path::{Path, PathBuf};

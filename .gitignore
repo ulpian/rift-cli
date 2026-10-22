@@ -84,3 +84,7 @@
 /bins/rift-doc/
 
 data/
+
+# Release archives stay in artifact storage, never in source history.
+/dist/
+/release/__pycache__/

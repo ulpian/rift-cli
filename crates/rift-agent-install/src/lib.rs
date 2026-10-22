@@ -802,18 +802,28 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(format!(".rift-tmp-{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).map_err(|source| InstallError::Io {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp).map_err(|source| InstallError::Io {
         path: tmp.clone(),
         source,
     })?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|source| InstallError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let result = (|| {
+        use std::io::Write as _;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path).map_err(|source| InstallError::Io {
+    result.map_err(|source| InstallError::Io {
         path: path.to_path_buf(),
         source,
     })

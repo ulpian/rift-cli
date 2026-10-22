@@ -176,6 +176,7 @@ pub(super) fn state_with_detail(status: ProjectStatus, model: &str) -> AppState 
             project: "/r/p".into(),
             status,
             detail: Some(DetailView {
+                git_summary: None,
                 running_members: Vec::new(),
                 path: "/r/p".into(),
                 label: "p".into(),

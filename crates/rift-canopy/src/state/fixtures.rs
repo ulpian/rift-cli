@@ -69,6 +69,7 @@ pub(super) fn project_settings_state(initialization: crate::ProjectInitializatio
         .collect();
     let mut detail = DetailView::thin("/r/a".into(), "a".into(), status);
     detail.project_settings = Box::new(crate::ProjectSettingsView {
+        permissions: Vec::new(),
         path: "/r/a".into(),
         project_name: "a".into(),
         initialization,

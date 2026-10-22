@@ -84,6 +84,25 @@ impl<'a> EventRow<'a> {
 }
 
 impl CanopyStore {
+    /// Every registered path, including hidden projects, for owned-integration
+    /// cleanup. This reads registration history without restoring hidden rows.
+    ///
+    /// # Errors
+    /// Returns the store error if registration history cannot be read.
+    pub fn installed_project_paths(&self) -> Result<Vec<String>> {
+        let mut paths = self
+            .events()?
+            .into_iter()
+            .filter_map(|event| match event.op {
+                rift_canopy::ProjectOp::Added { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     /// One-time import from a legacy registry's `(name, path)` entries: if the
     /// event log is empty, fold each in as an `added` event. A no-op once the
     /// log is populated. Registry-format-free so this crate takes no registry

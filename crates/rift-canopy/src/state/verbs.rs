@@ -15,7 +15,7 @@ use super::actions::{profile_persist_flow, remove_project_op};
 use super::effects::persist_flow;
 use super::openers::open_project_settings;
 use super::reduce::selection_change_effects;
-use super::viewer::{select_viewer_project, viewer_command_allowed};
+use super::viewer::viewer_command_allowed;
 use super::{AppState, Effects, Flow, PersistOp};
 
 /// The soft warning for a `/profile` name that fails validation.
@@ -302,9 +302,6 @@ fn select_verb(s: &mut AppState, r: &ProjectRef) -> Flow {
         return no_match_status(s);
     };
     s.app.select_path(&path);
-    if s.app.surface == Surface::RecallViewer {
-        return Flow::Continue(select_viewer_project(s));
-    }
     let mut eff = Effects::default();
     selection_change_effects(s, &before, &mut eff);
     Flow::Continue(eff)

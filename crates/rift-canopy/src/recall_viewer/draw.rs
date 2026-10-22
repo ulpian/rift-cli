@@ -30,23 +30,29 @@ pub(crate) fn draw(vm: &ViewModel, frame: &mut Frame, unicode: bool) {
 }
 
 fn draw_tabs(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
-    let mut text = String::new();
-    for (pane, label) in [
-        (ViewerPane::Projects, "Projects"),
+    for (index, (pane, label)) in [
         (ViewerPane::Checkpoints, "Checkpoints"),
         (ViewerPane::Timeline, "Timeline"),
-    ] {
-        if vm.viewer.pane == pane {
-            text.push('[');
-            text.push_str(label);
-            text.push(']');
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = rect.x + if index == 0 { 0 } else { rect.w / 2 };
+        let w = if index == 0 {
+            rect.w / 2
         } else {
-            text.push(' ');
-            text.push_str(label);
-            text.push(' ');
-        }
+            rect.w - rect.w / 2
+        };
+        let selected = vm.viewer.pane == pane
+            || (pane == ViewerPane::Checkpoints
+                && matches!(vm.viewer.pane, ViewerPane::Projects | ViewerPane::Command));
+        let text = if selected {
+            format!("[{label}]")
+        } else {
+            format!(" {label} ")
+        };
+        put_clipped(frame, x, rect.y, w, &text, vm.theme.key_hint());
     }
-    put_clipped(frame, rect.x, rect.y, rect.w, &text, vm.theme.key_hint());
 }
 
 pub(super) fn warning_style(vm: &ViewModel) -> Style {

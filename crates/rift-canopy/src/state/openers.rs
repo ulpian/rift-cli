@@ -47,6 +47,7 @@ pub(super) fn open_project_settings(s: &mut AppState) -> Flow {
             |detail| (*detail.project_settings).clone(),
         );
     let path = view.path.clone();
+    s.app.dashboard_tab = crate::dashboard::DashboardTab::Settings;
     s.app.project_settings.open(view);
     s.app.mode = Mode::ProjectSettings;
     s.dirty = true;

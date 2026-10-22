@@ -53,6 +53,7 @@ mod entry;
 mod record;
 mod screen;
 mod sweep;
+mod uninstall;
 mod write;
 
 use std::path::PathBuf;
@@ -71,6 +72,7 @@ pub use record::{
 };
 pub use screen::{is_executable_file, is_transient};
 pub use sweep::is_retired_hook;
+pub use uninstall::uninstall_hooks;
 pub use write::shim_text;
 
 /// Marker line identifying a shim Rift owns (so re-install overwrites our shim but

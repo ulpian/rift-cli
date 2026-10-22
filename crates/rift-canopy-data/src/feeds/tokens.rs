@@ -54,8 +54,7 @@ struct TokenRow {
 /// Each session's CURRENT worktree: the observation with the greatest
 /// `first_observed_at` (worktree provenance), keyed by session id.
 ///
-/// Ties are broken by name so the map is deterministic — two observations
-/// recorded in the same millisecond must not make a golden flap. Absence is
+/// Conflicting observations at the same latest timestamp remain unknown. Absence is
 /// the answer for every session with no row, which is every session captured
 /// before worktree provenance; sealed shards are never rewritten, so the
 /// history that would have named them can never be back-filled.
@@ -134,7 +133,18 @@ fn worktree_axis(rows: &[TokenRow]) -> WorktreeAxis {
 /// fake zero.
 #[must_use]
 pub fn compute_tokens(root: &Path, path: &str) -> FeedUpdate {
-    let payload = match read_token_rows(root, path) {
+    let member = rift_git::discover(Path::new(path))
+        .ok()
+        .map(|paths| paths.member_name());
+    let rows = read_token_rows(root, path).map(|mut rows| {
+        rows.retain(|row| {
+            row.worktree
+                .as_ref()
+                .is_some_and(|name| Some(name) == member.as_ref())
+        });
+        rows
+    });
+    let payload = match rows {
         Some(rows) if !rows.is_empty() => FeedPayload::Tokens {
             tokens: TokensView::Data(tokens_data(&rows)),
             breakdown: BreakdownView::Data(breakdown_data(&rows)),
@@ -163,7 +173,7 @@ fn read_token_rows(root: &Path, path: &str) -> Option<Vec<TokenRow>> {
     if !db.exists() {
         return None;
     }
-    let store = SqliteStore::open(&db).ok()?;
+    let store = SqliteStore::open_read_only(&db).ok()?;
     let rt = runtime().ok()?;
     let rows = rt
         .block_on(store.query(

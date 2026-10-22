@@ -1,6 +1,6 @@
 [package]
 name = "rift"
-version.workspace = true
+version = "1.0.0-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

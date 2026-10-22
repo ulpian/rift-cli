@@ -27,6 +27,10 @@ pub(super) fn draw_full(
     body: Rect,
     unicode: bool,
 ) {
+    if vm.mode != Mode::PanelEditor {
+        super::dashboard::draw(vm, backend, frame, unicode);
+        return;
+    }
     let sl = crate::layout_model::solve_model(&vm.layout, body);
     let editing = vm.mode == crate::input::Mode::PanelEditor;
     for col in &sl.columns {
@@ -68,6 +72,10 @@ pub(super) fn draw_two_col(
     body: Rect,
     unicode: bool,
 ) {
+    if vm.mode != Mode::PanelEditor {
+        super::dashboard::draw(vm, backend, frame, unicode);
+        return;
+    }
     let r = two_col(body);
     draw_projects(vm, frame, r.col1, unicode);
     draw_detail(
@@ -91,6 +99,10 @@ pub(super) fn draw_single(
     body: Rect,
     unicode: bool,
 ) {
+    if vm.mode != Mode::PanelEditor {
+        super::dashboard::draw(vm, backend, frame, unicode);
+        return;
+    }
     let (tabs, panel, hint, command) = single_panel(body);
     draw_tab_strip(vm, frame, tabs);
     match vm.focus {
@@ -323,7 +335,7 @@ fn draw_tab_strip(vm: &ViewModel, frame: &mut Frame, tabs: Rect) {
 /// shared stack solver. Every projection-derived string is escape-sanitized in
 /// [`crate::cards`] before it can reach a cell (the security model). No project
 /// selected → a single placeholder line.
-fn draw_detail(
+pub(super) fn draw_detail(
     vm: &ViewModel,
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,
@@ -369,7 +381,7 @@ fn draw_detail(
 /// metrics), recall, and the two workflow cards — each an individually-bordered themed
 /// card filling the column, solved by the shared stack. No outer border (like
 /// the column-2 cards); focus accents the panel borders.
-fn draw_graphs(
+pub(super) fn draw_graphs(
     vm: &ViewModel,
     backend: &mut dyn RenderBackend,
     frame: &mut Frame,

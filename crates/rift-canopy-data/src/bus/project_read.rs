@@ -14,13 +14,13 @@ use std::time::SystemTime;
 use rift_agent_install::detect::DetectionEnvironment;
 use rift_agent_install::health::{self, Facts, Remedy, Severity};
 use rift_canopy::{
-    derive_status, CaptureSummary, DetailView, EntryKind, ModelProvenance, ModelUsage,
-    ProjectStatus, ProjectionState, SessionsRead, StatusInputs,
+    derive_status, DetailView, EntryKind, ProjectStatus, ProjectionState, SessionsRead,
+    StatusInputs,
 };
 use rift_git::FamilyMember;
 use rift_store::{projection_db_for_family_under, CanonicalStore, SqliteStore};
-use tokio::runtime::Runtime;
 
+use super::projection_detail::read_projection_detail;
 use crate::feeds::project_family;
 use crate::store::runtime;
 
@@ -372,6 +372,7 @@ pub(super) fn build_detail(
         EntryKind::Repo
     };
     DetailView {
+        git_summary: crate::repository::summary(&dir),
         path: path.to_string(),
         label,
         kind,
@@ -423,12 +424,18 @@ fn read_family(dir: &Path, now_ms: i64) -> FamilyRead {
         .members
         .iter()
         .zip(&read.per_member)
-        .filter(|(_, detail)| matches!(detail.read, SessionsRead::Ok(Some(_))))
-        .map(|(member, _)| member_label(member))
+        .enumerate()
+        .filter(|(index, (_, detail))| {
+            *index == roster.vantage && matches!(detail.read, SessionsRead::Ok(Some(_)))
+        })
+        .map(|(_, (member, _))| member_label(member))
         .collect();
     FamilyRead {
         repository: true,
-        sessions: read.family.read,
+        sessions: read
+            .per_member
+            .get(roster.vantage)
+            .map_or(SessionsRead::Ok(None), |detail| detail.read),
         provisioned: None,
         running_members,
         members: roster.members,
@@ -496,142 +503,6 @@ fn open_and_read(db: &Path) -> Option<(Watermark, Option<i64>)> {
         ))
         .ok()?;
     Some((Watermark { cursor, epoch }, last_ts))
-}
-
-/// Read a project's models + capture counts from its **family's** projection
-/// (read-only, scoped by `repo_id`). `None` if the projection is
-/// missing/unreadable — or if the path has no family to key one.
-fn read_projection_detail(root: &Path, dir: &Path) -> Option<(Vec<ModelUsage>, CaptureSummary)> {
-    let db = projection_db_for_family_under(root, &project_family(dir)?);
-    if !db.exists() {
-        return None;
-    }
-    let store = SqliteStore::open(&db).ok()?;
-    let rt = runtime().ok()?;
-    Some((
-        read_model_usage(&store, &rt),
-        read_capture_summary(&store, &rt),
-    ))
-}
-
-/// The models a project has used, most-used first: calls and the later
-/// append-only observations. Runtime facts supersede configured fallback
-/// facts; empty legacy session values are ignored.
-fn read_model_usage(store: &SqliteStore, rt: &Runtime) -> Vec<ModelUsage> {
-    let mut counts: BTreeMap<String, (u64, ModelProvenance)> = BTreeMap::new();
-    absorb_model_calls(store, rt, &mut counts);
-    absorb_model_observations(store, rt, &mut counts);
-    absorb_session_headlines(store, rt, &mut counts);
-    let mut models: Vec<ModelUsage> = counts
-        .into_iter()
-        .map(|(model, (calls, source))| ModelUsage {
-            model,
-            calls,
-            source,
-        })
-        .collect();
-    models.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.model.cmp(&b.model)));
-    models
-}
-
-/// Every model call, counted per model — a runtime fact.
-fn absorb_model_calls(
-    store: &SqliteStore,
-    rt: &Runtime,
-    counts: &mut BTreeMap<String, (u64, ModelProvenance)>,
-) {
-    let Ok(rows) =
-        rt.block_on(store.query("SELECT model, COUNT(*) FROM model_call GROUP BY model", &[]))
-    else {
-        return;
-    };
-    for row in rows {
-        let (Ok(model), Ok(n)) = (row.get_text(0), row.get_i64(1)) else {
-            continue;
-        };
-        if model.trim().is_empty() {
-            continue;
-        }
-        counts.insert(
-            model,
-            (u64::try_from(n).unwrap_or(0), ModelProvenance::Runtime),
-        );
-    }
-}
-
-/// Every observed model, with its provenance: a runtime observation upgrades
-/// a configured one, never the reverse.
-fn absorb_model_observations(
-    store: &SqliteStore,
-    rt: &Runtime,
-    counts: &mut BTreeMap<String, (u64, ModelProvenance)>,
-) {
-    let Ok(rows) = rt.block_on(store.query(
-        "SELECT model, source FROM model_observation WHERE model <> ''",
-        &[],
-    )) else {
-        return;
-    };
-    for row in rows {
-        let (Ok(model), Ok(source)) = (row.get_text(0), row.get_text(1)) else {
-            continue;
-        };
-        if model.trim().is_empty() {
-            continue;
-        }
-        let provenance = if source == "configured_client" {
-            ModelProvenance::Configured
-        } else {
-            ModelProvenance::Runtime
-        };
-        counts
-            .entry(model)
-            .and_modify(|(_, old)| {
-                if provenance == ModelProvenance::Runtime {
-                    *old = provenance;
-                }
-            })
-            .or_insert((0, provenance));
-    }
-}
-
-/// Every session's headline model, so a model that made no recorded call
-/// still appears — with zero calls.
-fn absorb_session_headlines(
-    store: &SqliteStore,
-    rt: &Runtime,
-    counts: &mut BTreeMap<String, (u64, ModelProvenance)>,
-) {
-    let Ok(rows) = rt.block_on(store.query("SELECT DISTINCT model_primary FROM session", &[]))
-    else {
-        return;
-    };
-    for row in rows {
-        let Ok(model) = row.get_text(0) else {
-            continue;
-        };
-        if model.trim().is_empty() {
-            continue;
-        }
-        counts.entry(model).or_insert((0, ModelProvenance::Runtime));
-    }
-}
-
-/// The capture counts and the freshest checkpoint's time.
-fn read_capture_summary(store: &SqliteStore, rt: &Runtime) -> CaptureSummary {
-    let count = |t: &str| u64::try_from(rt.block_on(store.count(t)).unwrap_or(0)).unwrap_or(0);
-    CaptureSummary {
-        events: count("captured_event"),
-        sessions: count("session"),
-        checkpoints: count("checkpoint"),
-        last_checkpoint_at_ms: rt
-            .block_on(store.query_opt_i64(
-                "SELECT created_at FROM checkpoint ORDER BY created_at DESC LIMIT 1",
-                &[],
-            ))
-            .ok()
-            .flatten(),
-    }
 }
 
 /// [`integration_failing`], recomputed only when its stamp moves: the poll
@@ -707,7 +578,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 
 #[cfg(test)]
 mod tests {
-    use rift_canopy::StatusError;
+    use rift_canopy::{ModelProvenance, StatusError};
     use rift_git::repo_id_for;
     use rift_store::{projection_db_under, Value};
 
@@ -722,6 +593,27 @@ mod tests {
     fn open_proj(root: &Path, proj: &Path) -> SqliteStore {
         let repo = repo_id_for(proj).unwrap();
         SqliteStore::open(projection_db_under(root, &repo)).unwrap()
+    }
+
+    fn attribute_session(store: &SqliteStore, rt: &tokio::runtime::Runtime, id: &str) {
+        rt.block_on(rift_store::record_session_worktree(
+            store,
+            &rift_store::SessionWorktreeRow {
+                observation_id: format!("main-{id}"),
+                session_id: id.into(),
+                worktree_token: "0123456789ab".into(),
+                worktree_name: "main".into(),
+                is_linked: 0,
+                work_tree: "/fixture".into(),
+                branch: None,
+                head_oid: None,
+                subagent_id: None,
+                basis: "payload_cwd".into(),
+                first_observed_at: 1,
+                schema_version: 1,
+            },
+        ))
+        .unwrap();
     }
 
     /// Seed a `session` row (headline model).
@@ -746,10 +638,36 @@ mod tests {
             ],
         ))
         .unwrap();
+        attribute_session(store, rt, id);
     }
 
     /// Seed a `model_call` row.
     fn seed_model_call(store: &SqliteStore, rt: &tokio::runtime::Runtime, id: &str, model: &str) {
+        if rt
+            .block_on(store.query_opt_i64("SELECT COUNT(*) FROM turn WHERE turn_id='t'", &[]))
+            .unwrap()
+            == Some(0)
+        {
+            seed_session(store, rt, "calls", "");
+            rt.block_on(store.insert(
+                "turn",
+                &[
+                    "turn_id",
+                    "session_id",
+                    "ordinal",
+                    "started_at",
+                    "schema_version",
+                ],
+                &[
+                    Value::text("t"),
+                    Value::text("calls"),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
+        }
         rt.block_on(store.insert(
             "model_call",
             &[
@@ -793,6 +711,24 @@ mod tests {
                 Value::Int(created_at),
                 Value::text("root"),
                 Value::Null,
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        rt.block_on(store.insert(
+            "checkpoint_worktree",
+            &[
+                "checkpoint_id",
+                "worktree_token",
+                "worktree_name",
+                "is_linked",
+                "schema_version",
+            ],
+            &[
+                Value::text(id),
+                Value::text("0123456789ab"),
+                Value::text("main"),
+                Value::Int(0),
                 Value::Int(1),
             ],
         ))
@@ -1191,6 +1127,7 @@ mod tests {
         let proj = make_project(root.path(), "model-source", 1);
         let store = open_proj(root.path(), &proj);
         let rt = runtime();
+        attribute_session(&store, &rt, "s");
         for (id, model, source, at) in [
             ("o1", "antigravity-pro", "configured_client", 1),
             ("o2", "antigravity-pro", "runtime_hook", 2),
@@ -1243,6 +1180,7 @@ mod tests {
         let store = open_proj(root.path(), &proj);
         let rt = runtime();
         seed_session(&store, &rt, "s1", "A");
+        attribute_session(&store, &rt, "sess");
         seed_checkpoint(&store, &rt, "k1", 100);
         seed_checkpoint(&store, &rt, "k2", 200);
 

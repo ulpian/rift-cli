@@ -19,6 +19,7 @@ pub(super) fn fixture_rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
 /// capture summary.
 pub(super) fn fixture_detail(status: ProjectStatus) -> DetailView {
     DetailView {
+        git_summary: None,
         running_members: Vec::new(),
         path: "/r/proj".into(),
         label: "proj".into(),
@@ -37,6 +38,7 @@ pub(super) fn fixture_detail(status: ProjectStatus) -> DetailView {
             },
         ],
         capture: CaptureSummary {
+            last_checkpoint_id: None,
             events: 128,
             sessions: 6,
             checkpoints: 12,

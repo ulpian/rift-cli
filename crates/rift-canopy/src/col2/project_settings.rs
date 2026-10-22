@@ -386,7 +386,44 @@ impl NativeAgentIntegrationRow {
 
 /// Complete read-only Project Settings projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionOptionRow {
+    /// Native preset token.
+    pub token: String,
+    /// Display label.
+    pub label: String,
+    /// Exact native changes and compatibility caveats.
+    pub detail: String,
+}
+
+/// One harness's staged permission choice, separate from capture wiring.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentPermissionRow {
+    /// Stable adapter token.
+    pub agent: String,
+    /// Supported choices; first is always keep-current.
+    pub options: Vec<PermissionOptionRow>,
+    /// Staged option index.
+    pub selected: usize,
+    /// Hash of the native configuration reviewed by the user.
+    pub revision: String,
+}
+
+/// A reviewed project-local change sent through the settings manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentPermissionChange {
+    /// Stable adapter token.
+    pub agent: String,
+    /// Native permission preset.
+    pub preset: String,
+    /// Expected native-settings revision.
+    pub revision: String,
+}
+
+/// Complete read-only Project Settings projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSettingsView {
+    /// Supported project-local permission presets.
+    pub permissions: Vec<AgentPermissionRow>,
     /// Canonical selected-project path.
     pub path: String,
     /// Sanitized-at-render project label.
@@ -402,10 +439,36 @@ pub struct ProjectSettingsView {
 }
 
 impl ProjectSettingsView {
+    /// A selected setup adapter, or an already enabled integration.
+    #[must_use]
+    pub fn integration_selected(&self, agent: &str) -> bool {
+        self.integrations
+            .iter()
+            .any(|row| row.agent == agent && (row.selected || row.enabled()))
+    }
+
+    /// Only explicit non-default choices become write requests.
+    #[must_use]
+    pub fn permission_changes(&self) -> Vec<AgentPermissionChange> {
+        self.permissions
+            .iter()
+            .filter(|row| self.integration_selected(&row.agent))
+            .filter_map(|row| {
+                let option = row.options.get(row.selected)?;
+                (option.token != "keep").then(|| AgentPermissionChange {
+                    agent: row.agent.clone(),
+                    preset: option.token.clone(),
+                    revision: row.revision.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Empty fallback used before the data bus supplies a rich view.
     #[must_use]
     pub fn thin(path: String, project_name: String) -> Self {
         Self {
+            permissions: Vec::new(),
             path,
             project_name,
             initialization: ProjectInitialization::NotInitialized,
@@ -419,6 +482,8 @@ impl ProjectSettingsView {
 /// Editable choices for one native initialization attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSetupPlan {
+    /// Explicitly reviewed native permission changes; keep-current emits none.
+    pub permissions: Vec<AgentPermissionChange>,
     /// Recall starts enabled by default.
     pub total_recall: bool,
     /// Injection starts at the native 400-token default.
@@ -452,6 +517,7 @@ impl ProjectSetupPlan {
                 .is_some_and(|row| row.enabled)
         };
         Self {
+            permissions: view.permission_changes(),
             total_recall: enabled(ProjectSettingId::TotalRecall),
             turn_injection: enabled(ProjectSettingId::TurnInjection),
             documents: enabled(ProjectSettingId::Documents),
@@ -636,6 +702,8 @@ pub struct ProjectSettingsAction {
 /// Project Settings lifecycle operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectSettingsActionKind {
+    /// Apply the staged native permission choices after explicit confirmation.
+    SetPermissions(Vec<AgentPermissionChange>),
     /// Set a policy-backed row.
     Set {
         /// Setting to update.

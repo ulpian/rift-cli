@@ -1,6 +1,6 @@
 //! The one layout solver the viewer draws with and `hit/viewer.rs` hit-tests against.
 
-use crate::layout::{choose_mode, single_panel, solve, two_col, LayoutMode, PanelRects, Rect};
+use crate::layout::{single_panel, PanelRects, Rect};
 use crate::render::frame::Size;
 
 use super::ViewerPane;
@@ -110,25 +110,31 @@ pub fn timeline_controls(timeline: Rect) -> ViewerTimelineControls {
 /// default 20/40/40 solver, independent of Panel Editor state.
 #[must_use]
 pub fn geometry(size: Size, pane: ViewerPane) -> ViewerGeometry {
-    let body = Rect {
-        x: 0,
-        y: 1,
-        w: size.w,
-        h: size.h.saturating_sub(1),
-    };
-    match choose_mode(size) {
-        LayoutMode::Full3Col => column_geometry(&solve(body)),
-        LayoutMode::TwoCol => column_geometry(&two_col(body)),
-        LayoutMode::SinglePanel => single_panel_geometry(body, pane),
-        LayoutMode::TooSmall => ViewerGeometry {
-            projects: body,
-            checkpoints: body,
-            timeline: body,
-            tabs: ORIGIN,
-            hint: ORIGIN,
-            command: ORIGIN,
-        },
+    let (body, hint, command) = crate::dashboard::geometry(size);
+    if size.w < 76 {
+        return single_panel_geometry(
+            Rect {
+                h: body.h + hint.h + command.h,
+                ..body
+            },
+            pane,
+        );
     }
+    // The project drawer is shared with the dashboard; the viewer uses two panes.
+    let hidden = Rect { w: 0, h: 0, ..body };
+    let split = body.w / 3;
+    let rects = PanelRects {
+        col1: hidden,
+        col2: Rect { w: split, ..body },
+        col3: Rect {
+            x: body.x + split,
+            w: body.w.saturating_sub(split),
+            ..body
+        },
+        hint,
+        command,
+    };
+    column_geometry(&rects)
 }
 
 /// The full and two-column tiers: every pane is on screen at once, so the
@@ -157,8 +163,12 @@ fn single_panel_geometry(body: Rect, pane: ViewerPane) -> ViewerGeometry {
     };
     let panel_if = |shown: ViewerPane| if pane == shown { panel } else { empty };
     ViewerGeometry {
-        projects: panel_if(ViewerPane::Projects),
-        checkpoints: panel_if(ViewerPane::Checkpoints),
+        projects: empty,
+        checkpoints: if matches!(pane, ViewerPane::Projects | ViewerPane::Command) {
+            panel
+        } else {
+            panel_if(ViewerPane::Checkpoints)
+        },
         timeline: panel_if(ViewerPane::Timeline),
         tabs,
         hint,
@@ -171,7 +181,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn full_layout_is_fixed_twenty_forty_forty() {
+    fn wide_viewer_has_no_permanent_project_rail() {
         let geometry = geometry(Size::new(120, 40), ViewerPane::Timeline);
         assert_eq!(
             (
@@ -179,20 +189,24 @@ mod tests {
                 geometry.checkpoints.w,
                 geometry.timeline.w
             ),
-            (24, 48, 48)
+            (0, 40, 80)
         );
+        assert_eq!(geometry.checkpoints.y, 4);
     }
 
     #[test]
-    fn two_column_layout_stacks_catalogue_and_timeline() {
-        // One column below the 20+28+28 full-grid floor selects the degraded
-        // two-column solver; 76 itself is intentionally Full3Col.
-        let geometry = geometry(Size::new(75, 30), ViewerPane::Projects);
-        assert_eq!(
-            geometry.projects.h,
-            geometry.checkpoints.h + geometry.timeline.h
-        );
-        assert_eq!(geometry.checkpoints.x, geometry.timeline.x);
+    fn narrow_viewer_shows_one_content_pane_and_keeps_projects_in_the_drawer() {
+        for pane in [
+            ViewerPane::Projects,
+            ViewerPane::Checkpoints,
+            ViewerPane::Timeline,
+            ViewerPane::Command,
+        ] {
+            let geometry = geometry(Size::new(60, 30), pane);
+            assert_eq!(geometry.projects.w, 0);
+            assert_eq!(geometry.checkpoints.w > 0, pane != ViewerPane::Timeline);
+            assert_eq!(geometry.timeline.w > 0, pane == ViewerPane::Timeline);
+        }
     }
 
     #[test]

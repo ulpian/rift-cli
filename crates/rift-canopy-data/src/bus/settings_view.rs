@@ -111,14 +111,17 @@ pub fn project_settings_view_under(root: &Path, dir: &Path) -> ProjectSettingsVi
         },
     );
     let mut integrations = native_settings_integrations(root, dir, initialization);
+    let mut permissions = permission_rows(dir, &integrations);
     // Only a setup the predicate says is unfinished resumes from its plan; a
     // plan left beside a set-up family pre-fills nothing.
     if initialization == ProjectInitialization::SetupIncomplete {
         if let Some(plan) = pending_setup_plan(dir) {
             restore_pending_choices(&plan, &mut settings, &mut integrations);
+            restore_pending_permissions(&plan, &mut permissions);
         }
     }
     ProjectSettingsView {
+        permissions,
         path,
         project_name,
         initialization,
@@ -199,6 +202,33 @@ fn restore_pending_choices(
         .collect::<BTreeSet<_>>();
     for row in integrations.iter_mut() {
         row.selected = selected.contains(row.agent.as_str());
+    }
+}
+
+/// Restore intent against fresh revisions; the resumed wizard confirms it again.
+fn restore_pending_permissions(
+    plan: &serde_json::Value,
+    rows: &mut [rift_canopy::AgentPermissionRow],
+) {
+    for choice in plan
+        .get("permissions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(agent), Some(preset)) = (
+            choice.get("agent").and_then(serde_json::Value::as_str),
+            choice.get("preset").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if let Some(row) = rows.iter_mut().find(|row| row.agent == agent) {
+            row.selected = row
+                .options
+                .iter()
+                .position(|option| option.token == preset)
+                .unwrap_or(0);
+        }
     }
 }
 
@@ -401,6 +431,48 @@ fn native_settings_rows(
 }
 
 /// One install as the dashboard names it.
+fn permission_rows(
+    dir: &Path,
+    integrations: &[NativeAgentIntegrationRow],
+) -> Vec<rift_canopy::AgentPermissionRow> {
+    use rift_agent_install::native::permissions::{
+        permission_options, permission_revision, validate_permission,
+    };
+    integrations
+        .iter()
+        .filter_map(|integration| {
+            let mut options = permission_options(&integration.agent);
+            if options.is_empty() {
+                return None;
+            }
+            let revision = match permission_revision(dir, &integration.agent) {
+                Ok(revision) => revision,
+                Err(_) => {
+                    options.truncate(1);
+                    String::new()
+                }
+            };
+            options.retain(|option| {
+                option.token == "keep"
+                    || validate_permission(dir, &integration.agent, option.token, &revision).is_ok()
+            });
+            Some(rift_canopy::AgentPermissionRow {
+                agent: integration.agent.clone(),
+                selected: 0,
+                revision,
+                options: options
+                    .into_iter()
+                    .map(|option| rift_canopy::PermissionOptionRow {
+                        token: option.token.into(),
+                        label: option.label.into(),
+                        detail: option.detail.into(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 fn installation_row(
     installation: rift_agent_install::native::NativeInstallation,
 ) -> NativeAgentInstallation {

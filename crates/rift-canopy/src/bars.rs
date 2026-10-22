@@ -36,10 +36,9 @@ pub enum HeaderAction {
 /// display order. The identity item is dynamic (it carries the active
 /// profile's name) and is inserted immediately before Palette by
 /// [`header_cluster`] (the profile hub).
-const HEADER_ITEMS: [(&str, &str, HeaderAction); 4] = [
+const HEADER_ITEMS: [(&str, &str, HeaderAction); 3] = [
     ("?", "Help", HeaderAction::Help),
     ("/", "Palette", HeaderAction::Palette),
-    ("e", "Panel Editor", HeaderAction::Editor),
     ("q", "Quit", HeaderAction::Quit),
 ];
 

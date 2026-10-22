@@ -12,7 +12,7 @@ use crate::hit::Target;
 use crate::input::{Action, CanopyKey};
 use crate::recall_viewer::Surface;
 use crate::render::frame::Size;
-use crate::{App, Mode, ProjectSettingsAction, ProjectSettingsActionKind, ProjectStatus};
+use crate::{App, Mode, ProjectStatus};
 
 use super::actions::{profile_or_fold_action, remove_project_op, reorder_project_op};
 use super::anim::refresh_every_ticks;
@@ -68,13 +68,14 @@ pub(super) fn on_project_data(s: &mut AppState, pd: &ProjectData) -> Flow {
     if s.apply_project_data(pd) {
         s.dirty = true;
     }
-    if let Some(action) = pending_setup_action(s, pd) {
-        return Flow::Continue(Effects {
-            project_settings_actions: vec![action],
-            ..Effects::default()
-        });
+    if pending_setup_prompt(s, pd) {
+        return open_project_settings(s);
     }
-    if s.app.mode == Mode::ProjectSettings {
+    if s.app.mode == Mode::ProjectSettings
+        && s.app
+            .selected_project()
+            .is_some_and(|p| p.path == pd.project)
+    {
         if let Some(detail) = pd.detail.as_ref() {
             s.app
                 .project_settings
@@ -142,6 +143,9 @@ pub(super) fn apply_feed(s: &mut AppState, update: FeedUpdate) {
 /// [`crate::input::on_key`] reducer runs and its action folds into a flow,
 /// with the selection-change and leave-the-editor effects appended.
 pub(super) fn on_key(s: &mut AppState, key: CanopyKey) -> Flow {
+    if let Some(flow) = super::dashboard::on_navigation_key(s, key) {
+        return flow;
+    }
     if viewer_owns_the_key(&s.app) {
         return on_viewer_key(s, key);
     }
@@ -234,6 +238,8 @@ pub(super) fn selection_change_effects(
     if *before == after {
         return;
     }
+    s.detail = None;
+    s.app.scroll = crate::PanelScroll::default();
     s.arm_select_pulse(); // acknowledge the cursor move
                           // A different project's sections must never linger: reset to placeholders
                           // (and cancel any in-flight tween) until its own feeds arrive.
@@ -244,6 +250,14 @@ pub(super) fn selection_change_effects(
     }
     eff.data_requests
         .push(DataRequest::SetActive(after.clone()));
+    if s.app.surface == Surface::RecallViewer {
+        eff.data_requests
+            .extend(super::viewer::select_viewer_project(s).data_requests);
+    } else if s.app.mode == Mode::ProjectSettings {
+        if let Flow::Continue(settings) = open_project_settings(s) {
+            eff.data_requests.extend(settings.data_requests);
+        }
+    }
     if let Some(path) = after {
         eff.data_requests.push(DataRequest::Refresh(path.clone()));
         eff.load_layout = Some(path);
@@ -302,9 +316,9 @@ fn selected_refresh(app: &App) -> Option<DataRequest> {
 /// surface for changing the choices afterwards, not a confirm step in the
 /// way of the first one. A read for another project leaves the decision
 /// pending.
-fn pending_setup_action(s: &mut AppState, pd: &ProjectData) -> Option<ProjectSettingsAction> {
+fn pending_setup_prompt(s: &mut AppState, pd: &ProjectData) -> bool {
     if s.pending_setup_prompt.as_deref() != Some(pd.project.as_str()) {
-        return None;
+        return false;
     }
     s.pending_setup_prompt = None;
     let unfinished =
@@ -312,7 +326,7 @@ fn pending_setup_action(s: &mut AppState, pd: &ProjectData) -> Option<ProjectSet
     let offered =
         unfinished && pd.status != ProjectStatus::NotRepository && s.app.mode == Mode::Normal;
     if !offered {
-        return None;
+        return false;
     }
     // A notice still up from the add (`registered …`) yields to the setup's
     // own frame, so the dialog is not drawn over it.
@@ -323,10 +337,7 @@ fn pending_setup_action(s: &mut AppState, pd: &ProjectData) -> Option<ProjectSet
     }
     s.app.select_path(&pd.project);
     s.dirty = true;
-    Some(ProjectSettingsAction {
-        path: pd.project.clone(),
-        kind: ProjectSettingsActionKind::Init,
-    })
+    true
 }
 
 /// Whether the viewer, not the dashboard, answers a key: on its surface with

@@ -45,6 +45,7 @@ pub(super) fn state_with_detail(w: u16, h: u16) -> AppState {
     s.app.splash.skip();
     let mut detail = crate::DetailView::thin("/r/a".into(), "a".into(), ProjectStatus::Idle);
     detail.project_settings = Box::new(crate::ProjectSettingsView {
+        permissions: Vec::new(),
         path: "/r/a".into(),
         project_name: "a".into(),
         initialization: crate::ProjectInitialization::Initialized,

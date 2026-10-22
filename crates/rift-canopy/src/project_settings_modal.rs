@@ -9,6 +9,10 @@ use crate::{
 /// so keyboard navigation visits actions only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectSettingsItem {
+    /// Cycle one supported native permission choice; stages only.
+    Permission(String),
+    /// Apply all staged permission changes on an initialized project.
+    ApplyPermissions,
     /// A policy setting.
     Setting(ProjectSettingId),
     /// A native adapter by stable registry token.
@@ -20,6 +24,8 @@ pub enum ProjectSettingsItem {
 /// Transient state for one open Project Settings modal.
 #[derive(Clone, Debug, Default)]
 pub struct ProjectSettingsModalState {
+    /// Injected onboarding animation time; stationary under reduced motion.
+    pub animation_seconds: f32,
     /// Last verified view.
     pub view: Option<Box<ProjectSettingsView>>,
     /// Cursor in [`Self::items`], never on informational rows.
@@ -68,6 +74,9 @@ impl ProjectSettingsModalState {
         let Some(view) = self.view.as_deref() else {
             return Vec::new();
         };
+        if view.settings.is_empty() {
+            return Vec::new();
+        }
         let mut items = view
             .settings
             .iter()
@@ -79,6 +88,15 @@ impl ProjectSettingsModalState {
                 .iter()
                 .map(|row| ProjectSettingsItem::Integration(row.agent.clone())),
         );
+        items.extend(
+            view.permissions
+                .iter()
+                .filter(|row| view.integration_selected(&row.agent))
+                .map(|row| ProjectSettingsItem::Permission(row.agent.clone())),
+        );
+        if !view.initialization.offers_setup() && !view.permission_changes().is_empty() {
+            items.push(ProjectSettingsItem::ApplyPermissions);
+        }
         if view.initialization.offers_setup() {
             items.push(ProjectSettingsItem::Initialize);
         }
@@ -90,6 +108,11 @@ impl ProjectSettingsModalState {
     pub fn focused_description(&self) -> Option<String> {
         let view = self.view.as_deref()?;
         match self.items().get(self.cursor)? {
+            ProjectSettingsItem::Permission(agent) => {
+                let row = view.permissions.iter().find(|row| &row.agent == agent)?;
+                row.options.get(row.selected).map(|option| option.detail.clone())
+            }
+            ProjectSettingsItem::ApplyPermissions => Some("Apply the permission changes shown above to this project only. Keep-current makes no change.".into()),
             ProjectSettingsItem::Setting(id) => Some(id.description().to_owned()),
             ProjectSettingsItem::Integration(agent) => {
                 let row = view.integrations.iter().find(|row| &row.agent == agent)?;
@@ -192,6 +215,23 @@ impl ProjectSettingsModalState {
         }
         let item = self.items().get(self.cursor)?.clone();
         match item {
+            ProjectSettingsItem::Permission(agent) => {
+                let row = self
+                    .view
+                    .as_mut()?
+                    .permissions
+                    .iter_mut()
+                    .find(|row| row.agent == agent)?;
+                row.selected = (row.selected + 1) % row.options.len().max(1);
+                self.result = Some("Permission choice staged. Review its exact effect below, then confirm Apply / Initialize.".into());
+                None
+            }
+            ProjectSettingsItem::ApplyPermissions => Some(ProjectSettingsAction {
+                path: self.view.as_ref()?.path.clone(),
+                kind: ProjectSettingsActionKind::SetPermissions(
+                    self.view.as_ref()?.permission_changes(),
+                ),
+            }),
             ProjectSettingsItem::Setting(id) => self.activate_setting(id),
             ProjectSettingsItem::Integration(agent) => self.activate_integration(&agent),
             ProjectSettingsItem::Initialize => self.initialize_action(),
@@ -228,6 +268,18 @@ impl ProjectSettingsModalState {
             return;
         }
         if let Some(current) = self.view.as_deref() {
+            if current.path == view.path {
+                for row in &mut view.permissions {
+                    if let Some(staged) = current
+                        .permissions
+                        .iter()
+                        .find(|old| old.agent == row.agent && old.selected != 0)
+                    {
+                        row.selected = staged.selected;
+                        row.revision.clone_from(&staged.revision);
+                    }
+                }
+            }
             if self.reject_pre_init_poll && current.path == view.path {
                 if view.initialization != ProjectInitialization::Initialized {
                     return;
@@ -262,18 +314,7 @@ impl ProjectSettingsModalState {
     /// facts. Used only to clamp wheel scrolling.
     #[must_use]
     pub fn display_line_count(&self) -> usize {
-        self.view.as_ref().map_or(0, |view| {
-            10 + view.settings.len()
-                + view.integrations.len()
-                + usize::from(view.policy.detail.is_some())
-                + 2 * usize::from(view.initialization != ProjectInitialization::Initialized)
-                + crate::view::project_settings_display_rows(self)
-                    .iter()
-                    .filter(|row| {
-                        matches!(row, crate::view::ProjectSettingsDisplayRow::Remedy { .. })
-                    })
-                    .count()
-        })
+        crate::view::project_settings_display_rows(self).len()
     }
 
     fn activate_setting(&mut self, id: ProjectSettingId) -> Option<ProjectSettingsAction> {
@@ -327,6 +368,11 @@ impl ProjectSettingsModalState {
             .integrations
             .iter_mut()
             .find(|row| row.agent == agent)?;
+        if !row.alpha_supported && !row.enabled() {
+            self.result =
+                Some("Capture support for this harness is coming soon in this alpha.".into());
+            return None;
+        }
         let enabled = !row.enabled();
         if view.initialization == ProjectInitialization::Initialized {
             Some(ProjectSettingsAction {
@@ -366,6 +412,7 @@ mod tests {
 
     fn view(initialization: ProjectInitialization) -> ProjectSettingsView {
         ProjectSettingsView {
+            permissions: Vec::new(),
             path: "/r/demo".into(),
             project_name: "demo".into(),
             initialization,

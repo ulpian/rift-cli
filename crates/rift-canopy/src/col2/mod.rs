@@ -27,6 +27,8 @@ use crate::ProjectStatus;
 /// The full column-2 detail for the selected project.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailView {
+    /// Fresh worktree branch and tracked-file status, absent while unavailable.
+    pub git_summary: Option<GitSummary>,
     /// The project's canonical path (its key).
     pub path: String,
     /// The display label.
@@ -64,6 +66,7 @@ impl DetailView {
     #[must_use]
     pub fn thin(path: String, label: String, status: ProjectStatus) -> Self {
         Self {
+            git_summary: None,
             path: path.clone(),
             label: label.clone(),
             kind: EntryKind::Repo,
@@ -74,6 +77,15 @@ impl DetailView {
             project_settings: Box::new(ProjectSettingsView::thin(path.clone(), label.clone())),
         }
     }
+}
+
+/// Worktree-local Git facts, gathered outside the renderer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitSummary {
+    /// Branch name or a detached-HEAD label.
+    pub branch: String,
+    /// Tracked-file modifications; untracked files are not part of this probe.
+    pub tracked_changes: Option<bool>,
 }
 
 /// One model and how many calls used it (aggregated across the project's sessions).
@@ -99,6 +111,8 @@ pub enum ModelProvenance {
 /// Capture activity counts for the project (all read-only from the projection).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CaptureSummary {
+    /// Latest attributed checkpoint identifier when a record is available.
+    pub last_checkpoint_id: Option<String>,
     /// Total captured events.
     pub events: u64,
     /// Total sessions.

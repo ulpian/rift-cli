@@ -1,10 +1,7 @@
 //! Normal mode: the dashboard's own keys — the acts the rail and the graphs
 //! column raise, focus and vertical navigation, and the mode openers.
 
-use super::{
-    enter_explorer, enter_panel_editor, enter_profile_menu, selection_is_unadopted, Action,
-    CanopyKey, Mode,
-};
+use super::{enter_explorer, enter_profile_menu, selection_is_unadopted, Action, CanopyKey, Mode};
 use crate::{App, Panel};
 
 /// Normal mode's key table, read top to bottom in three groups: the acts
@@ -123,12 +120,6 @@ fn on_key_normal_motion(app: &mut App, key: CanopyKey) -> Action {
 /// The mode openers, help and quit, reachable from any focus.
 fn on_key_normal_modes(app: &mut App, key: CanopyKey) -> Action {
     match key {
-        // `e` enters the panel editor — the freed mnemonic (it opened
-        // an editor; now it opens the *layout* editor), from any focus.
-        CanopyKey::Char('e') => {
-            enter_panel_editor(app);
-            Action::None
-        }
         // `?` opens the palette help — the header's `? Help` item, which
         // teaches this key beside the click. Normal mode only: the palette's
         // input and every modal stage keep `?` as typed text or inert.

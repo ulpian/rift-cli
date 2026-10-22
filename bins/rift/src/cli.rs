@@ -101,6 +101,10 @@ pub(crate) enum ColorChoice {
 /// The `rift` subcommands.
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Install a compatible alpha using a fresh invitation download link.
+    Update(UpdateArgs),
+    /// Remove the managed installation and owned integrations; keep data by default.
+    Uninstall(UninstallArgs),
     /// Scaffold `.rift/`, install git hooks, init the projection, wire agents.
     #[command(
         alias = "setup",
@@ -203,6 +207,29 @@ pub(crate) enum Command {
     /// Agent + git hook entry (JSON on stdin). Hidden: for agents, not humans.
     #[command(hide = true, alias = "hook", disable_help_flag = true)]
     Hooks(HooksArgs),
+}
+
+/// Update from the expiring link supplied with a release invitation.
+#[derive(Args, Debug)]
+pub(crate) struct UpdateArgs {
+    /// Fresh update link from the invitation email.
+    #[arg(long = "from", value_name = "UPDATE_LINK")]
+    pub(crate) from: Option<String>,
+}
+
+/// Removal of an installer-managed Rift. Purging is always explicit.
+#[derive(Args, Debug)]
+pub(crate) struct UninstallArgs {
+    /// Also remove Rift's machine-local cache/settings and project runtime state.
+    /// Captured Git records and repository policy files are preserved.
+    #[arg(long)]
+    pub(crate) purge: bool,
+    /// Confirm the destructive local-data purge (required with --purge).
+    #[arg(long, requires = "purge")]
+    pub(crate) yes: bool,
+    /// Show installation and project paths without changing anything.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 /// `rift search <QUERY>` — the search surface, and it is an ALIAS in the same

@@ -36,6 +36,7 @@ impl AppState {
             return Effects::default();
         };
         self.app.viewer.dashboard_focus = self.app.focus;
+        self.app.dashboard_tab = crate::dashboard::DashboardTab::Recall;
         self.app.surface = Surface::RecallViewer;
         self.app.viewer.pane = ViewerPane::Checkpoints;
         self.app.viewer.pane_before_command = ViewerPane::Checkpoints;
@@ -58,14 +59,23 @@ impl AppState {
     }
 
     /// Return to the dashboard state that was underneath the viewer.
-    pub fn close_recall_viewer(&mut self) {
+    pub fn close_recall_viewer(&mut self) -> Effects {
+        self.app.dashboard_tab = crate::dashboard::DashboardTab::Home;
         self.app.surface = Surface::Dashboard;
-        self.app.focus = self.app.viewer.dashboard_focus;
+        self.app.projects_open = false;
+        self.app.focus = Panel::Detail;
         self.app.mode = Mode::Normal;
         self.app.command_line.clear();
         self.app.command_error = None;
         self.app.viewer.filter_editing = false;
         self.dirty = true;
+        let selected = self.app.selected_project().map(|p| p.path.clone());
+        Effects {
+            data_requests: std::iter::once(DataRequest::SetActive(selected.clone()))
+                .chain(selected.map(DataRequest::Refresh))
+                .collect(),
+            ..Effects::default()
+        }
     }
 }
 
@@ -198,7 +208,11 @@ pub(super) fn select_viewer_project(s: &mut AppState) -> Effects {
         return Effects::default();
     };
     let generation = s.app.viewer.start_project(project.clone());
-    s.app.viewer.pane = ViewerPane::Projects;
+    s.app.viewer.pane = if s.app.projects_open {
+        ViewerPane::Projects
+    } else {
+        ViewerPane::Checkpoints
+    };
     Effects {
         data_requests: vec![DataRequest::Viewer(ViewerRequest::Catalogue {
             project,
@@ -374,8 +388,7 @@ fn viewer_filter_key(s: &mut AppState, key: CanopyKey) -> Flow {
 fn viewer_navigation_key(s: &mut AppState, key: CanopyKey) -> Flow {
     let effects = match key {
         CanopyKey::Esc | CanopyKey::Char('r') => {
-            s.close_recall_viewer();
-            return Flow::Continue(Effects::default());
+            return Flow::Continue(s.close_recall_viewer());
         }
         CanopyKey::Char('q') | CanopyKey::Quit => {
             s.app.quit = true;
@@ -444,8 +457,15 @@ fn reload_catalogue(s: &mut AppState) -> Effects {
 fn move_viewer_pane(s: &mut AppState, key: CanopyKey) {
     let pane = s.app.viewer.pane;
     s.app.viewer.pane = match key {
-        CanopyKey::Tab => pane.cycle(true),
-        CanopyKey::BackTab => pane.cycle(false),
+        CanopyKey::Tab | CanopyKey::BackTab => {
+            let order = [
+                ViewerPane::Checkpoints,
+                ViewerPane::Timeline,
+                ViewerPane::Command,
+            ];
+            let i = order.iter().position(|p| *p == pane).unwrap_or(0);
+            order[(i + if key == CanopyKey::Tab { 1 } else { 2 }) % order.len()]
+        }
         CanopyKey::Left => match pane {
             ViewerPane::Projects | ViewerPane::Checkpoints => ViewerPane::Projects,
             ViewerPane::Timeline | ViewerPane::Command => ViewerPane::Checkpoints,

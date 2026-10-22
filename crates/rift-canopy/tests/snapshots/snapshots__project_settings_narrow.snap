@@ -1,25 +1,24 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 213
 expression: "render_state(&mut\nproject_settings_state(Size::new(60, 20),\nrift_canopy::ProjectInitialization::Initialized,\nrift_canopy::ProjectPolicyState::Declared,))"
 ---
- RIFT  Canopy  *
-╭─ pro╭─ Project Settings · rift-cli ─────────────[x]╮tings]
-│># ri│Recall                                        │
-│ # ri│> Total Recall                             [x]│
-│     │  per-turn delta injection · custom effect [x]│
-│     │  documents as Markdown                    [x]│
-│     │  native search                            [x]│
-│     │                                              │
-│     │Capture                                       │─────#
-│     │  tool-call capture                        [x]│     |
-│     │  token-usage capture                      [x]│     |
-│     │  raw transcripts                          [ ]│     |
-│     │About: Build and serve git-native project memo│     |
-│     │                                              │     |
-│[+][^│ j/k move · enter/space apply · pgup/pgdn scro│     |
-╰─────╰──────────────────────────────────────────────╯     |
- j/k move  ·  ⏎ apply  ·  esc close
+ RIFT  Canopy  *                  ? Help  / Palette  q Quit
+[<]   Models   Activity   Tokens   Recall  [Settings]   < >
+ rift-cli · branch unknown · /r/rift-cli
+ Local facts only; Recall: family
+╭─ Project Settings · rift-cli ─────────────────────────[x]╮
+│Recall                                                    │
+│> Total Recall                                         [x]│
+│  per-turn delta injection · custom effective budget:  [x]│
+│  documents as Markdown                                [x]│
+│  native search                                        [x]│
+│                                                          │
+│Capture                                                   │
+│About: Build and serve git-native project memory; disablin│
+│                                                          │
+│ j/k move · enter/space apply · pgup/pgdn scroll · esc/x c│
+╰──────────────────────────────────────────────────────────╯
+← Projects  [/] tabs  s Settings  r Recall viewer  / command
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │
 ╰──────────────────────────────────────────────────────────╯

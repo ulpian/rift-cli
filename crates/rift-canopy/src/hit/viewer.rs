@@ -11,7 +11,7 @@ use crate::state::ViewModel;
 use crate::Panel;
 
 use super::grid::rail_row_at;
-use super::{contains, inner_of, local_row, on_scrollbar, third_of, ScrollRegion, Target};
+use super::{contains, inner_of, local_row, on_scrollbar, ScrollRegion, Target};
 
 /// The viewer's element under `(col, row)`: the command bar, the tab strip
 /// (drawn on the single-column tier only), then whichever pane is under the
@@ -51,10 +51,10 @@ pub(super) fn hit_recall_viewer(vm: &ViewModel, col: u16, row: u16) -> Option<Ta
 
 /// The pane under `col` in the single-column tab strip, by horizontal thirds.
 fn viewer_tab_at(col: u16, tabs: Rect) -> ViewerPane {
-    match third_of(col, tabs) {
-        0 => ViewerPane::Projects,
-        1 => ViewerPane::Checkpoints,
-        _ => ViewerPane::Timeline,
+    if col.saturating_sub(tabs.x) < tabs.w / 2 {
+        ViewerPane::Checkpoints
+    } else {
+        ViewerPane::Timeline
     }
 }
 

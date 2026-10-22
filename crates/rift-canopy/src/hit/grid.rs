@@ -192,7 +192,7 @@ fn tab_at(col: u16, tabs: Rect) -> Panel {
 
 /// A click in column 1 → the rail's action bar, the project row under it,
 /// else focus the panel.
-fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
+pub(super) fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
     let inner = inner_of(rect);
     let (list, buttons) = crate::view::rail_action_layout(inner, !vm.projects.is_empty());
     // The bottom action bar — add / reorder / remove — takes priority
@@ -213,7 +213,13 @@ fn project_or_focus(vm: &ViewModel, rect: Rect, col: u16, row: u16) -> Target {
 /// A click in column 2 → the repository card's buttons or panel focus.
 /// Recomputes the card stack from the same solver the renderer uses, so a click
 /// resolves to the exact card/button drawn.
-fn toggle_or_focus(vm: &ViewModel, units: &[CardKind], rect: Rect, col: u16, row: u16) -> Target {
+pub(super) fn toggle_or_focus(
+    vm: &ViewModel,
+    units: &[CardKind],
+    rect: Rect,
+    col: u16,
+    row: u16,
+) -> Target {
     // The card-stack overflow scrollbar on the column's right edge.
     if on_scrollbar(rect, vm.detail_scroll, cards::content_len(units), col, row) {
         return Target::Scrollbar(ScrollRegion::Detail);

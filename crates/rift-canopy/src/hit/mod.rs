@@ -59,6 +59,10 @@ pub enum ScrollRegion {
 /// the keyboard produces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
+    /// Open or close the project drawer (Left / Esc).
+    ProjectDrawer,
+    /// Select a top-level view (`[` / `]`).
+    DashboardTab(crate::dashboard::DashboardTab),
     /// Focus a panel (a click in it that isn't a more specific target).
     PanelFocus(Panel),
     /// Select the project list row at this index (column 1).
@@ -220,7 +224,9 @@ impl Target {
     pub fn is_button(&self) -> bool {
         matches!(
             self,
-            Target::HeaderHelp
+            Target::ProjectDrawer
+                | Target::DashboardTab(_)
+                | Target::HeaderHelp
                 | Target::HeaderPalette
                 | Target::HeaderEditor
                 | Target::HeaderQuit
@@ -297,6 +303,26 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     }
     if let Some(target) = hit_suggest_panel(vm, col, row) {
         return Some(target);
+    }
+    if matches!(vm.mode, Mode::Normal | Mode::ProjectSettings) && !vm.project_settings.running {
+        if row == 1 && col < 3 {
+            return Some(Target::ProjectDrawer);
+        }
+        if let Some((tab, _)) = crate::dashboard::tab_rects(size, vm.dashboard_tab)
+            .into_iter()
+            .chain(crate::dashboard::tab_steps(size, vm.dashboard_tab))
+            .find(|(_, r)| contains(*r, col, row))
+        {
+            return Some(Target::DashboardTab(tab));
+        }
+        if vm.projects_open {
+            let rect = crate::dashboard::drawer_rect(size);
+            return Some(if contains(rect, col, row) {
+                grid::project_or_focus(vm, rect, col, row)
+            } else {
+                Target::ProjectDrawer
+            });
+        }
     }
     // A mode modal owns the surface while open: its rows and chips act, the
     // rest of its frame is inert, and the covered panels beneath are not
@@ -413,6 +439,9 @@ fn hit_suggest_panel(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
 /// equal targets for any arrangement. The degraded tiers keep the default
 /// role layout.
 fn hit_dashboard(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Target> {
+    if vm.mode != Mode::PanelEditor {
+        return hit_tab_content(vm, col, row);
+    }
     match choose_mode(vm.size) {
         LayoutMode::Full3Col => hit_model(
             vm,
@@ -424,6 +453,48 @@ fn hit_dashboard(vm: &ViewModel, body: Rect, col: u16, row: u16) -> Option<Targe
         LayoutMode::SinglePanel => hit_single(vm, body, col, row),
         LayoutMode::TooSmall => None,
     }
+}
+
+fn hit_tab_content(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
+    use crate::dashboard::DashboardTab;
+    let (body, _, command) = crate::dashboard::geometry(vm.size);
+    if contains(command, col, row) {
+        return Some(Target::CommandBar);
+    }
+    if !contains(body, col, row) {
+        return None;
+    }
+    let (repo, _) = crate::dashboard::home_rects(vm.size);
+    let recall = crate::dashboard::home_recall_content(vm.size);
+    let target = match vm.dashboard_tab {
+        DashboardTab::Home if contains(repo, col, row) => {
+            grid::toggle_or_focus(vm, &[crate::cards::CardKind::Repository], repo, col, row)
+        }
+        DashboardTab::Home => sections::section_or_focus(
+            &[crate::col3::SectionId::Recall],
+            &vm.col3,
+            recall,
+            vm.graphs_scroll,
+            col,
+            row,
+        ),
+        DashboardTab::Models => {
+            grid::toggle_or_focus(vm, &[crate::cards::CardKind::Models], body, col, row)
+        }
+        DashboardTab::Activity => {
+            grid::toggle_or_focus(vm, &[crate::cards::CardKind::Activity], body, col, row)
+        }
+        DashboardTab::Tokens => sections::section_or_focus(
+            &[crate::col3::SectionId::TokenUsage],
+            &vm.col3,
+            body,
+            vm.graphs_scroll,
+            col,
+            row,
+        ),
+        DashboardTab::Recall | DashboardTab::Settings => return None,
+    };
+    Some(target)
 }
 
 #[cfg(test)]

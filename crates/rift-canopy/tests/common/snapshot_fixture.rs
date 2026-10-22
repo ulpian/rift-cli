@@ -132,6 +132,7 @@ pub(crate) fn project_settings_state_with_codex_hooks(
         .app
         .project_settings
         .open(rift_canopy::ProjectSettingsView {
+            permissions: Vec::new(),
             path: "/r/rift-cli".into(),
             project_name: "rift-cli".into(),
             initialization,
@@ -139,6 +140,7 @@ pub(crate) fn project_settings_state_with_codex_hooks(
             policy: policy_summary(policy),
             integrations: integration_rows(codex_hooks),
         });
+    state.app.dashboard_tab = rift_canopy::dashboard::DashboardTab::Settings;
     state.app.mode = rift_canopy::Mode::ProjectSettings;
     state
 }
@@ -603,6 +605,7 @@ pub(crate) fn member_row_detail(
     running_members: Vec<String>,
 ) -> rift_canopy::DetailView {
     rift_canopy::DetailView {
+        git_summary: None,
         path: path.to_owned(),
         label: label.to_owned(),
         kind,

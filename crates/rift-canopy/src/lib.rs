@@ -30,6 +30,7 @@ pub mod col2;
 pub mod col3;
 pub mod colour_picker;
 pub mod command;
+pub mod dashboard;
 pub mod dispatch;
 pub mod editor;
 pub mod explorer;
@@ -50,12 +51,14 @@ pub mod state;
 pub mod suggest;
 pub mod theme;
 pub mod view;
+mod welcome;
 
 pub use app::{load_profile_plane, prime_startup, CanopyOpts};
 pub use col1::{
     current_registry, derive_status, EntryKind, LiveSessions, ProjectEntry, ProjectEvent,
     ProjectOp, ProjectionState, SessionsRead, StatusInputs,
 };
+pub use col2::project_settings::{AgentPermissionChange, AgentPermissionRow, PermissionOptionRow};
 pub use col2::project_settings::{NativeAgentRemedy, NativeAgentRemedySeverity};
 pub use col2::{
     escape_for_terminal, sanitize_for_terminal, CaptureSummary, DetailView, ModelProvenance,
@@ -303,14 +306,6 @@ pub enum Panel {
     Command,
 }
 
-/// The Tab / Shift-Tab focus-cycle order.
-const FOCUS_ORDER: [Panel; 4] = [
-    Panel::Projects,
-    Panel::Detail,
-    Panel::Graphs,
-    Panel::Command,
-];
-
 /// The Left/Right focus order (columns only; the command row is reached via Tab
 /// or `/`).
 const COLUMN_ORDER: [Panel; 3] = [Panel::Projects, Panel::Detail, Panel::Graphs];
@@ -329,6 +324,10 @@ pub struct PanelScroll {
 /// The whole dashboard state.
 #[derive(Clone, Debug)]
 pub struct App {
+    /// Active full-width project view.
+    pub dashboard_tab: dashboard::DashboardTab,
+    /// Whether the temporary repository/worktree drawer is open.
+    pub projects_open: bool,
     /// Watched projects.
     pub projects: Vec<Project>,
     /// Selected project index.
@@ -420,10 +419,12 @@ impl App {
         // not a bespoke column-1 panel.
         let overlay = projects.is_empty().then(crate::dispatch::Overlay::wizard);
         Self {
+            dashboard_tab: dashboard::DashboardTab::Home,
+            projects_open: false,
             projects,
             selected: 0,
-            focus: Panel::Projects,
-            focus_prev: Panel::Projects,
+            focus: Panel::Detail,
+            focus_prev: Panel::Detail,
             surface: crate::recall_viewer::Surface::Dashboard,
             viewer: crate::recall_viewer::RecallViewerState::default(),
             scroll: PanelScroll::default(),
@@ -570,15 +571,22 @@ impl App {
 
     /// Cycle focus to the next (`fwd`) or previous panel, wrapping (Tab / Shift-Tab).
     pub fn cycle_focus(&mut self, fwd: bool) {
-        let i = FOCUS_ORDER
-            .iter()
-            .position(|&p| p == self.focus)
-            .unwrap_or(0);
-        let n = FOCUS_ORDER.len();
+        let content = if self.dashboard_tab == crate::dashboard::DashboardTab::Tokens {
+            Panel::Graphs
+        } else {
+            Panel::Detail
+        };
+        let order: &[Panel] = if self.projects_open {
+            &[Panel::Projects, content, Panel::Command]
+        } else if self.dashboard_tab == crate::dashboard::DashboardTab::Home {
+            &[Panel::Detail, Panel::Graphs, Panel::Command]
+        } else {
+            &[content, Panel::Command]
+        };
+        let i = order.iter().position(|p| *p == self.focus).unwrap_or(0);
+        let n = order.len();
         let j = if fwd { (i + 1) % n } else { (i + n - 1) % n };
-        if let Some(&next) = FOCUS_ORDER.get(j) {
-            self.set_focus(next);
-        }
+        self.set_focus(order[j]);
     }
 
     /// Open a modal and focus its default control (index 0), so a
@@ -656,50 +664,29 @@ impl App {
     /// offset is capped at its stack's `max_scroll` — 0 when the stack fits
     /// (a fitting column scrolls nothing).
     pub fn clamp_scrolls(&mut self, size: crate::render::frame::Size) {
-        use crate::layout::{choose_mode, single_panel, solve, two_col, LayoutMode};
-        // The explorer is the first scrolling mode-modal, and its
-        // viewport is the modal's list area — not a dashboard column — so it
-        // clamps here first, before the too-small early-out (a modal degrades to
-        // near-full-screen rather than vanishing).
         self.clamp_explorer_scroll(size);
-        let body = crate::layout::Rect {
-            x: 0,
-            y: 1,
-            w: size.w,
-            h: size.h.saturating_sub(1),
+        let (body, _, _) = crate::dashboard::geometry(size);
+        let (repo, _) = crate::dashboard::home_rects(size);
+        let recall = crate::dashboard::home_recall_content(size);
+        let (cards, detail_area): (&[crate::cards::CardKind], _) = match self.dashboard_tab {
+            crate::dashboard::DashboardTab::Home => (&[crate::cards::CardKind::Repository], repo),
+            crate::dashboard::DashboardTab::Models => (&[crate::cards::CardKind::Models], body),
+            crate::dashboard::DashboardTab::Activity => (&[crate::cards::CardKind::Activity], body),
+            _ => (&[], body),
         };
-        let (col2, col3) = match choose_mode(size) {
-            LayoutMode::Full3Col => {
-                let r = solve(body);
-                (r.col2, r.col3)
-            }
-            LayoutMode::TwoCol => {
-                let r = two_col(body);
-                (r.col2, r.col3)
-            }
-            LayoutMode::SinglePanel => {
-                let (_tabs, panel, _hint, _cmd) = single_panel(body);
-                (panel, panel)
-            }
-            LayoutMode::TooSmall => {
-                self.scroll = PanelScroll::default();
-                return;
-            }
-        };
-        // Clamp against the default card/panel lists — the scroll bounds are the
-        // count/rows, invariant under reordering (a cross-column move can only
-        // shrink a column, so the default over-estimate stays a safe ceiling; the
-        // solver re-clamps the offset when it draws).
         self.scroll.detail = self
             .scroll
             .detail
-            .min(crate::cards::solve_scrolled(&crate::cards::CardKind::ALL, col2, 0).1);
-        // Graphs scroll over the fully-expanded panels: the overflow
-        // of the expanded content past the column height.
-        self.scroll.graphs = self.scroll.graphs.min(crate::col3::max_scroll(
-            &crate::col3::SectionId::ALL,
-            col3.h,
-        ));
+            .min(crate::cards::solve_scrolled(cards, detail_area, 0).1);
+        let (sections, graph_area): (&[crate::col3::SectionId], _) = match self.dashboard_tab {
+            crate::dashboard::DashboardTab::Home => (&[crate::col3::SectionId::Recall], recall),
+            crate::dashboard::DashboardTab::Tokens => (&[crate::col3::SectionId::TokenUsage], body),
+            _ => (&[], body),
+        };
+        self.scroll.graphs = self
+            .scroll
+            .graphs
+            .min(crate::col3::max_scroll(sections, graph_area.h));
     }
 
     /// Clamp the destination explorer's cursor and scroll: the

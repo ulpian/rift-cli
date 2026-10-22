@@ -205,12 +205,8 @@ where
     let mut state = startup_state(&opts, initial, size, &prefs, capture_refused);
     open_viewer_launch(&mut state, &opts, &req_tx);
 
-    // Play the splash on the raw terminal source, so bus updates that arrive
-    // meanwhile stay queued (they are drained on the first main-loop poll).
-    let mut live = LiveEvents::new();
-    if !opts.skip_splash {
-        crate::splash::play_live(backend.as_mut(), &mut live, caps, size);
-    }
+    // Branding belongs to project onboarding; established projects open directly.
+    let live = LiveEvents::new();
     state.app.splash.skip();
 
     let mut src = MergedEvents { live, data_rx };
@@ -261,13 +257,11 @@ fn startup_state(
             ],
         ));
     }
-    state.reduced_motion = prefs.reduced_motion;
+    state.reduced_motion =
+        prefs.reduced_motion || opts.ascii || std::env::var_os("NO_COLOR").is_some();
     state.version.clone_from(&opts.version);
     // The one-shot startup sweep as the panels first fill after the splash;
     // reduced motion / ASCII show the final frame instantly.
-    if !opts.ascii {
-        state.arm_startup_sweep();
-    }
 
     // Launch-cwd auto-select BEFORE the loop starts, so the startup
     // prime subscribes the project the developer launched from; `/add`
@@ -281,6 +275,11 @@ fn startup_state(
         opts.launch_cwd.as_deref(),
         opts.launch_cwd_is_repo,
     );
+    state.pending_setup_prompt = state
+        .app
+        .selected_project()
+        .map(|project| project.path.clone());
+    state.app.set_focus(crate::Panel::Detail);
     state
 }
 

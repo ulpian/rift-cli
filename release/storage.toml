@@ -1,0 +1,4 @@
+project = "gen-lang-client-0144758115"
+bucket = "xrift-alpha-downloads-0144758115"
+location = "europe-west1"
+signer = "rift-alpha-downloads@gen-lang-client-0144758115.iam.gserviceaccount.com"

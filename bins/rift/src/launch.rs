@@ -30,6 +30,10 @@ use crate::projection::project_name;
 pub(crate) fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
     let cache_root = crate::family::cache_root();
     let cstore = rift_canopy_data::CanopyStore::open(&cache_root)?;
+    #[cfg(feature = "tui")]
+    if interactive_terminal() && !crate::onboarding::prepare(&cstore)? {
+        return Ok(());
+    }
     let projects = launch_projects(&cstore)?;
     #[cfg(feature = "tui")]
     if interactive_terminal() {

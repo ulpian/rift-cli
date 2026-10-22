@@ -171,7 +171,77 @@ pub(super) fn draw_repository(
     if buttons.recall.rect.y == buttons.settings.rect.y {
         draw_repository_status(ctx, theme, rect, inner, frame);
     }
+    draw_repository_facts(ctx, theme, inner, &buttons, frame);
     draw_repository_buttons(ctx, theme, &buttons, frame);
+}
+
+fn draw_repository_facts(
+    ctx: &CardCtx<'_>,
+    theme: Theme,
+    inner: Rect,
+    buttons: &RepositoryButtonLayout,
+    frame: &mut Frame,
+) {
+    let d = ctx.detail;
+    let bottom = buttons.recall.rect.y.saturating_sub(inner.y);
+    if bottom > 3 {
+        let git = d.git_summary.as_ref().map_or_else(
+            || "Git status unavailable".to_owned(),
+            |git| {
+                let state = match git.tracked_changes {
+                    Some(true) => "tracked files modified",
+                    Some(false) => "tracked files clean",
+                    None => "tracked status unavailable",
+                };
+                format!("{} · {state}", sanitize_for_terminal(&git.branch))
+            },
+        );
+        line(frame, inner, 3, &git, theme.body());
+    }
+    if bottom > 4 {
+        let capture =
+            if d.capture.events == 0 && d.capture.sessions == 0 && d.capture.checkpoints == 0 {
+                "No attributed capture facts available".to_owned()
+            } else {
+                format!(
+                    "Capture: {} sessions · {} checkpoints · {} events",
+                    d.capture.sessions, d.capture.checkpoints, d.capture.events
+                )
+            };
+        line(frame, inner, 4, &capture, theme.dim());
+    }
+    if bottom > 5 {
+        let id = d
+            .capture
+            .last_checkpoint_id
+            .as_deref()
+            .map(|id| id.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "unavailable".into());
+        line(
+            frame,
+            inner,
+            5,
+            &sanitize_for_terminal(&format!("Latest checkpoint: {id}")),
+            theme.dim(),
+        );
+    }
+    if bottom > 6 {
+        let agents = d
+            .project_settings
+            .integrations
+            .iter()
+            .filter(|row| row.enabled())
+            .map(|row| row.display_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        line(
+            frame,
+            inner,
+            6,
+            &sanitize_for_terminal(&format!("Harnesses: {agents}")),
+            theme.dim(),
+        );
+    }
 }
 
 /// The collapsed card's single row: both actions, and the headline between

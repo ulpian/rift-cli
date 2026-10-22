@@ -30,7 +30,7 @@ The three product planes and their storage substrate:
 |---|---|
 | **rift-shadow** | Immutable, git-native system of record for AI sessions (capture, redaction, attribution, cost, hash chain). Native Rust end to end: it runs no other binary. |
 | **rift-total-recall** | Memory-delta validity plane projected over rift-shadow data; agents retrieve deltas via hook injection + CLI skills, not full re-reads. |
-| **rift-canopy** | The terminal dashboard — the `rift` entrypoint (3-column grid, nic-gauge, slash palette, project-settings modal) behind a `RenderBackend` seam. |
+| **rift-canopy** | The terminal dashboard — the `rift` entrypoint (project tabs, worktree drawer, slash palette, project settings) behind a `RenderBackend` seam. |
 | **rift-agent\*** | Native project integrations for Claude Code, Codex, Gemini CLI, Antigravity, Cursor, Copilot CLI, OpenCode, Factory Droid, and Ollama. |
 | **rift-nic-gauge** | Read-only context-% data for Canopy; not a project setting. |
 | **Turso** | SQLite-compatible async store for the rebuildable projection (behind the `CanonicalStore` seam; a `rusqlite` reference impl ships). |
@@ -171,11 +171,10 @@ reviewable adjacency list.
   editor; never overwrite or delete an integration artifact Rift does not own.
   The Canopy surface opens from the Repository card, `s`, or `/settings`; it
   contains Recall, Capture, Security/Policy, and every adapter in registry order.
-  Adding a project in Canopy **is** `rift init` for a repository not set up on
-  this machine: the first status read emits the `Init` act, which runs the
-  detected default plan (`ProjectSetupPlan::from_view`, the page's own
-  reading) through the manager's progress-reporting method and shows every
-  step in the `running` dialog; removing a project only hides the row.
+  Adding an unprovisioned project opens the staged setup page after its first
+  status read. The user reviews harnesses, permissions, and project settings,
+  then explicitly initializes through the same native manager and progress
+  reporting as the CLI. Removing a project only hides the row.
   `features.total_recall` is on unless written `false`.
   Agent presence is **one predicate** over four evidence classes — a `PATH`
   command (bare, `.exe` or `.cmd`), the vendor's install location, a verified

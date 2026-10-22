@@ -133,6 +133,10 @@ impl AppState {
     /// an explicit `dt` so it is deterministic in tests.
     pub fn advance_anim(&mut self, dt: Duration) -> bool {
         let mut active = false;
+        if self.onboarding_animation_active() {
+            self.app.project_settings.animation_seconds += dt.as_secs_f32();
+            active = true;
+        }
         if let Some(anim) = self.col3_anim.as_mut() {
             anim.elapsed = anim.elapsed.saturating_add(dt);
             if anim.elapsed >= COL3_SETTLE {
@@ -194,12 +198,26 @@ impl AppState {
     /// a col-3 tween, the suggest fade, the startup sweep, or a selection pulse.
     #[must_use]
     pub fn anim_active(&self) -> bool {
-        self.col3_anim.is_some()
+        self.onboarding_animation_active()
+            || self.col3_anim.is_some()
             || (self.app.mode == Mode::Command && self.suggest_fade < 1.0)
             || self.startup_sweep < 1.0
             || self.select_pulse > 0.0
             || self.press_pulse > 0.0
             || (matches!(self.app.overlay, Some(Overlay::Notice(_))) && self.notice_settle > 0.0)
+    }
+
+    fn onboarding_animation_active(&self) -> bool {
+        !self.reduced_motion
+            && self.app.mode == Mode::ProjectSettings
+            && !self.app.projects_open
+            && self.app.overlay.is_none()
+            && self
+                .app
+                .project_settings
+                .view
+                .as_ref()
+                .is_some_and(|view| view.initialization.offers_setup())
     }
 
     /// Arm a selection/hover pulse: a brief colour lerp acknowledges

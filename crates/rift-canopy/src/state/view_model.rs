@@ -30,6 +30,10 @@ pub struct ProjectRow {
 /// The immutable per-frame render input. Cheap to clone (Arc-shared vectors).
 #[derive(Clone, Debug)]
 pub struct ViewModel {
+    /// Active full-width project view.
+    pub dashboard_tab: crate::dashboard::DashboardTab,
+    /// Temporary project drawer visibility.
+    pub projects_open: bool,
     /// Terminal size.
     pub size: Size,
     /// Focused panel.
@@ -160,6 +164,8 @@ impl AppState {
             self.layout_cache = Arc::new(self.app.layout.clone());
         }
         ViewModel {
+            dashboard_tab: self.app.dashboard_tab,
+            projects_open: self.app.projects_open,
             size: self.size,
             focus: self.app.focus,
             mode: self.app.mode,

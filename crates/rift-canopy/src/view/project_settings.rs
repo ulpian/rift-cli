@@ -11,7 +11,7 @@ use crate::render::frame::Frame;
 use crate::state::ViewModel;
 use crate::ProjectInitialization as Init;
 
-use super::modal::{draw_modal_backdrop, draw_mode_close, modal_rect, mode_chip_style};
+use super::modal::{draw_mode_close, mode_chip_style};
 use super::text::clip_at;
 use super::ACCENT;
 
@@ -64,6 +64,21 @@ pub fn project_settings_display_rows(
     };
     let items = state.items();
     let mut rows = Vec::new();
+    if view.settings.is_empty() {
+        return vec![ProjectSettingsDisplayRow::Info(
+            "Loading project settings…".into(),
+        )];
+    }
+    if view.initialization.offers_setup() {
+        rows.push(ProjectSettingsDisplayRow::Info(
+            "Review your harnesses and settings before initializing this project.".into(),
+        ));
+        rows.push(ProjectSettingsDisplayRow::Info(
+            "Capture starts with new sessions. Historical import is a separate opt-in command."
+                .into(),
+        ));
+        rows.push(ProjectSettingsDisplayRow::Spacer);
+    }
     push_settings_section(
         &mut rows,
         &items,
@@ -100,6 +115,7 @@ pub fn project_settings_display_rows(
         rows.push(integration_row(index, integration, view.initialization));
         push_remedy_lines(&mut rows, &integration.remedies);
     }
+    push_permissions_section(&mut rows, &items, view);
     if view.initialization.offers_setup() {
         rows.push(ProjectSettingsDisplayRow::Spacer);
         if let Some(index) = item_index(&items, &crate::ProjectSettingsItem::Initialize) {
@@ -107,6 +123,46 @@ pub fn project_settings_display_rows(
         }
     }
     rows
+}
+
+fn push_permissions_section(
+    rows: &mut Vec<ProjectSettingsDisplayRow>,
+    items: &[crate::ProjectSettingsItem],
+    view: &crate::ProjectSettingsView,
+) {
+    rows.push(ProjectSettingsDisplayRow::Spacer);
+    rows.push(ProjectSettingsDisplayRow::Heading(
+        "Harness permissions · project only".into(),
+    ));
+    for permission in &view.permissions {
+        let item = crate::ProjectSettingsItem::Permission(permission.agent.clone());
+        if let (Some(index), Some(option)) = (
+            item_index(items, &item),
+            permission.options.get(permission.selected),
+        ) {
+            rows.push(ProjectSettingsDisplayRow::Action {
+                index,
+                label: permission.agent.clone(),
+                chip: format!("[{}]", option.label),
+            });
+            rows.extend(
+                wrap_words(&option.detail, REMEDY_WRAP_COLS)
+                    .into_iter()
+                    .map(ProjectSettingsDisplayRow::Info),
+            );
+        }
+    }
+    rows.push(ProjectSettingsDisplayRow::Info(
+        "Unsupported controls stay in the harness. Existing permissions are kept by default."
+            .into(),
+    ));
+    if let Some(index) = item_index(items, &crate::ProjectSettingsItem::ApplyPermissions) {
+        rows.push(ProjectSettingsDisplayRow::Action {
+            index,
+            label: "Confirm reviewed native permission changes".into(),
+            chip: "[Apply permissions]".into(),
+        });
+    }
 }
 
 /// Scrollable Project Settings body; the last three inner rows are reserved for
@@ -121,6 +177,30 @@ pub fn project_settings_body_rect(modal: Rect) -> Rect {
     }
 }
 
+/// Reserve the welcome mark only while project setup is on offer.
+#[must_use]
+pub fn project_settings_content_rect(
+    modal: Rect,
+    state: &crate::ProjectSettingsModalState,
+) -> Rect {
+    let body = project_settings_body_rect(modal);
+    let welcome = if state
+        .view
+        .as_ref()
+        .is_some_and(|view| view.initialization.offers_setup())
+        && body.h > 10
+    {
+        8
+    } else {
+        0
+    };
+    Rect {
+        y: body.y + welcome,
+        h: body.h.saturating_sub(welcome),
+        ..body
+    }
+}
+
 /// Right-aligned checkbox/action-chip rects for visible modal actions. Mouse
 /// activation is deliberately limited to these exact cells.
 #[must_use]
@@ -128,7 +208,7 @@ pub fn project_settings_action_rects(
     modal: Rect,
     state: &crate::ProjectSettingsModalState,
 ) -> Vec<(usize, Rect)> {
-    let body = project_settings_body_rect(modal);
+    let body = project_settings_content_rect(modal, state);
     let rows = project_settings_display_rows(state);
     let scroll = project_settings_scroll(state, &rows, usize::from(body.h));
     rows.iter()
@@ -184,15 +264,36 @@ pub fn project_settings_cancel_rect(
 /// title, the scrolled section rows, then the three footer rows — the focused
 /// row's description, the inline result, and the stage-honest hints — and
 /// the raw-transcript warning's explicit cancel chip.
-pub(super) fn draw_project_settings(vm: &ViewModel, frame: &mut Frame) {
-    let rect = modal_rect(vm.size);
+pub(super) fn draw_project_settings(vm: &ViewModel, frame: &mut Frame, unicode: bool) {
+    let rect = crate::dashboard::geometry(vm.size).0;
     if rect.w < 20 || rect.h < 7 {
         return;
     }
-    draw_modal_backdrop(vm, frame, rect);
+    crate::chrome::fill(frame, rect, vm.theme.body().with_bg(vm.theme.surface_bg()));
     let inner = frame.border(rect, &settings_title(vm), ACCENT);
     draw_mode_close(vm, frame, rect, &crate::hit::Target::ProjectSettingsClose);
-    draw_settings_rows(vm, frame, project_settings_body_rect(rect));
+    let content = project_settings_content_rect(rect, &vm.project_settings);
+    let body = project_settings_body_rect(rect);
+    if content.y > body.y {
+        crate::welcome::draw(frame, body, vm.project_settings.animation_seconds, unicode);
+        clip_at(
+            frame,
+            body.x + 15,
+            body.y + 2,
+            body.w.saturating_sub(15),
+            "Welcome to Rift",
+            vm.theme.key_hint(),
+        );
+        clip_at(
+            frame,
+            body.x + 15,
+            body.y + 3,
+            body.w.saturating_sub(15),
+            "Set up this project",
+            vm.theme.dim(),
+        );
+    }
+    draw_settings_rows(vm, frame, content);
     draw_settings_footer(vm, frame, inner);
     if let Some(cancel) = project_settings_cancel_rect(rect, &vm.project_settings) {
         let style = mode_chip_style(vm, &crate::hit::Target::ProjectSettingsCancel);
@@ -632,6 +733,7 @@ mod tests {
         };
         let mut state = crate::ProjectSettingsModalState::default();
         state.open(crate::ProjectSettingsView {
+            permissions: Vec::new(),
             path: "/r/demo".into(),
             project_name: "demo".into(),
             initialization: crate::ProjectInitialization::Initialized,
@@ -675,6 +777,7 @@ mod tests {
     ) -> crate::ProjectSettingsModalState {
         let mut state = crate::ProjectSettingsModalState::default();
         state.open(crate::ProjectSettingsView {
+            permissions: Vec::new(),
             path: "/r/demo".into(),
             project_name: "demo".into(),
             initialization: crate::ProjectInitialization::Initialized,

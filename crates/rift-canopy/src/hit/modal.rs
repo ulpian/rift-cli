@@ -29,7 +29,7 @@ pub(super) fn hit_project_settings(
     col: u16,
     row: u16,
 ) -> Option<Target> {
-    let modal = modal_rect(size);
+    let modal = crate::dashboard::geometry(size).0;
     if !contains(modal, col, row) {
         return None;
     }

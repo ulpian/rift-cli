@@ -77,12 +77,13 @@ fn read_day_counts(root: &Path, path: &str, now_ms: i64) -> Option<(Vec<DayBar>,
     if !db.exists() {
         return None;
     }
-    let store = SqliteStore::open(&db).ok()?;
+    let store = SqliteStore::open_read_only(&db).ok()?;
     let rt = runtime().ok()?;
     let strip = StripRead {
         store: &store,
         rt: &rt,
         window: DayWindow::ending_at(now_ms),
+        scope: crate::scope::WorktreeScope::read(&store, &rt, Path::new(path))?,
     };
 
     let mut bars = strip.window.empty_bars();
@@ -157,6 +158,7 @@ impl DayWindow {
 
 /// One projection, read once for every strip on the card.
 struct StripRead<'a> {
+    scope: crate::scope::WorktreeScope,
     store: &'a SqliteStore,
     rt: &'a tokio::runtime::Runtime,
     window: DayWindow,
@@ -177,9 +179,13 @@ impl StripRead<'_> {
         let window_start = self.window.start_ms();
         let sql = format!(
             "SELECT {col} / {DAY_MS} AS day, COUNT(*) FROM {table} \
-             WHERE {col} >= {window_start} GROUP BY day"
+             WHERE {col} >= {window_start} AND {} GROUP BY day",
+            self.scope.sessions("session_id")
         );
-        let Ok(rows) = self.rt.block_on(self.store.query(&sql, &[])) else {
+        let Ok(rows) = self
+            .rt
+            .block_on(self.store.query(&sql, &[self.scope.parameter()]))
+        else {
             return;
         };
         for r in rows {
@@ -214,9 +220,11 @@ impl StripRead<'_> {
             "{CHECKPOINT_TIME_CTE}\
              SELECT ct.effective_at / {DAY_MS} AS day, COUNT(*) FROM ct \
              WHERE ct.effective_at IS NOT NULL AND ct.effective_at >= {window_start} \
-             GROUP BY day"
+             AND {} GROUP BY day",
+            self.scope.checkpoints("ct.checkpoint_id")
         );
-        let query = self.store.query(&sql, &[Value::Int(CREATED_AT_UNKNOWN)]);
+        let parameters = [Value::Int(CREATED_AT_UNKNOWN), self.scope.parameter()];
+        let query = self.store.query(&sql, &parameters);
         let Ok(rows) = self.rt.block_on(query) else {
             return;
         };
@@ -235,7 +243,20 @@ impl StripRead<'_> {
     /// "nothing missing" rather than an underflowed number.
     fn off_strip(&self, bars: &[DayBar]) -> OffStrip {
         let total = |table: &str| -> u64 {
-            u64::try_from(self.rt.block_on(self.store.count(table)).unwrap_or(0)).unwrap_or(0)
+            let predicate = if table == "checkpoint" {
+                self.scope.checkpoints("checkpoint.checkpoint_id")
+            } else {
+                self.scope.sessions("session_id")
+            };
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
+            u64::try_from(
+                self.rt
+                    .block_on(self.store.query_opt_i64(&sql, &[self.scope.parameter()]))
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0)
         };
         let placed = |pick: &dyn Fn(&DayBar) -> u64| -> u64 {
             bars.iter().map(pick).fold(0u64, u64::saturating_add)

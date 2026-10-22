@@ -32,6 +32,7 @@ impl ProjectSettingsManager for RiftProjectSettingsManager {
     ) -> Result<ProjectSettingsView, String> {
         let repo = Path::new(&action.path);
         match &action.kind {
+            ProjectSettingsActionKind::SetPermissions(choices) => apply_permissions(repo, choices)?,
             ProjectSettingsActionKind::Set { setting, enabled } => {
                 apply_setting(repo, *setting, *enabled)?;
             }
@@ -232,7 +233,6 @@ fn initialize(
 ) -> Result<(), String> {
     let selected: BTreeSet<String> = plan.integrations.iter().cloned().collect();
     refuse_unrunnable_selection(repo, &selected)?;
-
     // Read BEFORE init scaffolds anything: a `.rift/config.toml` that is
     // already here arrived with the clone, and it is the repository's to
     // keep. Setup on this machine then provisions only what is machine-local
@@ -240,6 +240,7 @@ fn initialize(
     // committed policy, not even to a value it already holds.
     let committed_config = repo.join(".rift/config.toml").is_file();
     persist_setup_plan(repo, plan)?;
+    apply_permissions(repo, &plan.permissions)?;
     let outcome = crate::cmd_init_with_integrations(
         repo,
         &InitArgs { no_recall: true },
@@ -496,6 +497,7 @@ fn recall_detail(agents: usize) -> String {
 /// bus falls back to for any key a plan does not carry.
 #[derive(Serialize)]
 struct PersistedSetupPlan<'a> {
+    permissions: Vec<serde_json::Value>,
     schema_version: u16,
     total_recall: bool,
     turn_injection: bool,
@@ -520,6 +522,11 @@ fn persist_setup_plan(repo: &Path, plan: &ProjectSetupPlan) -> Result<(), String
     refuse_link(&path, "the setup plan")?;
     let bytes = serde_json::to_vec_pretty(&PersistedSetupPlan {
         schema_version: 1,
+        permissions: plan
+            .permissions
+            .iter()
+            .map(|choice| serde_json::json!({ "agent": choice.agent, "preset": choice.preset }))
+            .collect(),
         total_recall: plan.total_recall,
         turn_injection: plan.turn_injection,
         documents: plan.documents,
@@ -559,6 +566,31 @@ fn refuse_link(path: &Path, label: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn apply_permissions(
+    repo: &Path,
+    choices: &[rift_canopy::AgentPermissionChange],
+) -> Result<(), String> {
+    for choice in choices {
+        rift_agent_install::native::permissions::validate_permission(
+            repo,
+            &choice.agent,
+            &choice.preset,
+            &choice.revision,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for choice in choices {
+        rift_agent_install::native::permissions::apply_permission(
+            repo,
+            &choice.agent,
+            &choice.preset,
+            &choice.revision,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -656,6 +688,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         let plan = ProjectSetupPlan {
+            permissions: Vec::new(),
             total_recall: true,
             turn_injection: true,
             documents: true,
@@ -756,6 +789,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         let plan = ProjectSetupPlan {
+            permissions: Vec::new(),
             total_recall: true,
             turn_injection: true,
             documents: true,
@@ -795,6 +829,7 @@ mod tests {
         let elsewhere = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let plan = ProjectSetupPlan {
+            permissions: Vec::new(),
             total_recall: true,
             turn_injection: true,
             documents: true,
@@ -857,6 +892,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".rift")).unwrap();
         let plan = ProjectSetupPlan {
+            permissions: Vec::new(),
             total_recall: false,
             turn_injection: true,
             documents: true,

@@ -1,0 +1,83 @@
+name: Alpha release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v1.0.0-alpha*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: alpha-${{ matrix.target }}
+      - name: Build the shipped CLI
+        run: cargo build --locked --release -p rift --target ${{ matrix.target }}
+      - name: Verify and package the native executable
+        run: python release/package.py ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rift-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft:
+    name: Draft GitHub prerelease
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rift-*
+          path: dist
+          merge-multiple: true
+      - name: Produce checksums and create a reviewable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python release/package.py --checksums
+          test "$RELEASE_TAG" = "$(tr -d '\r\n' < release/alpha-version)"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* install.sh install.ps1
+          else
+            gh release create "$RELEASE_TAG" dist/* install.sh install.ps1 \
+              --verify-tag --draft --prerelease \
+              --title "Rift $RELEASE_TAG" --notes-file release/NOTES.md
+          fi

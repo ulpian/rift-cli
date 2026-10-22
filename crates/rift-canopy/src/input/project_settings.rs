@@ -19,6 +19,7 @@ pub(super) fn on_key_project_settings(app: &mut App, key: CanopyKey) -> Action {
             Action::None
         }
         CanopyKey::Esc | CanopyKey::Char('x' | 'X') => {
+            app.dashboard_tab = crate::dashboard::DashboardTab::Home;
             app.mode = Mode::Normal;
             app.project_settings.close();
             Action::None

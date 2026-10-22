@@ -15,6 +15,7 @@
 mod actions;
 mod anim;
 mod click;
+mod dashboard;
 mod effects;
 mod events;
 mod mouse;

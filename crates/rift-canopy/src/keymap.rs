@@ -574,6 +574,7 @@ mod tests {
     fn open_project_settings(app: &mut App) {
         app.mode = Mode::ProjectSettings;
         app.project_settings.open(crate::ProjectSettingsView {
+            permissions: Vec::new(),
             path: "/r/b".into(),
             project_name: "b".into(),
             initialization: crate::ProjectInitialization::Initialized,

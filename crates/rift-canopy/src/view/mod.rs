@@ -18,6 +18,7 @@
 //! `crate::view::…` path where it was.
 
 mod colour_picker;
+mod dashboard;
 mod explorer;
 mod grid;
 mod modal;
@@ -60,7 +61,7 @@ pub use profile_menu::{
 };
 pub use project_settings::{
     project_settings_action_rects, project_settings_body_rect, project_settings_cancel_rect,
-    project_settings_display_rows, ProjectSettingsDisplayRow,
+    project_settings_content_rect, project_settings_display_rows, ProjectSettingsDisplayRow,
 };
 pub(crate) use rail::{draw_projects_read_only, rail_action_layout, visible_window};
 
@@ -115,7 +116,12 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         h: area.h.saturating_sub(1),
     };
     draw_body(vm, backend, frame, body, unicode);
+    dashboard::draw_navigation(vm, frame);
     draw_modal_layer(vm, unicode, frame);
+    if vm.overlay.is_none() && matches!(vm.mode, crate::Mode::Normal | crate::Mode::ProjectSettings)
+    {
+        dashboard::draw_drawer(vm, frame, unicode);
+    }
     apply_startup_sweep(vm, frame, body);
 }
 
@@ -197,7 +203,7 @@ fn draw_modal_layer(vm: &ViewModel, unicode: bool, frame: &mut Frame) {
         Mode::ProfileMenu => draw_profile_menu(vm, unicode, frame),
         Mode::ColourPicker => draw_colour_picker(vm, unicode, frame),
         Mode::Explorer => draw_explorer(vm, unicode, frame),
-        Mode::ProjectSettings => draw_project_settings(vm, frame),
+        Mode::ProjectSettings => draw_project_settings(vm, frame, unicode),
         _ => (),
     }
     // The dispatch overlay layers over the body (the dispatch posture):

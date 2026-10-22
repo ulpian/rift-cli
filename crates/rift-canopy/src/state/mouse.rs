@@ -220,7 +220,9 @@ fn wheel_region(app: &App, target: Option<&Target>) -> WheelRegion {
         | Target::OverlayCancel
         | Target::OverlayClose
         | Target::Scrollbar(ScrollRegion::Modal) => WheelRegion::Results,
-        Target::CommandBar
+        Target::ProjectDrawer
+        | Target::DashboardTab(_)
+        | Target::CommandBar
         | Target::HeaderHelp
         | Target::HeaderPalette
         | Target::HeaderEditor
@@ -347,7 +349,10 @@ fn suggest_wheel(s: &mut AppState, down: bool) -> Flow {
 /// The Project Settings page scrolls its own body, and stops following the
 /// cursor until a key moves it again.
 fn project_settings_wheel(s: &mut AppState, down: bool) -> Flow {
-    let body = crate::view::project_settings_body_rect(crate::view::modal_rect(s.size));
+    let body = crate::view::project_settings_content_rect(
+        crate::dashboard::geometry(s.size).0,
+        &s.app.project_settings,
+    );
     let max = s
         .app
         .project_settings

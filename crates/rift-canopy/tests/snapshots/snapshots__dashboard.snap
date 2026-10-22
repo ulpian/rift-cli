@@ -2,21 +2,21 @@
 source: crates/rift-canopy/tests/snapshots.rs
 expression: frame_text(&f)
 ---
- RIFT  Canopy  *                      ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  2 ╮[recall] rift-cli · r [settings]╭─ token usage ────────────────#
-│># rift-cli  *│0 models · 0 calls              │(no token activity yet)       #
-│ # rift-si…  o│(no projection yet)             │                              #
-│              │                                │                              |
-│              │                                │                              |
-│              │                                │                              |
-│              │                                │                              |
-│              │                                │                              |
-│              │                                ╰──────────────────────────────|
-│              │                                ╭─ system ─────────────────────|
-│              │                                │                              |
-│[+][^][v][x]  │                                │context unavailable           |
-╰──────────────╯                                │- events · 5m: —              |
- j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette
+ RIFT  Canopy  *                                      ? Help  / Palette  q Quit
+[<]  [Home]  Models   Activity   Tokens   Recall   Settings                 < >
+ rift-cli · branch unknown · /r/rift-cli
+ Local facts only; Recall: family
+[recall] rift-cli · running                                           [settings]
+
+
+
+
+ Recall setup required (Settings)
+╭─ recall ─────────────────────────────────────────────────────────────────────#
+│recall off — open Project Settings                                            |
+│                                                                              |
+│[24h][7d][30d][all]                                                           |
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────╮
 │/█                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯

@@ -30,6 +30,7 @@
 
 mod outbox;
 mod project_read;
+mod projection_detail;
 mod settings_view;
 mod setup_plan;
 mod wake;

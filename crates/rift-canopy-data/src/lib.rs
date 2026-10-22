@@ -105,6 +105,8 @@ pub mod bus;
 pub mod dirlist;
 pub mod feeds;
 pub mod loader;
+mod repository;
+mod scope;
 pub mod series;
 pub mod session;
 pub mod store;

@@ -61,12 +61,7 @@ impl ViewerPane {
     /// Cycle in the locked Projects → Checkpoints → Timeline → Command order.
     #[must_use]
     pub fn cycle(self, forward: bool) -> Self {
-        let order = [
-            Self::Projects,
-            Self::Checkpoints,
-            Self::Timeline,
-            Self::Command,
-        ];
+        let order = [Self::Checkpoints, Self::Timeline, Self::Command];
         let index = order.iter().position(|pane| *pane == self).unwrap_or(0);
         let next = if forward {
             (index + 1) % order.len()

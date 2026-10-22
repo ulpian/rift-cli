@@ -31,6 +31,8 @@
 )]
 
 mod command;
+mod status;
+pub use status::tracked_changes;
 mod discovery;
 mod head;
 mod plumbing;

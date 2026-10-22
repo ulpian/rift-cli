@@ -32,8 +32,8 @@ use super::openers::{
 use super::reduce::{layout_persist_op, selection_change_effects};
 use super::verbs::{confirm_dispatch, dashboard_verb_flow};
 use super::viewer::{
-    clamp_viewer_timeline, select_latest_checkpoint, select_viewer_project, sync_viewer_focus,
-    toggle_full_session, viewer_selection_effects,
+    clamp_viewer_timeline, select_latest_checkpoint, sync_viewer_focus, toggle_full_session,
+    viewer_selection_effects,
 };
 use super::{AppState, Effects, Flow};
 
@@ -52,6 +52,8 @@ pub(super) fn apply_click(s: &mut AppState, target: Target) -> Flow {
         s.arm_press_pulse(target.clone());
     }
     match target {
+        Target::ProjectDrawer => super::dashboard::toggle_drawer(s),
+        Target::DashboardTab(tab) => super::dashboard::select_tab(s, tab),
         Target::PanelFocus(panel) => click_panel(s, panel),
         Target::CommandBar => click_command_bar(s),
         Target::ProjectRow(i) => click_project_row(s, i),
@@ -179,10 +181,6 @@ fn click_command_bar(s: &mut AppState) -> Flow {
 /// A rail row: select it with the same bus effects the arrow keys raise; on
 /// the viewer surface, open its catalogue instead.
 fn click_project_row(s: &mut AppState, i: usize) -> Flow {
-    if s.app.surface == Surface::RecallViewer {
-        return viewer_click_project_row(s, i);
-    }
-    s.app.set_focus(Panel::Projects);
     let before = s.app.selected_project().map(|p| p.path.clone());
     if i < s.app.projects.len() {
         s.app.selected = i;
@@ -190,23 +188,10 @@ fn click_project_row(s: &mut AppState, i: usize) -> Flow {
     s.dirty = true;
     let mut eff = Effects::default();
     selection_change_effects(s, &before, &mut eff);
+    if let Flow::Continue(closed) = super::dashboard::toggle_drawer(s) {
+        eff.data_requests.extend(closed.data_requests);
+    }
     Flow::Continue(eff)
-}
-
-/// A rail row on the viewer surface: focus the rail, and open the clicked
-/// project's catalogue if the click moved the selection.
-fn viewer_click_project_row(s: &mut AppState, i: usize) -> Flow {
-    s.app.viewer.pane = ViewerPane::Projects;
-    s.app.focus = Panel::Projects;
-    let before = s.app.selected;
-    if i < s.app.projects.len() {
-        s.app.selected = i;
-    }
-    s.dirty = true;
-    if before == s.app.selected {
-        return Flow::Continue(Effects::default());
-    }
-    Flow::Continue(select_viewer_project(s))
 }
 
 /// A graphs-column section body: focus the column.
@@ -294,6 +279,7 @@ fn click_project_settings(s: &mut AppState, target: Target) -> Flow {
             })
         }
         Target::ProjectSettingsClose => {
+            s.app.dashboard_tab = crate::dashboard::DashboardTab::Home;
             s.app.mode = Mode::Normal;
             s.app.project_settings.close();
             Flow::Continue(Effects::default())

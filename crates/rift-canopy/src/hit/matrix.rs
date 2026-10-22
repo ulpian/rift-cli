@@ -70,9 +70,8 @@ fn the_dashboard_exposes_its_header_rail_card_and_command_targets() {
         &[
             Target::HeaderHelp,
             Target::HeaderPalette,
-            Target::HeaderEditor,
             Target::HeaderQuit,
-            Target::ProjectRow(0),
+            Target::ProjectDrawer,
             Target::RepositoryRecallViewer,
             Target::RepositorySettings,
             Target::CommandBar,
@@ -87,7 +86,7 @@ fn the_dashboard_exposes_its_header_rail_card_and_command_targets() {
 fn every_header_item_is_reachable_by_its_key_and_by_its_click() {
     let profile_name = header_dashboard().snapshot().profile_name;
     let items = crate::bars::header_cluster(120, profile_name.as_deref());
-    assert_eq!(items.len(), 5, "the identity item is in the cluster");
+    assert_eq!(items.len(), 4, "the identity item is in the cluster");
     for item in items {
         let glyph = item.key.chars().next().unwrap();
         let mut keyed = header_dashboard();
@@ -122,6 +121,7 @@ fn an_overflowing_rail_exposes_its_scrollbar_and_add_button() {
         Size::new(120, 40),
     );
     rail_overflow.app.splash.skip();
+    rail_overflow.app.projects_open = true;
     assert_scanned(
         &mut rail_overflow,
         &[Target::Scrollbar(ScrollRegion::Rail), Target::RailAdd],

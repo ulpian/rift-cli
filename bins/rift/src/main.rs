@@ -69,9 +69,12 @@ mod hooks;
 mod hooktime;
 mod identity;
 mod init;
+mod installation;
 mod investigate;
 mod launch;
 mod memory;
+#[cfg(feature = "tui")]
+mod onboarding;
 #[cfg(feature = "tui")]
 mod project_settings;
 mod projection;
@@ -181,6 +184,8 @@ fn main() -> ExitCode {
 /// route the binary can take is still readable from this one place.
 fn route(_cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
     match cmd {
+        Command::Update(args) => installation::update(args),
+        Command::Uninstall(args) => installation::uninstall(args),
         Command::Init(a) => cmd_init(root, a),
         Command::Doctor(a) => Ok(cmd_doctor(root, a.fix)),
         Command::Clean(a) => match not_init_guard(root) {
