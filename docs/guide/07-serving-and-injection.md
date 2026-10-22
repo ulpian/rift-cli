@@ -145,11 +145,13 @@ unclaimed spawn under its prompt id and type; a sole match is always its own.
 On recorded sessions the claim named the spawning call for 395 of 398 subagent
 windows and a wrong one for none.
 
-**At observe**, the spawner's live reads of the named paths become at most 256
-`inherit` lines of class `by_name`, never coverage: a read only they would have
-declined runs, the window records its `read`, and the worker books an observed
-repeat under `inherited:by_name`, shown beside the savings figure and never in
-it. Neither end of a spawn opens a store.
+The spawner's live reads of the named paths become at most 256 `inherit` lines
+of class `by_name`. **At enforce**, the default, a decline may rest on them on a
+confirmed channel, since the subagent was pointed at bytes its spawner held.
+**At observe** they are never coverage: a read only they would have declined
+runs, the window records its `read`, and the worker books an observed repeat
+under `inherited:by_name`, shown beside the savings figure and never in it.
+Neither end of a spawn opens a store.
 
 ---
 
@@ -161,14 +163,19 @@ resolves to **Allow** (record the range delivered), **Observe** (the decision is
 recorded and the call runs untouched — how a pool is priced before anything acts)
 or **Decline**, once, with a reason the model reads.
 
-**The levers and their modes.** `[interception] mode` defaults to `enforce`. An
-`[interception.agents]` entry replaces that `mode` for its family, and the
-family's pinned reason channel still caps the result (the per-client caps are in
-[10 §10.7](10-agent-integrations.md#107-deterministic-context-delivery)).
-`first_contact`, `decline_family_held` and `inherit_by_name` default to
-`enforce`, and each never exceeds the family's resolved mode. The table is in
-[02 §2.6](02-configuration.md#the-read-gate-interception); `rift recall status`
-prints each lever's effective mode per family.
+**The levers and their modes.** `[interception] mode`, `first_contact`,
+`decline_family_held` and `inherit_by_name` default to `enforce`; `narrow`,
+`recognise_by_output`, `substitute_held_output` and `fold_command_output` default
+to `observe` until their own pools are sized. `[interception.agents]` has a key
+per adapter in registry order: a bare mode (`codex = "observe"`) replaces the
+read lever for that family, a table (`[interception.agents.codex]`) each lever it
+names, over the repository's value; an unknown family or lever fails the load.
+No lever exceeds the family's read lever, which never exceeds what its pinned
+reason channel confirms, so an unconfirmed family observes (the caps are in
+[10 §10.7](10-agent-integrations.md#107-deterministic-context-delivery)). The
+table is in [02 §2.6](02-configuration.md#the-read-gate-interception);
+`rift recall status` prints the levers as written, then per family what the
+re-read, search and document levers may do and why.
 
 A decline needs every clause, and each closes something:
 
@@ -246,6 +253,34 @@ At `observe`, the default, the lines only size the pool and no decision leans on
 The lever never sits above the read lever.
 The step opens no store and no tokenizer: it hashes the named files as the read gate does, and reads their line hashes from the family's cache ([13](13-storage-and-schema.md)), which the detached worker writes, or computes them from the bytes in hand.
 
+### What a shell result may stand in for
+
+Two levers act on that result, both at `observe` by default: decision and credit
+are recorded and the result goes out as written, until a corpus shows the rewrite
+never claims a line the original lacked or hides one the model acts on.
+
+**`substitute_held_output`** replaces each matched stretch the window provably
+holds — its own reads, at the revision on disk — with one line,
+`[rift held: lines 12-40 of src/lib.rs at sha256:…, unchanged since turn 3]`,
+and only where the result carries those lines byte for byte against the file;
+every other byte stays. **`fold_command_output`** keeps the first of a run of at
+least four lines that differ only in digits and folds the rest into
+`[rift fold: N more lines like the line above, differing only in digits]`. It
+touches results of 8,000 to 30,000 bytes (below, a fold saves less than the
+model spends wondering; above, the client spills to a file), never output the
+agent already cut with `head`, `tail` or `grep`, and never a line naming an
+error, warning, panic, failure or test result, nor the last twenty lines.
+
+**The original is kept first.** Before a rewrite stands it is checked against
+the original by the check `rift verify` runs, and the original is spooled under
+its form, to be sealed, redacted, beside the transcript
+([chapter 4](04-redaction-and-secrets.md)); any failure delivers the original and books
+every stretch as observed, since none reached the model. `rift verify` later
+holds each delivered text to its sealed original (a fold line by its count, a
+held frame counted `held_unchecked`, since checking it needs the revision). **A result gets at most one form**, because its sealed
+original names one: the fold stands down when a held substitution already ran.
+Both book under their own class ([§8.11](08-cost-and-savings.md#811-the-same-numbers-from-the-command-line)).
+
 ### One decline per key, which is the loop breaker
 
 The identical repeat of a declined request is **allowed**, so a decline costs at
@@ -286,7 +321,10 @@ diffed against, it would name a change that never happened and serve the live
 bytes the gate removed. So a hunk touching a masked run is `(changed)`,
 `changed-hunks` refuses its lines under `source_deleted_or_redacted`, and a mask
 that moved line numbers is never snapshotted. With no basis the read proceeds:
-losing a snapshot costs a delta frame, never an answer. A revision, to Rift, is
+losing a snapshot costs a delta frame, never an answer. A snapshot job that
+finds the bytes gone — the file changed, no blob holds them, no snapshot was
+kept — completes `unavailable` rather than retrying an answer that cannot
+change, and `rift doctor` counts it. A revision, to Rift, is
 the SHA-256 of the bytes as the window read them, so an unchanged re-read is
 declined whether git has committed those bytes, staged them or never seen them.
 
@@ -495,7 +533,12 @@ people, hashing your worktree for the known state.
 `known-state`, `diff-since` and `changed-hunks` attach a `provenance` object to
 each changed file: `checkpoints` (`from`, `to`), `recorded_at_ms`, `session`,
 `agent`, `token_usage`, `cost_micros`, `commit` (oid and subject) and `why` (the
-`rift why` command). **Identifiers, never prose**: nothing in it was written by a
+`rift why` command). **Credit follows attribution**: an edit a person made
+between turns is recorded by the same checkpoint, so `session`, `agent`, the
+tokens and the cost appear only when the checkpoint's attribution credits the
+agent; otherwise they are held back and `author` says `human`, `mixed` or
+`unknown`. `rift why` applies the rule to one line, naming a session, its prompt
+and its cost only for a line the agent wrote whole or in part. **Identifiers, never prose**: nothing in it was written by a
 model, and a missing key means *not known*, never zero. **Every figure names its
 denominator**: the tokens and cost are the calls the bracket's later checkpoint
 froze, never a session total that a reader would take for the change's cost.
@@ -632,7 +675,7 @@ hostile case also asserts that the innocent entry shipped.
 Beyond §7.9's table: `rift agent-help [--json]` renders the surface. Exit 2 is
 *you asked wrong*, 1 *the surface said no*. `rift savings` prints the avoided share overall and per
 family with its honesty figure ([chapter 8](08-cost-and-savings.md)); `rift
-recall status` prints each lever's effective mode. `injection_turn_budget` and
+recall status` prints the levers and what each family may do. `injection_turn_budget` and
 the lever tables of §7.4, §7.6 and §7.7 live in `.rift/policies/serve.toml`, each
 lever `off` (not consulted), `observe` (decided and recorded, nothing acts) or
 `enforce` ([02 §2.6](02-configuration.md#26-riftpoliciesservetoml--the-serving-overlay));
