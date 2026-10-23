@@ -31,6 +31,7 @@ pub mod coverage;
 pub mod dogfood;
 pub mod dogfood_compare;
 pub mod gate_intercept;
+pub mod release;
 pub mod replay_savings;
 pub mod rustdoc_baseline;
 

@@ -1,0 +1,5 @@
+# Reserved download bucket. It remains empty/private pending native checks.
+project = "gen-lang-client-0144758115"
+bucket = "rift-e59ea04337d9"
+location = "europe-west1"
+prefix = "a"

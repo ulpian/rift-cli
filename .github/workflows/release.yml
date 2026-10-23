@@ -37,9 +37,6 @@ jobs:
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@1.96
         with:
           targets: ${{ matrix.target }}
@@ -49,7 +46,12 @@ jobs:
       - name: Build the shipped CLI
         run: cargo build --locked --release -p rift --target ${{ matrix.target }}
       - name: Verify and package the native executable
-        run: python release/package.py ${{ matrix.target }}
+        run: cargo run --locked -p xtask -- release package ${{ matrix.target }} --binary target/${{ matrix.target }}/release/rift${{ runner.os == 'Windows' && '.exe' || '' }} --out dist
+      - name: Record the native archive smoke check
+        shell: bash
+        run: |
+          version=$(tr -d '\r\n' < release/alpha-version)
+          cargo run --locked -p xtask -- release native-check ${{ matrix.target }} --binary target/${{ matrix.target }}/release/rift${{ runner.os == 'Windows' && '.exe' || '' }} --archive "dist/rift-$version-${{ matrix.target }}${{ runner.os == 'Windows' && '.zip' || '.tar.gz' }}" --out dist/native-evidence
       - uses: actions/upload-artifact@v4
         with:
           name: rift-${{ matrix.target }}
@@ -60,12 +62,16 @@ jobs:
     name: Collect release archives and checksums
     needs: package
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: '3.12'
+          key: alpha-bundle
       - uses: actions/download-artifact@v4
         with:
           pattern: rift-*
@@ -73,7 +79,7 @@ jobs:
           merge-multiple: true
       - name: Verify the version and produce checksums
         run: |
-          python release/package.py --checksums
+          cargo run --locked -p xtask -- release checksums --dist dist
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             test "$GITHUB_REF_NAME" = "$(tr -d '\r\n' < release/alpha-version)"
           fi

@@ -1,148 +1,210 @@
-# Private alpha distribution
+# Release tooling
 
-GitHub holds the private source tag and owner-created prerelease. Google Cloud Storage
-holds the downloadable archives. Testers receive bearer links that expire within
-12 hours; no GitHub or Google account is needed. Invitations are sent manually.
+Release tools are Rust commands in `xtask/src/release/`. They reuse the actual
+Rift executable and the top-level shell/PowerShell bootstraps. Testers do not need
+Rust. The bootstraps must remain shell/PowerShell because Rift is not installed
+when they run. Owner tooling invokes authenticated `gcloud` for cloud operations;
+Google owns the SDK's interpreter dependency.
 
-The existing Rift Google Cloud project, bucket, region, and signer are recorded in
-`storage.toml`. The bucket enforces public-access prevention and uniform IAM.
-The dedicated signer has object-reader access to this bucket. The release
-operator can impersonate only that signer; no service-account key is created.
-`storage-lifecycle.json` removes invitation files after two days and preview
-artifacts after thirty days. Released archives and their versioned notes remain available for reissues.
+## Current publication status
 
-## Publish after review and verification
+All five cross-built platform packages are in the ignored
+`tmp/rift-alpha/cross-builds/` directory. Only Intel macOS has been exercised
+natively. The other four packages remain unpublished pending native checks.
+GitHub Actions packaging is blocked by account billing; local tooling does not
+require Actions. The short download bucket is reserved, empty and private;
+no public installer is available. Its project, bucket and prefix are recorded
+in `public-storage.toml`.
 
-Keep `release/alpha-version` (with its `v` prefix) aligned with
-`[workspace.package].version` in `Cargo.toml`. All workspace packages inherit
-that version; the packaging tool rejects a mismatch.
+The existing private bucket in `storage.toml` is retained unchanged. Its public
+access prevention, uniform IAM and signing account belong to the earlier private
+invitation flow. New public downloads use a **separate** bucket. Obscure paths
+are not access control: anyone holding or finding a URL can download it, forward
+it and continue using it until its object is removed. Public downloads incur
+normal GCS storage and network charges.
 
-1. Complete the approved repository gate and review the working setup, Canopy,
-   and `notes/v1.0.0-alpha.md` before creating or pushing `v1.0.0-alpha`.
-2. Pushing the tag starts the five-platform packaging workflow. A `release/**`
-   preparation branch runs the same workflow, allowing packages to be checked
-   before a tag is published or moved. It uploads a
-   `rift-release-bundle` artifact with archives, checksums, installers, and release
-   notes. It has read-only repository permissions and does not create or publish
-   a GitHub Release.
-3. After inspecting the platform results, download the bundle from GitHub Actions
-   and create a prerelease for the existing tag through GitHub's web interface.
-   Use `notes/v1.0.0-alpha.md` as its description and attach the verified archives and checksums.
-   Put the five archives and `SHA256SUMS` in local `dist/` for the upload step below.
-4. Run `python3 release/downloads.py upload`. Every archive must match the CI
-   checksum. Uploads preserve existing objects and independently read them back.
-5. Run `python3 release/downloads.py invite`. It writes a private `INVITE.md`
-   outside the repository containing install and update commands. Send that file's
-   instructions to the selected testers yourself. Do not commit or log its links.
-6. Reissue invitations with the same command when links expire. Renewal reads
-   the release manifest from GCS, so local platform binaries are not needed. Delete the local
-   invitation file after use; cloud invitation files expire through lifecycle.
+## Test without downloading
 
-An invitation carries a versioned TSV download manifest: its first line is
-`rift-download-v1<TAB>version`; each remaining row is
-`target<TAB>signed HTTPS archive URL<TAB>SHA-256`. Installers select one exact
-platform row and verify the archive before executing or replacing anything.
-The receipt contains only executable ownership, checksum, and version.
+`cargo build --workspace` builds local development binaries. `cargo run -p rift
+-- --help` runs the current code. Neither command exercises the bootstrap,
+network download, archive selection, checksum verification, installation receipt,
+PATH, update or uninstall. Debug binaries must not become installed hook targets.
 
-The owner tools require Python 3.11+, authenticated `gcloud`, and the source Git
-tag. Testers need only the native installer prerequisites. No email is sent by
-these tools. OS signing and notarization remain outside this alpha.
-
-## Test installation locally
-
-Run the real installer and native executable in a disposable directory:
+For real project setup use a durable release binary. `./skills.sh release` builds
+the repository's production release path; rebuild only when you intend to update
+that executable. The previews below select a binary matching the current release version under
+`CARGO_TARGET_DIR` or `target/`: first `release/rift`, then
+`<native-target>/release/rift`, then the local cross-build cache at
+`alpha-cross/target/<native-target>/release/rift` (`rift.exe` on Windows).
+Stale defaults are skipped; the selected path is printed. Use `--binary PATH`
+for strict explicit selection. They never build or replace
+your installed Rift, preserve HOME, and isolate configuration, cache,
+projects, hooks and downloaded binaries. Project previews require a release
+binary outside system temp and `target/debug`, preserving the hook safety guard.
+An explicit version mismatch is refused. If no matching native build exists,
+the command prints the build command and never rebuilds or replaces a binary
+automatically.
 
 ```sh
-python3 release/preview_install.py --binary /absolute/path/to/release/rift
+# Requires a current release build; use --binary PATH to select another one.
+cargo rift preview install
+cargo rift preview setup
+cargo rift preview dashboard
+
+# Real shell installer, receipt, update and uninstall using a local transport:
+cargo rift check-install
+
+# Piped installer, shimmer, cancellation/defaults, setup and Settings through a PTY:
+cargo rift check-flows
+
+# Tiny offline ownership, checksum, concurrent-edit and symlink safety cases:
+cargo rift check-safety
+cargo test -p xtask release::
+cargo test -p xtask --test release_install
 ```
 
-This checks installation, receipt/checksum, version, a same-version update,
-and dry-run plus actual uninstall. Downloads are served from a local fixture;
-it does not test hosted GCS links. The existing installation, HOME, projects,
-and hooks stay untouched. Temporary executables and archives are removed.
+Interactive previews inherit your actual terminal. Automated PTY checks use Apple
+Terminal's palette environment, including a stale truecolor variable. They check
+text and interaction, not screenshots or native Windows rendering. PTY and shell
+installer previews currently require macOS/Linux. Temporary assets are removed
+on normal exit or a handled flow failure. No cloud access is used.
 
-The small offline installer safety suite is `python3 release/test_install.py`.
+The native installer chooses default harnesses and features, shows the shimmering
+R and milestones, and saves reviewed preferences under
+`<config-root>/rift/defaults.toml`. Run `rift install` to change defaults later.
+New project setup reviews permissions separately and preserves declared project
+policy. `curl | sh` obtains wizard input from the terminal device; unattended
+installs print the command for resuming preferences. Updates skip onboarding.
 
-## Preview onboarding and Settings
+## Package and record native checks
 
-Use a freshly built **native release executable** from this checkout. These
-scripts do not build, replace your installed Rift, change HOME, or force terminal
-colors. Python 3.11+ is required; the interactive previews support macOS/Linux.
+Keep `release/alpha-version`, workspace version and the CLI version aligned.
+The packaging command requires a native host matching the target, checks
+`rift --version`, then creates one archive containing only `rift`/`rift.exe`:
 
 ```sh
-# Actual installer, local download fixture, then animated defaults wizard:
-python3 release/preview_flows.py --binary target/release/rift install
-
-# New disposable project; standalone setup before Canopy:
-python3 release/preview_flows.py --binary target/release/rift setup
-
-# Initialized demo with a worktree; Shift-Tab opens Settings, Left opens projects:
-python3 release/preview_flows.py --binary target/release/rift dashboard
-
-# Bounded native PTY regression: piped installer, shimmer, saved defaults,
-# project setup/cancellation, final confirmation and a real Settings toggle:
-python3 release/test_flows.py --binary target/release/rift
+cargo rift package x86_64-apple-darwin \
+  --binary /absolute/durable/release/rift --out dist
 ```
 
-Project setup uses the supplied durable release path: the hook installer correctly
-refuses executables under system temporary directories. Installer copies remain
-disposable and never become project hook targets.
+Use `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, or
+`x86_64-pc-windows-msvc` on the corresponding native machine.
+Cross-built binaries are not runtime-verified merely by inspecting their format.
 
-The interactive previews clean their projects, config, caches, downloaded binaries,
-and archives when you exit. Installer previews use local assets in place of GCS;
-they are not a hosted-download check. The PTY check verifies terminal output and
-interaction, not screenshots or native Windows rendering. It explicitly emulates
-Apple Terminal with a stale truecolor environment to check palette compatibility.
-
-Fresh terminal installations open the native wizard after archive/executable
-verification. It shows the shimmering R, version, description, update/setup
-commands, and a milestone line. Choose multiple default harnesses and feature
-switches, review, then confirm. `rift install` reopens those preferences later.
-Project setup shows its own milestones, `rift doctor`, and `rift --help`.
-
-Defaults live at `<config-root>/rift/defaults.toml`, beside the project registry
-(normally `~/.config/rift/defaults.toml`; `RIFT_CONFIG_DIR` overrides the root).
-They preselect a new project's wizard, including harnesses for a configured clone.
-Committed policy and pending setup plans
-win; permissions and raw-transcript consent are still reviewed per project.
-Cancelling preferences preserves the existing file. Invalid or concurrently
-changed defaults produce a refusal instead of being overwritten.
-
-`curl | sh` reads wizard input from the terminal device, independently of the
-piped script source. On macOS it resolves the concrete device so the event
-reader can monitor it. Without a terminal, or with
-`RIFT_NONINTERACTIVE=1`, installation finishes and prints `rift install` for later.
-Updates preserve defaults and skip onboarding. PowerShell follows the same
-interactive/noninteractive rule; native Windows execution requires Windows
-validation before release.
-
-## Create Fresh Private Links
-
-After a verified upload, run from the release checkout:
+After exercising each package on its native OS/CPU, record a minimum smoke check:
 
 ```sh
-python3 release/downloads.py invite
+cargo rift native-check x86_64-apple-darwin \
+  --binary /absolute/durable/release/rift \
+  --archive dist/rift-v1.0.0-alpha-x86_64-apple-darwin.tar.gz \
+  --out tmp/native-evidence
 ```
 
-If needed, select the Cloud SDK's Python interpreter explicitly (this worked on
-the release machine without changing cloud configuration or authentication):
+This executes version/help and verifies that the archive contains exactly the
+same executable. Records bind target, version, tag commit and archive SHA-256.
+They are local operator evidence, not remote attestation or complete OS acceptance;
+review actual install/setup behavior on each OS as well. Collect all five records
+in one evidence directory. Changing archive bytes requires rerunning its check.
+
+Official publication uses four Unix `.tar.gz` files and one Windows `.zip`.
+Additional Unix ZIPs can remain in the development folder. The checksum command
+writes exactly the five official entries and fails if any is missing:
 
 ```sh
-CLOUDSDK_PYTHON="$(command -v python3)" python3 release/downloads.py invite
+cargo rift checksums --dist tmp/rift-alpha/cross-builds
 ```
 
-The command prints the path to a private `INVITE.md` outside the repository. It
-contains the macOS/Linux curl command, Windows PowerShell command, update command,
-and release notes link. Send those instructions manually to the intended testers.
-Re-run the command whenever links expire; it does not rebuild or re-upload the
-release archives. Keep the invitation file private and delete it after use.
+## Prepare a public GCS plan
 
-The bucket is private: public access is prevented and uniform bucket IAM is on.
-A dedicated service account has read access to the bucket; the release operator
-uses impersonation to sign URLs without creating a service-account key. Each
-invitation gets a unique prefix with a platform manifest and platform installers.
-Those files and the release archives use signed URLs valid for 12 hours. Invite
-objects are removed by the two-day bucket lifecycle rule. An email address or
-GitHub account is not checked: these are bearer links, so recipients can forward
-them and a forwarded link works until it expires. Creating a fresh invitation
-does not invalidate earlier links before their expiry.
+Choose a fresh random bucket name and a short release path. The following are **templates**, not
+live download links. Use a separate bucket in the existing project; never disable
+controls on the private bucket. Bucket creation is an explicit operator step:
+
+```sh
+export CLOUDSDK_PYTHON=/usr/local/bin/python3  # only if needed by your Cloud SDK
+export CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=1
+export RIFT_PUBLIC_BUCKET="rift-e59ea04337d9"  # reserved in public-storage.toml
+export RIFT_PUBLIC_PREFIX="a"  # immutable shorthand for v1.0.0-alpha
+
+# Local generation only; no cloud mutation:
+cargo rift plan \
+  --dist tmp/rift-alpha/cross-builds \
+  --bucket "$RIFT_PUBLIC_BUCKET" --prefix "$RIFT_PUBLIC_PREFIX"
+
+# The recorded bucket already exists. For a different new download bucket:
+gcloud storage buckets create "gs://$RIFT_PUBLIC_BUCKET" \
+  --project=gen-lang-client-0144758115 --location=europe-west1 \
+  --uniform-bucket-level-access --no-public-access-prevention
+```
+
+This project requires uniform bucket-level access. After all native checks pass,
+the uploader grants `allUsers` only `roles/storage.legacyObjectReader`. That
+Google-managed role contains `storage.objects.get`, without listing or writing.
+It verifies the role permissions before granting it and checks that anonymous
+bucket listing stays denied. Do not substitute `roles/storage.objectViewer`,
+which also allows listing. Only public release material belongs in this bucket.
+Organization-level public access prevention can still prohibit public reads;
+the uploader fails rather than changing organization policy.
+
+The local plan lives under ignored `tmp/rift-download-plan/<bucket>/<prefix>/`.
+Review `DOWNLOADS.md`, the platform/checksum manifest, and both installer wrappers.
+Installers come from the exact binary source tag. Versioned release notes come
+from the committed tooling checkout, allowing reviewed documentation corrections
+without moving the binary tag. Plan URLs become usable only
+after upload. A plan is not publication.
+
+## Upload after native verification and review
+
+```sh
+cargo rift upload \
+  --dist tmp/rift-alpha/cross-builds --evidence tmp/native-evidence \
+  --bucket "$RIFT_PUBLIC_BUCKET" --prefix "$RIFT_PUBLIC_PREFIX"
+```
+
+Upload requires the binary release tag to be an ancestor of the tooling checkout,
+all five archive checksums, and all five matching native records. The records
+bind archives to the binary tag, even when the tooling has newer commits. It preserves existing cloud objects with no-clobber,
+reads every object back, and checks bytes before enabling public object reads
+on the first publication. It then verifies anonymous HTTPS downloads and denied
+anonymous listing. On later uploads, the get-only grant remains active; installers
+are copied last so their archives and manifest are ready first. A failed upload can leave partial objects: rerunning the same verified plan
+is safe for identical bytes; mismatches stop publication. No rollback deletes an
+existing release. Use a fresh prefix to publish changed material.
+
+`DOWNLOADS.md` contains the full concrete commands, including:
+
+```sh
+curl -fsS \
+  "https://storage.googleapis.com/$RIFT_PUBLIC_BUCKET/$RIFT_PUBLIC_PREFIX/install.sh" | sh
+
+rift update --from \
+  "https://storage.googleapis.com/$RIFT_PUBLIC_BUCKET/$RIFT_PUBLIC_PREFIX/downloads.tsv"
+```
+
+The short curl command uses a literal HTTPS URL without following redirects.
+The wrapper embeds the manifest URL. The bootstrap detects OS and CPU, selects
+exactly one target row, verifies archive and executable versions, installs under
+`~/.local/bin` (or `RIFT_BIN_DIR`), and opens native preferences. Windows users get
+a PowerShell command instead. Add the printed installation directory to PATH if
+needed. `rift uninstall --dry-run` previews removal; `rift uninstall` applies it.
+
+Public links have no expiry and do not need renewal. To issue a new link, choose a
+new prefix and repeat plan/upload using the same verified archives. Old
+links keep working until you remove their objects. An obscure URL can leak through
+logs and sharing; do not put secrets or user data in this bucket.
+
+The current packages are unsigned/unnotarized. The locally cross-built Linux x64
+binary requires glibc 2.35; ARM64 requires glibc 2.39. Windows is x64 MSVC with the
+static CRT. These constraints must appear in the release review.
+
+## Pre-push and GitHub
+
+Ask the owner before a broad verification sweep. Once authorized, serialize
+`CARGO_BUILD_JOBS=2 ./skills.sh check`, then `./skills.sh gc`. Focused release
+checks do not replace this gate. Commit and push only after owner approval.
+RPF is the remaining active development work.
+
+The packaging workflow now invokes Rust xtask commands, collects five archives
+and checksums, and never creates a GitHub Release. Once verified, create the
+prerelease for the approved tag using `notes/v1.0.0-alpha.md` as its description.

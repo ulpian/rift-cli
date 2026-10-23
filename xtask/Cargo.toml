@@ -17,6 +17,14 @@ serde_json = { workspace = true }
 # The savings calibration writes one scratch checkout's serving overlay with
 # every read lever off, and edits that document rather than replacing it.
 toml_edit = { workspace = true }
+# Owner-only release tooling; none of these enter the shipped CLI graph.
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+portable-pty = "0.9"
+vt100 = "0.15"
 # `replay-savings` replays recorded transcripts through the SHIPPED recogniser
 # and the SHIPPED decision rather than a second opinion about either, so the
 # harness reflects whatever grammar the checkout it is built from has. All four
@@ -44,5 +52,4 @@ rift-recall-serve = { version = "1.0.0-alpha", path = "../crates/rift-recall-ser
 rift-recall-substrate = { version = "1.0.0-alpha", path = "../crates/rift-recall-substrate" }
 rift-recall-types = { version = "1.0.0-alpha", path = "../crates/rift-recall-types" }
 rift-store = { version = "1.0.0-alpha", path = "../crates/rift-store" }
-tempfile = { workspace = true }
 tokio = { workspace = true }

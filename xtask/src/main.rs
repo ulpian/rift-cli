@@ -49,6 +49,7 @@ fn fail_with(violations: &[String], what: &str) -> Result<(), String> {
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("release") => xtask::release::run(args.get(1..).unwrap_or_default()),
         Some("check-coverage") => {
             let path = args
                 .get(1)
@@ -120,7 +121,7 @@ fn main() -> Result<(), String> {
         }
         _ => Err(
             "usage: xtask <check-coverage <cov.json> | ci-meta | dogfood | \
-                 gate-intercept | replay-savings | rustdoc-baseline>"
+                 gate-intercept | release | replay-savings | rustdoc-baseline>"
                 .to_string(),
         ),
     }

@@ -2,6 +2,7 @@
 # Treat warnings as errors in CI via RUSTFLAGS, not here, so local dev stays fast.
 
 [alias]
+rift = "run -p xtask -- release"
 xtest = "test --all-features --workspace"
 xlint = "clippy --workspace --all-targets --all-features -- -D warnings"
 xaudit = "audit --deny warnings"

@@ -88,3 +88,4 @@ data/
 # Release archives stay in artifact storage, never in source history.
 /dist/
 /release/__pycache__/
+tmp/
