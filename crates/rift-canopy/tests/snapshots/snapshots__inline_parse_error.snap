@@ -1,12 +1,10 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 945
+assertion_line: 948
 expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
 ╭─ repository ─────────────────────────────────────────────────────────────────────────────────────╮
 │rift-cli (repo)                                                                                   │
 │path: /r/rift-cli                                                                                 │
@@ -15,7 +13,7 @@ expression: render_state(&mut s)
 │No attributed capture facts available                                                             │
 │Latest checkpoint: unavailable                                                                    │
 │Harnesses:                                                                                        │
-│[ Recall Viewer ]                                                             [ Project Settings ]│
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
  Recall setup required (Settings)
 ╭─ recall ─────────────────────────────────────────────────────────────────────────────────────────╮
@@ -30,8 +28,10 @@ expression: render_state(&mut s)
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/statsu█                                                                                          │
 ╰ ^^^^^^ unknown verb `statsu` — did you mean `status`?────────────────────────────────────────────╯

@@ -363,7 +363,7 @@ fn clamp_surface_scrolls(s: &mut AppState) {
 /// button's key arms the same press flash a click does, so the two paths are
 /// indistinguishable on screen as well as in state.
 fn key_action_flow(s: &mut AppState, action: Action) -> Flow {
-    let selected = s.app.selected_project().map(|p| p.path.clone());
+    let selected = super::actions::project_action_path(&s.app);
     match action {
         Action::RemoveProject => persist_flow(selected.map(|path| remove_project_op(&s.app, path))),
         Action::ReorderProject(up) => {
@@ -678,8 +678,11 @@ mod tests {
     fn selection_change_requests_new_project_data() {
         let mut s = ready(vec![project("a"), project("b")]);
         open_drawer(&mut s);
-        // Move selection down → a data request for the newly selected project.
-        let flow = update(&mut s, Event::Key(CanopyKey::Down));
+        // Browsing preserves the data selection; committing requests the new project.
+        let browse = effects_of(update(&mut s, Event::Key(CanopyKey::Down)));
+        assert!(browse.data_requests.is_empty());
+        assert_eq!(s.app.selected, 0);
+        let flow = update(&mut s, Event::Key(CanopyKey::Enter));
         match flow {
             Flow::Continue(e) => {
                 assert!(
@@ -767,7 +770,8 @@ mod tests {
         let mut s = ready(vec![project("a"), project("b")]);
         open_drawer(&mut s);
         s.activity = Arc::new(ActivityView::Days(ActivityData::default()));
-        update(&mut s, Event::Key(CanopyKey::Down)); // select b
+        update(&mut s, Event::Key(CanopyKey::Down));
+        update(&mut s, Event::Key(CanopyKey::Enter)); // select b
         assert_eq!(
             *s.activity,
             ActivityView::NoProjection,
@@ -956,6 +960,7 @@ mod tests {
         update(&mut s, feed("/r/a"));
         assert!(matches!(s.snapshot().col3.tokens, TokensView::Data(_)));
         update(&mut s, Event::Key(CanopyKey::Down));
+        update(&mut s, Event::Key(CanopyKey::Enter));
         assert_eq!(
             s.snapshot().col3.tokens,
             TokensView::NoActivity,

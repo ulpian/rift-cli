@@ -19,6 +19,8 @@ use super::{AppState, Focus};
 /// list never rebuilds on a selection move.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectRow {
+    /// Repository/worktree path, used by the grouped project picker.
+    pub path: String,
     /// Display name.
     pub name: String,
     /// Live status.
@@ -34,6 +36,12 @@ pub struct ViewModel {
     pub dashboard_tab: crate::dashboard::DashboardTab,
     /// Temporary project drawer visibility.
     pub projects_open: bool,
+    /// Picker highlight, independent of the active project.
+    pub project_cursor: usize,
+    /// Kind filter within the project picker.
+    pub project_filter: Option<crate::EntryKind>,
+    /// Launch-resolved home for compact picker paths; rendering never reads env.
+    pub home_dir: Option<String>,
     /// Terminal size.
     pub size: Size,
     /// Focused panel.
@@ -146,6 +154,7 @@ impl AppState {
                     .projects
                     .iter()
                     .map(|p| ProjectRow {
+                        path: p.path.clone(),
                         name: p.name.clone(),
                         status: p.status,
                         kind: p.kind,
@@ -166,6 +175,9 @@ impl AppState {
         ViewModel {
             dashboard_tab: self.app.dashboard_tab,
             projects_open: self.app.projects_open,
+            project_cursor: self.app.project_cursor,
+            project_filter: self.app.project_filter,
+            home_dir: self.app.home_dir.clone(),
             size: self.size,
             focus: self.app.focus,
             mode: self.app.mode,
@@ -306,6 +318,7 @@ mod tests {
         let mut s = ready(vec![project("a"), project("b")]);
         open_drawer(&mut s);
         update(&mut s, Event::Key(CanopyKey::Down));
+        update(&mut s, Event::Key(CanopyKey::Enter));
         let v = s.snapshot();
         assert_eq!(v.selected, 1);
         assert_eq!(v.detail.unwrap().path, "/r/b");

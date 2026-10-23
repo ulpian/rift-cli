@@ -1,21 +1,19 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 924
+assertion_line: 927
 expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
- rift-cli ╭─ verify failed ───────────────────────────────────────────────────────────<x>╮
- Models/ac│chain: BROKEN at #1                                                           │
-╭─ reposit│run `rift verify` for detail                                                  │─────────╮
-│rift-cli │                                                                              │         │
-│path: /r/│                                                                              │         │
+╭─ reposit╭─ verify failed ───────────────────────────────────────────────────────────<x>╮─────────╮
+│rift-cli │chain: BROKEN at #1                                                           │         │
+│path: /r/│run `rift verify` for detail                                                  │         │
 │* running│                                                                              │         │
 │Git statu│                                                                              │         │
 │No attrib│                                                                              │         │
 │Latest ch│                                                                              │         │
 │Harnesses│                                                                              │         │
-│[ Recall │                                                                              │ettings ]│
+│         │                                                                              │         │
 ╰─────────│                                                                              │─────────╯
  Recall se│                                                                              │
 ╭─ recall │                                                                              │─────────╮
@@ -29,9 +27,11 @@ expression: render_state(&mut s)
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

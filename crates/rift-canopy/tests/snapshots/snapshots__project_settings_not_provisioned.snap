@@ -5,41 +5,41 @@ expression: "render_state(&mut\nproject_settings_state(Size::new(120, 40),\nrift
 ---
  RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
 [<]   Home   Models   Activity   Token usage   Recall viewer  [Settings]                                            < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
 ╭─ Project Settings · rift-cli · not set up on this machine ────────────────────────────────────────────────────────[x]╮
-│##########                                                                                                            │
-│####    ####                                                                                                          │
-│####    ####   Welcome to Rift                                                                                        │
-│##########     Set up this project                                                                                    │
-│######                                                                                                                │
-│####  ####                                                                                                            │
-│####    ####                                                                                                          │
+│  Project setup runs before Canopy opens.                                                                             │
+│  Exit Canopy and run `rift` in this project to start the CLI wizard.                                                 │
+│  /r/rift-cli                                                                                                         │
 │                                                                                                                      │
 │                                                                                                                      │
-│Recall                                                                                                                │
-│  Total Recall · [x] · committed by the repository                                                                    │
-│  per-turn delta injection · custom effective budget: 777 · [x] · committed by the repository                         │
-│  documents as Markdown · [x] · committed by the repository                                                           │
-│  native search · [x] · committed by the repository                                                                   │
 │                                                                                                                      │
-│Capture                                                                                                               │
-│  tool-call capture · [x] · committed by the repository                                                               │
-│  token-usage capture · [x] · committed by the repository                                                             │
-│  raw transcripts · [ ] · committed by the repository                                                                 │
 │                                                                                                                      │
-│Security / Policy                                                                                                     │
-│  policy: declared · valid                                                                                            │
-│  sensitive paths: 11                                                                                                 │
-│  redactor packs: 2 loaded · 1 failed                                                                                 │
 │                                                                                                                      │
-│Integrations                                                                                                          │
-│> Claude Code · PATH command · managed                                                                             [x]│
-│About: Installed: PATH command (availability only); wiring: managed.                                                  │
 │                                                                                                                      │
-│ j/k move · enter/space apply · pgup/pgdn scroll · esc/x close                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ Tab/Shift-Tab views · esc/x close                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -874,6 +874,7 @@ mod tests {
     /// this test cannot see. The reason column exists so the lie has to be
     /// typed out.
     const SURFACE_CENSUS: &[(&str, bool, &str)] = &[
+        ("install", false, "interactive owner preferences for future project setup"),
         (
             "update",
             false,

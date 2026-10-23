@@ -165,10 +165,6 @@ fn hit_mixed(units: &[Unit], rect: Rect, col: u16, row: u16) -> Target {
     };
     match slot.unit {
         Unit::Rail => Target::PanelFocus(Panel::Projects),
-        Unit::Card(CardKind::Repository) => {
-            repository_button_at(slot.rect, slot.collapsed, col, row)
-                .unwrap_or(Target::PanelFocus(Panel::Detail))
-        }
         Unit::Card(_) => Target::PanelFocus(Panel::Detail),
         Unit::Section(id) => Target::Section(id),
     }
@@ -231,8 +227,12 @@ pub(super) fn toggle_or_focus(
     // repository card — mirror `cards::draw` and keep its setup entry point
     // clickable.
     if detail.status.repository_card_only() {
-        return repository_button_at(rect, false, col, row)
-            .unwrap_or(Target::PanelFocus(Panel::Detail));
+        let adopt = cards::repository_adopt_rect(rect, false, detail.status);
+        return if adopt.is_some_and(|rect| contains(rect, col, row)) {
+            Target::RepositoryAdopt
+        } else {
+            Target::PanelFocus(Panel::Detail)
+        };
     }
     let under = cards::solve_scrolled(units, rect, vm.detail_scroll)
         .0
@@ -252,28 +252,11 @@ pub(super) fn toggle_or_focus(
 /// renderer draws from and consulted AFTER the buttons, so a geometry that
 /// overlapped them could never steal a click from one.
 fn repository_card_at(slot: &CardSlot, status: crate::ProjectStatus, col: u16, row: u16) -> Target {
-    if let Some(button) = repository_button_at(slot.rect, slot.collapsed, col, row) {
-        return button;
-    }
     let adopt = cards::repository_adopt_rect(slot.rect, slot.collapsed, status);
     if adopt.is_some_and(|r| contains(r, col, row)) {
         return Target::RepositoryAdopt;
     }
     Target::PanelFocus(Panel::Detail)
-}
-
-/// The repository card's Recall Viewer or Project Settings button under the
-/// click, from the same layout the renderer draws the card's buttons with —
-/// a button the width squeezed away never answers.
-fn repository_button_at(rect: Rect, collapsed: bool, col: u16, row: u16) -> Option<Target> {
-    let buttons = cards::repository_button_layout(rect, collapsed);
-    if buttons.recall.rect.w > 0 && contains(buttons.recall.rect, col, row) {
-        return Some(Target::RepositoryRecallViewer);
-    }
-    if buttons.settings.rect.w > 0 && contains(buttons.settings.rect, col, row) {
-        return Some(Target::RepositorySettings);
-    }
-    None
 }
 
 #[cfg(test)]
@@ -284,89 +267,21 @@ mod tests {
     use crate::render::frame::Size;
     use crate::state::AppState;
 
-    /// The settings chip of the repository card among `kinds` laid out in
-    /// `rect`, and whether the card is collapsed.
-    fn settings_chip_in(kinds: &[CardKind], rect: Rect) -> (Rect, bool) {
-        let repo = cards::solve(kinds, rect)
-            .into_iter()
-            .find(|slot| slot.kind == CardKind::Repository)
-            .expect("the repository card is laid out");
-        (
-            cards::repository_settings_rect(repo.rect, repo.collapsed),
-            repo.collapsed,
-        )
-    }
-
-    /// The settings chip in the full grid's physical `column`, solved from the
-    /// same model the hit-test reads.
-    fn home_settings_chip(view: &ViewModel) -> (Rect, bool) {
-        settings_chip_in(
-            &[CardKind::Repository],
-            crate::dashboard::home_rects(view.size).0,
-        )
-    }
-
     #[test]
-    fn the_settings_button_hits_on_the_full_grid() {
-        let mut s = state_with_detail(120, 40);
-        let v = s.snapshot();
-        let (chip, collapsed) = home_settings_chip(&v);
-        assert!(!collapsed, "the full grid draws the expanded card");
-        assert_eq!(
-            hit_test(&v, chip.x, chip.y),
-            Some(Target::RepositorySettings)
-        );
-    }
-
-    #[test]
-    fn the_settings_button_hits_after_a_move_within_the_card_column() {
-        let mut s = state_with_detail(120, 40);
-        s.app.layout.columns[1].units.rotate_left(1);
-        let v = s.snapshot();
-        let (chip, _) = home_settings_chip(&v);
-        assert_eq!(
-            hit_test(&v, chip.x, chip.y),
-            Some(Target::RepositorySettings)
-        );
-    }
-
-    #[test]
-    fn the_settings_button_hits_in_a_mixed_column_after_a_cross_column_move() {
-        let mut s = state_with_detail(120, 40);
-        let repository = s.app.layout.columns[1].units.remove(0);
-        s.app.layout.columns[2].units.insert(1, repository);
-        let v = s.snapshot();
-        let (chip, _) = home_settings_chip(&v);
-        assert_eq!(
-            hit_test(&v, chip.x, chip.y),
-            Some(Target::RepositorySettings)
-        );
-    }
-
-    #[test]
-    fn the_settings_button_hits_on_the_two_column_tier() {
-        let mut s = state_with_detail(60, 20);
-        let v = s.snapshot();
-        let (chip, _) = home_settings_chip(&v);
-        assert_eq!(
-            hit_test(&v, chip.x, chip.y),
-            Some(Target::RepositorySettings)
-        );
-    }
-
-    /// Single-panel pressure collapses the repository card to `[settings]`.
-    #[test]
-    fn the_collapsed_settings_button_hits_on_the_single_panel_tier() {
-        let mut s = state_with_detail(40, 16);
-        s.app.set_focus(Panel::Detail);
-        let v = s.snapshot();
-        let (chip, collapsed) = home_settings_chip(&v);
-        assert!(collapsed);
-        assert_eq!(chip.w, 10);
-        assert_eq!(
-            hit_test(&v, chip.x, chip.y),
-            Some(Target::RepositorySettings)
-        );
+    fn repository_card_has_no_navigation_click_targets() {
+        for (width, height) in [(120, 40), (60, 20), (40, 16)] {
+            let mut s = state_with_detail(width, height);
+            let view = s.snapshot();
+            let rect = crate::dashboard::home_rects(view.size).0;
+            for y in rect.y..rect.y + rect.h {
+                for x in rect.x..rect.x + rect.w {
+                    assert!(!matches!(
+                        hit_test(&view, x, y),
+                        Some(Target::DashboardTab(_))
+                    ));
+                }
+            }
+        }
     }
 
     #[test]
@@ -402,11 +317,9 @@ mod tests {
     fn clicking_a_project_row_resolves_to_its_index() {
         let mut v = vm(120, 40);
         v.projects_open = true;
-        let drawer = crate::dashboard::drawer_rect(v.size);
-        for index in 0..3 {
-            assert_eq!(
-                hit_test(&v, drawer.x + 3, drawer.y + 1 + index),
-                Some(Target::ProjectRow(usize::from(index)))
+        for index in 0..v.projects.len() {
+            assert!(
+                (4..v.size.h - 2).any(|y| hit_test(&v, 3, y) == Some(Target::ProjectRow(index)))
             );
         }
     }
@@ -416,10 +329,7 @@ mod tests {
         let mut v = vm(120, 40);
         v.projects_open = true;
         // A row well below the three project rows is still inside col1 → focus.
-        assert_eq!(
-            hit_test(&v, 3, 20),
-            Some(Target::PanelFocus(Panel::Projects))
-        );
+        assert_eq!(hit_test(&v, 3, 20), None);
     }
 
     #[test]
@@ -427,7 +337,7 @@ mod tests {
         let v = vm(120, 40);
         // col3 starts at x = col1.w + col2.w; sample a column well inside it.
         let recall = crate::dashboard::home_recall_content(v.size);
-        let hit = hit_test(&v, recall.x + 4, recall.y + 2);
+        let hit = hit_test(&v, recall.x + 4, recall.y);
         assert!(
             matches!(
                 hit,
@@ -453,18 +363,16 @@ mod tests {
     }
 
     #[test]
-    fn rail_action_bar_buttons_are_clickable() {
+    fn picker_footer_add_open_and_back_are_clickable() {
         let mut s = AppState::new(vec![project("a"), project("b")], Size::new(120, 40));
         s.app.splash.skip();
         s.app.projects_open = true;
         let v = s.snapshot();
-        let inner = inner_of(crate::dashboard::drawer_rect(v.size));
-        let (_list, buttons) = crate::view::rail_action_layout(inner, true);
-        assert!(!buttons.is_empty(), "the rail has an action bar");
-        // Every chip cell resolves to its target (pixels == targets).
-        for (r, target) in &buttons {
-            assert_eq!(hit_test(&v, r.x, r.y), Some(target.clone()));
-        }
-        assert_eq!(buttons[0].1, Target::RailAdd, "the first chip is Add");
+        let targets = (0..v.size.w)
+            .filter_map(|x| hit_test(&v, x, v.size.h - 1))
+            .collect::<Vec<_>>();
+        assert!(targets.contains(&Target::RailAdd));
+        assert!(targets.contains(&Target::ProjectRow(v.project_cursor)));
+        assert!(targets.contains(&Target::ProjectDrawer));
     }
 }

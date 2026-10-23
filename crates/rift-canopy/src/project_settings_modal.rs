@@ -24,8 +24,6 @@ pub enum ProjectSettingsItem {
 /// Transient state for one open Project Settings modal.
 #[derive(Clone, Debug, Default)]
 pub struct ProjectSettingsModalState {
-    /// Injected onboarding animation time; stationary under reduced motion.
-    pub animation_seconds: f32,
     /// Last verified view.
     pub view: Option<Box<ProjectSettingsView>>,
     /// Cursor in [`Self::items`], never on informational rows.
@@ -74,7 +72,7 @@ impl ProjectSettingsModalState {
         let Some(view) = self.view.as_deref() else {
             return Vec::new();
         };
-        if view.is_loading() {
+        if view.is_loading() || view.initialization.offers_setup() {
             return Vec::new();
         }
         let mut items = view
@@ -471,7 +469,7 @@ mod tests {
     #[test]
     fn every_actionable_row_has_focus_help_and_movement_changes_it() {
         let mut state = ProjectSettingsModalState::default();
-        state.open(view(ProjectInitialization::NotInitialized));
+        state.open(view(ProjectInitialization::Initialized));
         for cursor in 0..state.items().len() {
             state.cursor = cursor;
             assert!(
@@ -496,50 +494,38 @@ mod tests {
             "{integration}"
         );
         assert!(integration.contains("hooks: absent"));
-        state.cursor = state.items().len() - 1;
-        assert!(state
-            .focused_description()
-            .unwrap()
-            .contains("resumable setup"));
     }
 
     #[test]
-    fn setup_edits_locally_then_emits_one_complete_plan() {
-        let mut state = ProjectSettingsModalState::default();
-        state.open(view(ProjectInitialization::NotInitialized));
-        state.cursor = state.items().len() - 1;
-        let action = state.activate().unwrap();
-        let ProjectSettingsActionKind::Initialize(plan) = action.kind else {
-            panic!("expected initialize")
-        };
-        assert!(plan.total_recall);
-        assert!(plan.integrations.contains(&"codex".to_owned()));
-        assert!(!plan.raw_transcripts);
+    fn settings_never_offers_embedded_setup_controls() {
+        for initialization in [
+            ProjectInitialization::NotInitialized,
+            ProjectInitialization::NotProvisioned,
+            ProjectInitialization::SetupIncomplete,
+        ] {
+            let mut state = ProjectSettingsModalState::default();
+            state.open(view(initialization));
+            assert!(state.items().is_empty());
+            assert!(state.activate().is_none());
+        }
     }
 
     #[test]
-    fn setup_poll_preserves_local_choices_and_raw_confirmation() {
+    fn poll_preserves_raw_acknowledgement_for_initialized_projects() {
         let mut state = ProjectSettingsModalState::default();
-        state.open(view(ProjectInitialization::NotInitialized));
-        state.cursor = 0;
-        assert!(state.activate().is_none());
+        state.open(view(ProjectInitialization::Initialized));
         state.cursor = 6;
         assert!(state.activate().is_none());
         assert!(state.confirm_raw);
-
-        state.poll(view(ProjectInitialization::NotInitialized));
-        assert!(!state.view.as_ref().unwrap().settings[0].enabled);
+        state.poll(view(ProjectInitialization::Initialized));
         assert!(state.confirm_raw, "a fact poll cannot dismiss the warning");
-        assert!(state.activate().is_none());
-        state.cursor = state.items().len() - 1;
-        let action = state.activate().unwrap();
-        let ProjectSettingsActionKind::Initialize(plan) = action.kind else {
-            panic!("expected initialize")
-        };
-        assert!(
-            plan.raw_transcripts,
-            "acknowledgement updates the staged plan"
-        );
+        assert!(matches!(
+            state.activate().map(|action| action.kind),
+            Some(ProjectSettingsActionKind::Set {
+                setting: ProjectSettingId::RawTranscripts,
+                enabled: true
+            })
+        ));
     }
 
     #[test]

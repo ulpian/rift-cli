@@ -1,23 +1,23 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 225
+assertion_line: 228
 expression: frame_text(&f)
 ---
- RIFT  Canopy  *                                      ? Help  / Palette  q Quit
-[>]  [Home]  Models   Activity   Tokens   Recall   Settings                 < >
- rift-cli · branch unknown · /r/rift-cli
- Local facts only; Recall: family
-╭─ projects  3 ──────────────────────────────╮                        [settings]
-│># rift-cli                                o│
-│   > feature-wt                            -│
-│ # rift-site                               o│
-│                                            │
-│                                            │
-│                                            │─────────────────────────────────#
-│                                            │                                 |
-│[+][^][v][x]                                │                                 |
-╰────────────────────────────────────────────╯                                 |
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
-╭─ command ────────────────────────────────────────────────────────────────────╮
-│/█                                                                            │
-╰──────────────────────────────────────────────────────────────────────────────╯
+ Projects
+ [All 3]  Repositories 2   Worktrees 1
+ ------------------------------------------------------------------------------
+    Repositories / worktrees                                 Status
+ /r/rift-cli
+ > rift-cli                                                  Ready
+     + feature-wt                                            Setup required
+
+ /r/rift-site
+   rift-site                                                 Ready
+
+
+
+
+
+
+
+ Esc back   ↑/↓ move     Enter open    a Add project   ? Help

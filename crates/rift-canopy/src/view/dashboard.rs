@@ -65,7 +65,7 @@ pub(super) fn draw(
         ),
         DashboardTab::Recall | DashboardTab::Settings => {}
     }
-    let hints = "← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit";
+    let hints = "← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit";
     clip_at(frame, hint.x, hint.y, hint.w, hints, vm.theme.dim());
     super::grid::draw_command(vm, frame, command);
 }
@@ -92,46 +92,6 @@ pub(super) fn draw_navigation(vm: &ViewModel, frame: &mut Frame) {
         .zip(["< ", "> "])
     {
         clip_at(frame, rect.x, rect.y, rect.w, label, vm.theme.key_hint());
-    }
-    if let Some(detail) = vm.detail.as_deref() {
-        let text = crate::col2::sanitize_for_terminal(&format!(
-            "{} · {} · {}",
-            detail.label,
-            detail
-                .git_summary
-                .as_ref()
-                .map_or("branch unknown", |git| git.branch.as_str()),
-            detail.path
-        ));
-        clip_at(
-            frame,
-            1,
-            2,
-            vm.size.w.saturating_sub(2),
-            &text,
-            vm.theme.dim(),
-        );
-    }
-    let scope = if vm.size.w < 82 {
-        "Local facts only; Recall: family"
-    } else {
-        "Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family."
-    };
-    clip_at(
-        frame,
-        1,
-        3,
-        vm.size.w.saturating_sub(2),
-        scope,
-        vm.theme.dim(),
-    );
-}
-
-pub(super) fn draw_drawer(vm: &ViewModel, frame: &mut Frame, unicode: bool) {
-    if vm.projects_open {
-        let rect = crate::dashboard::drawer_rect(vm.size);
-        crate::chrome::fill(frame, rect, vm.theme.dim().with_bg(vm.theme.surface_bg()));
-        super::rail::draw_projects(vm, frame, rect, unicode);
     }
 }
 

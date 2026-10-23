@@ -5,41 +5,41 @@ expression: "render_state(&mut\nproject_settings_state_with_codex_hooks(Size::ne
 ---
  RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
 [<]   Home   Models   Activity   Token usage   Recall viewer  [Settings]                                            < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
 ╭─ Project Settings · rift-cli ─────────────────────────────────────────────────────────────────────────────────────[x]╮
 │Recall                                                                                                                │
-│> Total Recall                                                                                                     [x]│
-│  per-turn delta injection · custom effective budget: 777                                                          [x]│
-│  documents as Markdown                                                                                            [x]│
-│  native search                                                                                                    [x]│
+│> * Total Recall                                                                                                      │
+│  * Per-Turn Delta Injection · custom effective budget: 777                                                           │
+│  * Documents as Markdown                                                                                             │
+│  * Native Search                                                                                                     │
 │                                                                                                                      │
 │Capture                                                                                                               │
-│  tool-call capture                                                                                                [x]│
-│  token-usage capture                                                                                              [x]│
-│  raw transcripts                                                                                                  [ ]│
+│  * Tool-Call Capture                                                                                                 │
+│  * Token-Usage Capture                                                                                               │
+│  o Raw Transcripts                                                                                                   │
 │                                                                                                                      │
 │Security / Policy                                                                                                     │
 │  policy: declared · valid                                                                                            │
-│  sensitive paths: 11                                                                                                 │
-│  redactor packs: 2 loaded · 1 failed                                                                                 │
+│  Sensitive Paths: 11                                                                                                 │
+│  Redactor Packs: 2 loaded · 1 failed                                                                                 │
 │                                                                                                                      │
 │Integrations                                                                                                          │
-│  Claude Code · PATH command · managed                                                                             [x]│
-│  Codex · PATH command + VS Code extension · capture managed · hooks need refresh                                  [ ]│
-│  Gemini CLI · PATH command · conflict · coming soon                                                               [ ]│
-│  Antigravity · PATH command · invalid                                                                             [ ]│
-│  Cursor · not installed · coming soon                                                                             [ ]│
-│  Copilot CLI · not installed · coming soon                                                                        [ ]│
-│  OpenCode · not installed · coming soon                                                                           [ ]│
-│  Factory Droid · not installed · coming soon                                                                      [ ]│
-│  Ollama · not installed · coming soon                                                                             [ ]│
+│  * Claude Code · PATH command · managed                                                                              │
+│  o Codex · PATH command + VS Code extension · capture managed · hooks need refresh                                   │
+│  o Gemini CLI · PATH command · conflict · coming soon                                                                │
+│  o Antigravity · PATH command · invalid                                                                              │
+│  o Cursor · not installed · coming soon                                                                              │
+│  o Copilot CLI · not installed · coming soon                                                                         │
+│  o OpenCode · not installed · coming soon                                                                            │
+│  o Factory Droid · not installed · coming soon                                                                       │
+│  o Ollama · not installed · coming soon                                                                              │
 │                                                                                                                      │
+│Harness Permissions · Project Only                                                                                    │
+│  Unsupported controls stay in the harness. Existing permissions are kept by default.                                 │
 │About: Build and serve git-native project memory; disabling keeps captured data and hooks.                            │
 │                                                                                                                      │
 │ j/k move · enter/space apply · pgup/pgdn scroll · esc/x close                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

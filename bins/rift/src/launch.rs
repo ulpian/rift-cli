@@ -28,11 +28,25 @@ use crate::projection::project_name;
 /// The dashboard's registry is the append-only canopy UI-state store; the legacy
 /// TOML registry is imported once (idempotent) so existing users keep their list.
 pub(crate) fn launch_canopy(cli: &Cli) -> rift_core::Result<()> {
+    #[cfg(feature = "tui")]
+    let launch_project = if interactive_terminal() {
+        let Some(path) = crate::onboarding::prepare(cli.ascii)? else {
+            return Ok(());
+        };
+        Some(path)
+    } else {
+        None
+    };
     let cache_root = crate::family::cache_root();
     let cstore = rift_canopy_data::CanopyStore::open(&cache_root)?;
     #[cfg(feature = "tui")]
-    if interactive_terminal() && !crate::onboarding::prepare(&cstore)? {
-        return Ok(());
+    if let Some(path) = launch_project {
+        cstore.apply(
+            &PersistOp::AddProject {
+                path: path.to_string_lossy().into_owned(),
+            },
+            hooks::now_ms(),
+        )?;
     }
     let projects = launch_projects(&cstore)?;
     #[cfg(feature = "tui")]

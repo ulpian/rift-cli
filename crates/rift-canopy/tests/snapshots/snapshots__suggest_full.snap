@@ -1,12 +1,10 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 994
+assertion_line: 997
 expression: "render_state(&mut suggest_state(\"\"))"
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
 ╭─ repository ─────────────────────────────────────────────────────────────────────────────────────╮
 │rift-cli (repo)                                                                                   │
 │path: /r/rift-cli                                                                                 │
@@ -15,11 +13,13 @@ expression: "render_state(&mut suggest_state(\"\"))"
 │No attributed capture facts available                                                             │
 │Latest checkpoint: unavailable                                                                    │
 │Harnesses:                                                                                        │
-│[ Recall Viewer ]                                                             [ Project Settings ]│
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
  Recall setup required (Settings)
 ╭─ recall ─────────────────────────────────────────────────────────────────────────────────────────╮
 │recall off — open Project Settings                                                                │
+│                                                                                                  │
+│[24h][7d][30d][all]                                                                               │
 │                                                                                                  │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> help  /help                    show every palette verb                                          │
@@ -31,7 +31,7 @@ expression: "render_state(&mut suggest_state(\"\"))"
 │  doctor  /doctor                backend + memory-chain readiness                                 │
 │  add  /add                      register the launch directory                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

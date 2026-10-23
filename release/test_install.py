@@ -1,4 +1,4 @@
-"""Offline installer safety checks; every executable and HOME is disposable."""
+"""Offline installer safety checks; executables are disposable and HOME is preserved."""
 
 import hashlib
 import io
@@ -36,7 +36,7 @@ class InstallerSafety(unittest.TestCase):
             "shutil.copyfile(pathlib.Path(os.environ['FIXTURE_ASSETS']) / name, destination)\n"
         )
         curl.chmod(0o755)
-        self.env = dict(os.environ, HOME=str(self.root), RIFT_BIN_DIR=str(self.bin),
+        self.env = dict(os.environ, RIFT_NONINTERACTIVE="1", RIFT_BIN_DIR=str(self.bin),
                         RIFT_DOWNLOAD_MANIFEST="https://storage.googleapis.com/fixture/downloads.tsv", FIXTURE_ASSETS=str(self.assets),
                         PATH=str(self.commands) + os.pathsep + os.environ["PATH"])
         self.make_archive("v1.0.0-alpha")

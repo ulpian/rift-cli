@@ -389,11 +389,10 @@ mod tests {
         s.app.splash.skip();
         s.app.projects_open = true;
         let mut f = Frame::new(s.size);
-        let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
-        draw(&s.snapshot(), &mut b, &mut f);
+        let drawer = crate::dashboard::drawer_rect(s.size);
+        draw_projects_read_only(&s.snapshot(), &mut f, drawer, false);
 
         // The count badge shows "2" on the title row (col1 spans x=0..24).
-        let drawer = crate::dashboard::drawer_rect(s.size);
         let title: String = (drawer.x..drawer.x + drawer.w)
             .map(|x| f.get(x, drawer.y).unwrap().ch)
             .collect();
@@ -439,7 +438,22 @@ mod tests {
             status: ProjectStatus::Idle,
             kind: EntryKind::Repo,
         }];
-        let text = render_to_text(&s.snapshot());
-        assert!(text.contains('…'), "an over-long label is ellipsized");
+        let vm = s.snapshot();
+        let mut frame = Frame::new(s.size);
+        draw_projects_read_only(
+            &vm,
+            &mut frame,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 24,
+                h: 20,
+            },
+            true,
+        );
+        assert!(
+            (0..20).any(|y| (0..24).any(|x| frame.get(x, y).is_some_and(|cell| cell.ch == '…'))),
+            "an over-long label is ellipsized"
+        );
     }
 }

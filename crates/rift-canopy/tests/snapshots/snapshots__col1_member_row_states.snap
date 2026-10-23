@@ -1,45 +1,45 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 246
+assertion_line: 249
 expression: frame_text(&frame)
 ---
- RIFT  Canopy  ●                                                                              ? Help  / Palette  q Quit
-[>]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                                             < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
-╭─ projects  7 ──────────────────────────────╮─────────────────────────────────────────────────────────────────────────╮
-│>▣ rift-cli                                ●│                                                                         │
-│   ⌥ swt-a                                 ●│                                                                         │
-│   ⌥ swt-b                                 ◔│                                                                         │
-│   ⌥ swt-c                                 ◐│                                                                         │
-│ ▣ swt-d                                   ◌│                                                                         │
-│ ▣ swt-e                                   ×│                                                                         │
-│   ⌥ swt-gone                              !│                                                                         │
-│                                            │                                                     [ Project Settings ]│
-│                                            │─────────────────────────────────────────────────────────────────────────╯
-│                                            │
-│                                            │─────────────────────────────────────────────────────────────────────────╮
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│                                            │                                                                         │
-│[+][↑][↓][✕]                                │                                                                         │
-╰────────────────────────────────────────────╯─────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
-╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│/█                                                                                                                    │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Projects
+ [All 7]  Repositories 3   Worktrees 4
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    Repositories / worktrees                                 Status             │ Project details
+ /r/rift-cli                                                                    │
+ > rift-cli                                                  Working            │ rift-cli
+     ↳ swt-a                                                 Working            │ Working
+     ↳ swt-b                                                 Not adopted        │
+     ↳ swt-c                                                 Setup incomplete   │
+                                                                                │ Repository
+ /w/swt-d                                                                       │ /r/rift-cli
+   swt-d                                                     Setup required     │
+                                                                                │
+ /w/swt-e                                                                       │
+   swt-e                                                     Not a repository   │
+     ↳ swt-gone                                              Needs attention    │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+
+ Esc back   ↑/↓ move     Enter open    a Add project   ? Help

@@ -230,9 +230,29 @@ fn diagnose_one(
     env: &DetectionEnvironment,
 ) -> NativeIntegrationStatus {
     let token = agent.as_str();
+    let mut status = installation_candidate(token, env);
+    status.wiring = inspect_wiring(repo, token, adapter);
+    status.hook_wiring =
+        hook_family(token).map(|family| inspect_client_hooks(repo, family, status.wiring));
+    status.codex_trust = (token == AgentId::CODEX.as_str())
+        .then(|| codex_trust(repo, env.codex_home.as_deref()))
+        .flatten();
+    status
+}
+
+/// Detect harnesses for installer defaults without inspecting any project artifacts.
+#[must_use]
+pub fn installation_candidates(env: &DetectionEnvironment) -> Vec<NativeIntegrationStatus> {
+    AdapterRegistry::with_builtin()
+        .agents()
+        .iter()
+        .map(|agent| installation_candidate(agent.as_str(), env))
+        .collect()
+}
+
+fn installation_candidate(token: &str, env: &DetectionEnvironment) -> NativeIntegrationStatus {
     let installations = crate::detect::installations(token, env);
     let executable = crate::detect::first_executable(&installations);
-    let wiring = inspect_wiring(repo, token, adapter);
     let detection = if installations.is_empty() {
         NativeDetection::NotDetected
     } else {
@@ -242,13 +262,11 @@ fn diagnose_one(
         agent: token.to_owned(),
         display_name: display_name(token).to_owned(),
         detection,
-        wiring,
+        wiring: NativeWiring::Missing,
         executable,
         installations,
-        hook_wiring: hook_family(token).map(|family| inspect_client_hooks(repo, family, wiring)),
-        codex_trust: (token == AgentId::CODEX.as_str())
-            .then(|| codex_trust(repo, env.codex_home.as_deref()))
-            .flatten(),
+        hook_wiring: None,
+        codex_trust: None,
     }
 }
 

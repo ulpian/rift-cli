@@ -17,7 +17,7 @@ pub(super) fn clip_line(frame: &mut Frame, area: Rect, dy: u16, text: &str, styl
 }
 
 /// Print `text` at `(x, y)`, clipped to `width` cells.
-pub(super) fn clip_at(frame: &mut Frame, x: u16, y: u16, width: u16, text: &str, style: Style) {
+pub(crate) fn clip_at(frame: &mut Frame, x: u16, y: u16, width: u16, text: &str, style: Style) {
     let clipped: String = text.chars().take(usize::from(width)).collect();
     frame.put_str(x, y, &clipped, style);
 }

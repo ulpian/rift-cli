@@ -1,22 +1,23 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 33
 expression: frame_text(&f)
 ---
  RIFT  Canopy  *                                      ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Tokens   Recall   Settings                 < >
- rift-cli · branch unknown · /r/rift-cli
- Local facts only; Recall: family
-[recall] rift-cli · running                                           [settings]
-
-
-
-
+╭─ repository ─────────────────────────────────────────────────────────────────╮
+│rift-cli (repo)                                                               │
+│path: /r/rift-cli                                                             │
+│* running                                                                     │
+│Git status unavailable                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
  Recall setup required (Settings)
 ╭─ recall ─────────────────────────────────────────────────────────────────────#
 │recall off — open Project Settings                                            |
 │                                                                              |
 │[24h][7d][30d][all]                                                           |
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+│                                                                              |
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────╮
 │/█                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯

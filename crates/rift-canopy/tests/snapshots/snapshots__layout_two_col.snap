@@ -5,21 +5,21 @@ expression: "render_at(60, 20)"
 ---
  RIFT  Canopy  *                  ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Tokens   Recall        < >
- rift-cli · branch unknown · /r/rift-cli
- Local facts only; Recall: family
 ╭─ repository ─────────────────────────────────────────────╮
 │rift-cli (repo)                                           │
 │path: /r/rift-cli                                         │
 │* running                                                 │
-│[ Recall Viewer ]                     [ Project Settings ]│
+│Git status unavailable                                    │
+│No attributed capture facts available                     │
 ╰──────────────────────────────────────────────────────────╯
  Recall setup required (Settings)
 ╭─ recall ─────────────────────────────────────────────────#
-│recall off — open Project Settings                        |
+│recall off — open Project Settings                        #
 │                                                          |
 │[24h][7d][30d][all]                                       |
 │                                                          |
-← Projects  [/] tabs  s Settings  r Recall viewer  / command
+│                                                          |
+← Projects  Tab views  1–4 Recall period  s Settings  / comm
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │
 ╰──────────────────────────────────────────────────────────╯

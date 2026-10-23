@@ -95,7 +95,7 @@ pub const BORDER_IDLE: Color = Color::Rgb(0x3a, 0x42, 0x40);
 
 /// A filled-surface background (badges, tiles, the header bar) — one step above
 /// the terminal's own background so a filled region reads as raised.
-pub const SURFACE_BG: Color = Color::Rgb(0x1a, 0x20, 0x1e);
+pub const SURFACE_BG: Color = Color::Default;
 
 /// The selection pill's background — the accent, dimmed so reversed text reads.
 pub const SELECT_BG: Color = Color::Rgb(0x24, 0x40, 0x33);

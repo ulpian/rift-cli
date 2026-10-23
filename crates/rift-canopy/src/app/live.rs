@@ -12,6 +12,9 @@ use xre_term::{
     TerminalGuard,
 };
 
+mod onboarding;
+pub use onboarding::{run_installation, run_onboarding};
+
 use super::{event_loop, CanopyOpts, EventSource};
 use crate::dispatch::CommandDispatcher;
 use crate::render::frame::Size;
@@ -275,10 +278,7 @@ fn startup_state(
         opts.launch_cwd.as_deref(),
         opts.launch_cwd_is_repo,
     );
-    state.pending_setup_prompt = state
-        .app
-        .selected_project()
-        .map(|project| project.path.clone());
+    // The CLI completes launch onboarding before creating this dashboard.
     state.app.set_focus(crate::Panel::Detail);
     state
 }
@@ -317,7 +317,7 @@ fn to_canopy(ev: &XEvent) -> Option<CanopyKey> {
         KeyCode::Char(c) => Some(CanopyKey::Char(c)),
         KeyCode::Enter => Some(CanopyKey::Enter),
         KeyCode::Esc => Some(CanopyKey::Esc),
-        KeyCode::Backspace => Some(CanopyKey::Backspace),
+        KeyCode::Backspace | KeyCode::Delete => Some(CanopyKey::Backspace),
         KeyCode::Tab => Some(if shift {
             CanopyKey::BackTab
         } else {
@@ -527,14 +527,13 @@ mod tests {
     /// than mapped onto something arbitrary.
     #[test]
     fn keys_and_events_with_no_canopy_meaning_are_dropped() {
-        for code in [
-            KeyCode::Delete,
-            KeyCode::Insert,
-            KeyCode::F(1),
-            KeyCode::F(12),
-        ] {
+        for code in [KeyCode::Insert, KeyCode::F(1), KeyCode::F(12)] {
             assert_eq!(to_canopy(&press(code, Modifiers::NONE)), None, "{code:?}");
         }
+        assert_eq!(
+            to_canopy(&press(KeyCode::Delete, Modifiers::NONE)),
+            Some(CanopyKey::Backspace)
+        );
         assert_eq!(to_canopy(&XEvent::FocusGained), None);
         assert_eq!(to_canopy(&XEvent::Paste("pasted".to_owned())), None);
     }

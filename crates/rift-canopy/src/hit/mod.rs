@@ -61,6 +61,8 @@ pub enum ScrollRegion {
 pub enum Target {
     /// Open or close the project drawer (Left / Esc).
     ProjectDrawer,
+    /// Filter the project picker (Tab / Shift-Tab).
+    ProjectFilter(Option<crate::EntryKind>),
     /// Select a top-level view (`[` / `]`).
     DashboardTab(crate::dashboard::DashboardTab),
     /// Focus a panel (a click in it that isn't a more specific target).
@@ -75,10 +77,6 @@ pub enum Target {
     RailReorderDown,
     /// The rail's `✕` button — remove the selected project (RemoveProject).
     RailRemove,
-    /// The Repository card's Project Settings button.
-    RepositorySettings,
-    /// The Repository card's read-only Recall Viewer button.
-    RepositoryRecallViewer,
     /// The Repository card's **adopt** act: the status row of an unadopted
     /// member (the family view). Present only while that row is drawn, so the
     /// click never offers an act the card is not showing.
@@ -225,6 +223,7 @@ impl Target {
         matches!(
             self,
             Target::ProjectDrawer
+                | Target::ProjectFilter(_)
                 | Target::DashboardTab(_)
                 | Target::HeaderHelp
                 | Target::HeaderPalette
@@ -239,8 +238,6 @@ impl Target {
                 | Target::RailReorderUp
                 | Target::RailReorderDown
                 | Target::RailRemove
-                | Target::RepositorySettings
-                | Target::RepositoryRecallViewer
                 | Target::RepositoryAdopt
                 | Target::ViewerFilter
                 | Target::ViewerLatest
@@ -285,6 +282,9 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     if col >= size.w || row >= size.h || choose_mode(size) == LayoutMode::TooSmall {
         return None;
     }
+    if vm.projects_open && vm.overlay.is_none() {
+        return crate::project_picker::hit_test(vm, col, row);
+    }
     if row == 0 {
         return hit_header(vm, col);
     }
@@ -304,7 +304,11 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
     if let Some(target) = hit_suggest_panel(vm, col, row) {
         return Some(target);
     }
-    if matches!(vm.mode, Mode::Normal | Mode::ProjectSettings) && !vm.project_settings.running {
+    if matches!(
+        vm.mode,
+        Mode::Normal | Mode::ProjectSettings | Mode::Command
+    ) && !vm.project_settings.running
+    {
         if row == 1 && col < 3 {
             return Some(Target::ProjectDrawer);
         }
@@ -314,14 +318,6 @@ pub fn hit_test(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
             .find(|(_, r)| contains(*r, col, row))
         {
             return Some(Target::DashboardTab(tab));
-        }
-        if vm.projects_open {
-            let rect = crate::dashboard::drawer_rect(size);
-            return Some(if contains(rect, col, row) {
-                grid::project_or_focus(vm, rect, col, row)
-            } else {
-                Target::ProjectDrawer
-            });
         }
     }
     // A mode modal owns the surface while open: its rows and chips act, the
@@ -427,9 +423,10 @@ fn hit_suggest_panel(vm: &ViewModel, col: u16, row: u16) -> Option<Target> {
         return None;
     }
     let inner = inner_of(rect);
-    let shown = vm.suggestions.len().min(usize::from(inner.h));
+    let (start, end) = crate::view::suggestion_window(vm);
+    let shown = end.saturating_sub(start);
     match local_row(inner, col, row) {
-        Some(dy) if usize::from(dy) < shown => Some(Target::SuggestRow(usize::from(dy))),
+        Some(dy) if usize::from(dy) < shown => Some(Target::SuggestRow(start + usize::from(dy))),
         _ => Some(Target::PanelFocus(Panel::Command)),
     }
 }

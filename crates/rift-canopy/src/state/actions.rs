@@ -169,6 +169,22 @@ pub(super) fn apply_theme_slot(
     })
 }
 
+/// Management acts on the picker cursor while browsing, without changing the
+/// project's active data selection. Elsewhere it acts on the active project.
+pub(super) fn project_action_path(app: &App) -> Option<String> {
+    let index = if app.projects_open {
+        app.project_cursor
+    } else {
+        app.selected
+    };
+    app.projects
+        .get(index)
+        .filter(|p| {
+            !app.projects_open || crate::project_picker::accepts(app.project_filter, p.kind)
+        })
+        .map(|p| p.path.clone())
+}
+
 /// The remove op for a column-1 project: profile-scoped (this view only —
 /// the profile plane) when a profile is wired; the catalogue removal
 /// otherwise (headless/tests keep pre-profile behavior).
@@ -302,6 +318,10 @@ mod tests {
         open_drawer(&mut s);
         update(&mut s, Event::Key(CanopyKey::Down)); // select /r/b
         let flow = update(&mut s, Event::Key(CanopyKey::Char('d')));
+        assert_eq!(
+            s.app.selected, 0,
+            "management must not retarget active data"
+        );
         match flow {
             Flow::Continue(e) => assert_eq!(
                 e.persist,

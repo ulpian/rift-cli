@@ -50,7 +50,9 @@ use rift_store::resolve_cache_root;
 use self::wake::{NotifyWatcher, PollOnlyWatcher, WakeWatcher};
 use self::worker::{viewer_only_worker, worker};
 
-pub use self::settings_view::{project_settings_view, project_settings_view_under};
+pub use self::settings_view::{
+    installation_settings_view, project_settings_view, project_settings_view_under,
+};
 pub use self::setup_plan::{setup_plan_marker_under, SetupPlanMarker};
 pub use self::watermark::Watermark;
 

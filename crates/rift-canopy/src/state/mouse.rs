@@ -62,6 +62,9 @@ pub(super) fn on_mouse(s: &mut AppState, m: MouseInput) -> Flow {
         }
         MouseKind::Up(MouseButton::Left) if editing_drag => drop_drag(s),
         MouseKind::ScrollUp | MouseKind::ScrollDown => {
+            if s.app.projects_open && s.app.overlay.is_none() {
+                return super::dashboard::move_picker(s, m.kind == MouseKind::ScrollDown, 1);
+            }
             let vm = s.snapshot();
             let down = matches!(m.kind, MouseKind::ScrollDown);
             apply_scroll(s, &vm, m.col, m.row, down)
@@ -85,6 +88,17 @@ pub(super) fn apply_scroll(
     down: bool,
 ) -> Flow {
     let target = hit_test(vm, col, row);
+    if s.app.projects_open && s.app.overlay.is_none() {
+        return super::dashboard::move_picker(s, down, 1);
+    }
+    if !vm.suggestions.is_empty()
+        && matches!(
+            target,
+            Some(Target::SuggestRow(_) | Target::PanelFocus(Panel::Command))
+        )
+    {
+        return suggest_wheel(s, down);
+    }
     if s.app.surface == Surface::RecallViewer && s.app.overlay.is_none() {
         return viewer_wheel(s, target.as_ref(), down);
     }
@@ -221,6 +235,7 @@ fn wheel_region(app: &App, target: Option<&Target>) -> WheelRegion {
         | Target::OverlayClose
         | Target::Scrollbar(ScrollRegion::Modal) => WheelRegion::Results,
         Target::ProjectDrawer
+        | Target::ProjectFilter(_)
         | Target::DashboardTab(_)
         | Target::CommandBar
         | Target::HeaderHelp
@@ -252,8 +267,6 @@ fn wheel_region(app: &App, target: Option<&Target>) -> WheelRegion {
         | Target::RailReorderUp
         | Target::RailReorderDown
         | Target::RailRemove
-        | Target::RepositorySettings
-        | Target::RepositoryRecallViewer
         | Target::RepositoryAdopt
         | Target::ViewerFilter
         | Target::ViewerLatest
@@ -502,18 +515,16 @@ mod tests {
 
     #[test]
     fn scrolling_over_the_graphs_column_scrolls_its_viewport() {
-        // A short Full3Col terminal: the fully-expanded panels overflow the
-        // column, so the graphs offset moves content (the scrollbar rule) — the old inert
-        // code clamped it away, so this is the regression the old code fails.
+        // A short Tokens view overflows its full-width viewport.
         let mut s = ready(vec![project("a")]);
-        s.size = Size::new(100, 16);
+        s.size = Size::new(100, 10);
         s.app.dashboard_tab = crate::dashboard::DashboardTab::Tokens;
         s.app.clamp_scrolls(s.size);
         let wheel = |kind| {
             Event::Mouse(MouseInput {
                 kind,
                 col: 90,
-                row: 6,
+                row: 4,
             })
         };
         update(&mut s, wheel(MouseKind::ScrollDown));

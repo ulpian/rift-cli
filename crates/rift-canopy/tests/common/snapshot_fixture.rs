@@ -567,12 +567,12 @@ fn member_row_projects() -> Vec<Project> {
     ]
 }
 
-/// Render the member-row rail with `selected` in focus and `detail` delivered
-/// for it, at `caps`.
+/// Render the project picker or Home with the selected member and delivered detail.
 pub(crate) fn member_row_frame(
     selected: usize,
     detail: rift_canopy::DetailView,
     caps: Capabilities,
+    picker: bool,
 ) -> Frame {
     // The row's own status and path come from the detail, which carries both:
     // the two must agree anyway, and taking them from one place is how the
@@ -581,11 +581,13 @@ pub(crate) fn member_row_frame(
     let path = detail.path.clone();
     let mut s = AppState::new(member_row_projects(), Size::new(120, 40));
     s.app.splash.skip();
-    rift_canopy::update(
-        &mut s,
-        rift_canopy::Event::Key(rift_canopy::CanopyKey::Left),
-    );
     s.app.selected = selected;
+    if picker {
+        rift_canopy::update(
+            &mut s,
+            rift_canopy::Event::Key(rift_canopy::CanopyKey::Left),
+        );
+    }
     rift_canopy::update(
         &mut s,
         rift_canopy::Event::ProjectData(rift_canopy::ProjectData {

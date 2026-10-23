@@ -1,16 +1,14 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 909
+assertion_line: 912
 expression: render_state(&mut s)
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
-          ╭─ welcome to Rift ─────────────────────────────────────────────────────────[x]╮
- Models/ac│No projects registered yet.                                                   │
-no project│Add a project to start capturing agent sessions,                              │
+no project╭─ welcome to Rift ─────────────────────────────────────────────────────────[x]╮
+          │No projects registered yet.                                                   │
+          │Add a project to start capturing agent sessions,                              │
           │or run `rift init` in a repository.                                           │
-          │                                                                              │
-          │                                                                              │
           │                                                                              │
           │                                                                              │
           │                                                                              │
@@ -28,10 +26,12 @@ no project│Add a project to start capturing agent sessions,                   
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
 │         │< Add a project >                                                             │         │
 │         ╰──────────────────────────────────────────────────────────────────────────────╯         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

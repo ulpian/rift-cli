@@ -26,8 +26,7 @@ use super::actions::{
 };
 use super::effects::persist_flow;
 use super::openers::{
-    open_adopt_confirm, open_project_settings, open_savings_breakdown, open_worktree_axis,
-    select_recall_window,
+    open_adopt_confirm, open_savings_breakdown, open_worktree_axis, select_recall_window,
 };
 use super::reduce::{layout_persist_op, selection_change_effects};
 use super::verbs::{confirm_dispatch, dashboard_verb_flow};
@@ -42,6 +41,10 @@ use super::{AppState, Effects, Flow};
 /// One arm per target, so a new target has to be classified here; the
 /// per-surface handlers below hold the bodies.
 pub(super) fn apply_click(s: &mut AppState, target: Target) -> Flow {
+    if s.app.projects_open && target == Target::RailAdd {
+        s.app.projects_open = false;
+        s.app.mode = Mode::Normal;
+    }
     if s.app.mode == Mode::ProjectSettings && s.app.project_settings.running {
         return Flow::Continue(Effects::default());
     }
@@ -53,6 +56,7 @@ pub(super) fn apply_click(s: &mut AppState, target: Target) -> Flow {
     }
     match target {
         Target::ProjectDrawer => super::dashboard::toggle_drawer(s),
+        Target::ProjectFilter(filter) => super::dashboard::select_picker_filter(s, filter),
         Target::DashboardTab(tab) => super::dashboard::select_tab(s, tab),
         Target::PanelFocus(panel) => click_panel(s, panel),
         Target::CommandBar => click_command_bar(s),
@@ -61,8 +65,6 @@ pub(super) fn apply_click(s: &mut AppState, target: Target) -> Flow {
         Target::RailAdd | Target::RailRemove | Target::RailReorderUp | Target::RailReorderDown => {
             apply_rail_action(s, &target)
         }
-        Target::RepositorySettings => open_project_settings(s),
-        Target::RepositoryRecallViewer => Flow::Continue(s.open_recall_viewer(None)),
         Target::RepositoryAdopt => open_adopt_confirm(s),
         Target::ViewerFilter
         | Target::ViewerLatest
@@ -123,17 +125,18 @@ fn apply_rail_action(s: &mut AppState, target: &Target) -> Flow {
         // The `+` chip raises the destination explorer through the ONE entry
         // door (the destination explorer) — the click twin of `a`, not a second seeding.
         Target::RailAdd => {
+            s.app.projects_open = false;
             let action = enter_explorer(&mut s.app);
             profile_or_fold_action(s, action)
         }
         Target::RailRemove => {
-            let sel = s.app.selected_project().map(|p| p.path.clone());
+            let sel = super::actions::project_action_path(&s.app);
             let op = sel.map(|path| remove_project_op(&s.app, path));
             persist_flow(op)
         }
         Target::RailReorderUp | Target::RailReorderDown => {
             let up = matches!(target, Target::RailReorderUp);
-            let sel = s.app.selected_project().map(|p| p.path.clone());
+            let sel = super::actions::project_action_path(&s.app);
             let op = sel.map(|path| reorder_project_op(&s.app, path, up));
             persist_flow(op)
         }
@@ -180,7 +183,7 @@ fn click_command_bar(s: &mut AppState) -> Flow {
 
 /// A rail row: select it with the same bus effects the arrow keys raise; on
 /// the viewer surface, open its catalogue instead.
-fn click_project_row(s: &mut AppState, i: usize) -> Flow {
+pub(super) fn click_project_row(s: &mut AppState, i: usize) -> Flow {
     let before = s.app.selected_project().map(|p| p.path.clone());
     if i < s.app.projects.len() {
         s.app.selected = i;
@@ -188,8 +191,10 @@ fn click_project_row(s: &mut AppState, i: usize) -> Flow {
     s.dirty = true;
     let mut eff = Effects::default();
     selection_change_effects(s, &before, &mut eff);
-    if let Flow::Continue(closed) = super::dashboard::toggle_drawer(s) {
-        eff.data_requests.extend(closed.data_requests);
+    if s.app.projects_open {
+        if let Flow::Continue(closed) = super::dashboard::toggle_drawer(s) {
+            eff.data_requests.extend(closed.data_requests);
+        }
     }
     Flow::Continue(eff)
 }
@@ -1158,7 +1163,7 @@ mod tests {
             Target::RailReorderUp,
             Target::RailReorderDown,
             Target::RailRemove,
-            Target::RepositorySettings,
+            Target::DashboardTab(crate::dashboard::DashboardTab::Settings),
             Target::WizardAdd,
             Target::ExplorerUp,
             Target::ExplorerSelect,
@@ -1224,7 +1229,8 @@ mod tests {
         // the same bus effects as pressing Down from the top.
         let mut sk = ready(vec![project("a"), project("b"), project("c")]);
         open_drawer(&mut sk);
-        let fk = update(&mut sk, Event::Key(CanopyKey::Down));
+        update(&mut sk, Event::Key(CanopyKey::Down));
+        let fk = update(&mut sk, Event::Key(CanopyKey::Enter));
         let mut sm = ready(vec![project("a"), project("b"), project("c")]);
         open_drawer(&mut sm);
         // Resolve the second row in the visible drawer through its drawn target.

@@ -35,7 +35,10 @@ pub(super) fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
         // three times. Bound only where they are hinted (`keymap::GRAPHS`),
         // like `w`: no other column advertises them and no other column
         // swallows a digit.
-        CanopyKey::Char(digit @ '1'..='4') if app.focus == Panel::Graphs => {
+        CanopyKey::Char(digit @ '1'..='4')
+            if app.focus == Panel::Graphs
+                || app.dashboard_tab == crate::dashboard::DashboardTab::Home =>
+        {
             recall_window_for_digit(digit).map_or(Action::None, Action::SetRecallWindow)
         }
         // `A` adopts the selected member (the family view) — the keyboard twin
@@ -60,14 +63,6 @@ pub(super) fn on_key_normal(app: &mut App, key: CanopyKey) -> Action {
 /// keys that act on the selected project.
 fn on_key_normal_motion(app: &mut App, key: CanopyKey) -> Action {
     match key {
-        CanopyKey::Tab => {
-            app.cycle_focus(true);
-            Action::None
-        }
-        CanopyKey::BackTab => {
-            app.cycle_focus(false);
-            Action::None
-        }
         CanopyKey::Left => {
             app.move_focus(true);
             Action::None
@@ -235,16 +230,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_navigation_order_through_on_key() {
+    fn normal_input_does_not_cycle_panel_focus_on_tab() {
         let mut app = ready(vec![project("a")]);
         assert_eq!(app.focus, Panel::Detail);
-        for expected in [Panel::Graphs, Panel::Command, Panel::Detail] {
+        for _ in 0..3 {
             assert_eq!(on_key(&mut app, CanopyKey::Tab), Action::None);
-            assert_eq!(app.focus, expected);
+            assert_eq!(app.focus, Panel::Detail);
         }
         // Shift-Tab reverses.
         assert_eq!(on_key(&mut app, CanopyKey::BackTab), Action::None);
-        assert_eq!(app.focus, Panel::Command);
+        assert_eq!(app.focus, Panel::Detail);
     }
 
     #[test]

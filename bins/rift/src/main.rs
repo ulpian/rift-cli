@@ -182,8 +182,9 @@ fn main() -> ExitCode {
 /// with several verbs (`chain`, `bundle`, `sync`, `checkpoint`, `session`, the
 /// and the one-verb workflows) routes through one function each, so every
 /// route the binary can take is still readable from this one place.
-fn route(_cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
+fn route(cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
     match cmd {
+        Command::Install => installation::preferences(cli.ascii),
         Command::Update(args) => installation::update(args),
         Command::Uninstall(args) => installation::uninstall(args),
         Command::Init(a) => cmd_init(root, a),

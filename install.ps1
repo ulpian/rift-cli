@@ -20,6 +20,14 @@ function Assert-RiftRegular([string]$Path) {
     }
 }
 
+function Set-RiftPreferences {
+    if ($env:RIFT_UPDATE -eq '1') { return }
+    if ($env:RIFT_NONINTERACTIVE -ne '1' -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+        & $binary install
+        if ($LASTEXITCODE -ne 0) { throw 'Binary installed; preferences incomplete. Run rift install to resume.' }
+    } else { Write-Output 'Run rift install in a terminal to choose default harnesses and features.' }
+}
+
 $bin = $env:RIFT_BIN_DIR
 if (-not $bin) { $bin = Join-Path $env:LOCALAPPDATA 'Rift\bin' }
 if (-not [IO.Path]::IsPathRooted($bin)) { throw 'RIFT_BIN_DIR must be absolute.' }
@@ -53,6 +61,7 @@ try {
 
     if (-not $env:RIFT_DOWNLOAD_MANIFEST) { throw 'A fresh invitation link is required. Use the install command from your invitation email.' }
     $manifestPath = Join-Path $stage 'manifest'
+    Write-Output "  @--o--o  Step 1/3: Download invitation and binary"
     Fetch-RiftFile $env:RIFT_DOWNLOAD_MANIFEST $manifestPath
     if ((Get-Item -LiteralPath $manifestPath).Length -gt 1048576) { throw 'Invitation manifest is too large.' }
     $manifestLines = [IO.File]::ReadAllLines($manifestPath)
@@ -69,12 +78,14 @@ try {
     $expected = $fields[2]
     if ((Test-Path -LiteralPath $binary) -and $record[2] -eq $version) {
         Write-Output "Rift $version is already installed."
+        Set-RiftPreferences
         return
     }
     # The x64 build also runs on Windows ARM64 through Windows' x64 emulation.
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'This alpha requires 64-bit Windows.' }
     $archive = Join-Path $stage 'archive.zip'
     Fetch-RiftFile $archiveUrl $archive
+    Write-Output "  *--@--o  Step 2/3: Verify archive and executable"
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
         throw 'Archive checksum mismatch; existing installation was preserved.'
     }
@@ -88,6 +99,7 @@ try {
     if ((& $stagedBinary --version) -ne "rift $($version.Substring(1))") { throw 'Downloaded executable reports a different version.' }
     $hash = (Get-FileHash -LiteralPath $stagedBinary -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $stage 'receipt'), "rift-install-v1`n$hash`n$version`n", $utf8)
+    Write-Output "  *--*--@  Step 3/3: Install verified binary"
     Assert-RiftRegular $binary
     Assert-RiftRegular $receipt
     if ($hadBinary) {
@@ -135,7 +147,9 @@ if ((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInv
             }
         }
     }
+    Write-Output "  *--*--*  Binary installation complete"
     Write-Output "Installed Rift $version at $binary"
+    Set-RiftPreferences
     if (($env:PATH -split ';') -notcontains $bin) {
         Write-Output "Add $bin to your user PATH, then open a terminal and run rift inside your project."
     } else { Write-Output 'Run rift inside your project to choose harnesses and permissions.' }

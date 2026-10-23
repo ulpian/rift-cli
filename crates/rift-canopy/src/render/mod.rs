@@ -51,6 +51,9 @@ impl Capabilities {
     /// Running the legacy-Windows console path.
     pub const LEGACY_WIN: Self = Self(1 << 6);
 
+    /// ANSI palette color; independent of Unicode and 24-bit support.
+    pub const ANSI_COLOR: Self = Self(1 << 7);
+
     /// The empty capability set.
     #[must_use]
     pub const fn empty() -> Self {
@@ -198,13 +201,15 @@ pub trait RenderBackend {
 }
 
 /// Choose a backend from capabilities. The ASCII floor is returned when forced,
-/// when caps lack truecolor, or when the xre backend fails to initialize — so
+/// when caps lack color, or when the xre backend fails to initialize — so
 /// startup degrades, never crashes.
 #[must_use]
 pub fn select_backend(caps: Capabilities, force_ascii: bool) -> Box<dyn RenderBackend> {
     #[cfg(feature = "xre")]
     {
-        if !force_ascii && caps.contains(Capabilities::TRUECOLOR) {
+        if !force_ascii
+            && (caps.contains(Capabilities::TRUECOLOR) || caps.contains(Capabilities::ANSI_COLOR))
+        {
             match xre_backend::XreBackend::try_new(caps) {
                 Ok(b) => return Box::new(b),
                 Err(_) => return Box::new(AsciiBackend::new(caps)),
@@ -254,6 +259,14 @@ mod tests {
     fn select_backend_returns_ascii_when_no_truecolor() {
         let b = select_backend(Capabilities::empty(), false);
         assert_eq!(b.name(), "ascii-fallback");
+    }
+
+    #[cfg(feature = "xre")]
+    #[test]
+    fn palette_terminal_keeps_the_diffing_backend() {
+        let backend = select_backend(Capabilities::ANSI_COLOR | Capabilities::UNICODE, false);
+        assert_eq!(backend.name(), "xre");
+        assert!(!backend.capabilities().contains(Capabilities::TRUECOLOR));
     }
 
     #[test]

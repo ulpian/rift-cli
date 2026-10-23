@@ -72,8 +72,8 @@ fn the_dashboard_exposes_its_header_rail_card_and_command_targets() {
             Target::HeaderPalette,
             Target::HeaderQuit,
             Target::ProjectDrawer,
-            Target::RepositoryRecallViewer,
-            Target::RepositorySettings,
+            Target::DashboardTab(crate::dashboard::DashboardTab::Recall),
+            Target::DashboardTab(crate::dashboard::DashboardTab::Settings),
             Target::CommandBar,
         ],
     );
@@ -113,7 +113,7 @@ fn every_header_item_is_reachable_by_its_key_and_by_its_click() {
 }
 
 #[test]
-fn an_overflowing_rail_exposes_its_scrollbar_and_add_button() {
+fn an_overflowing_picker_exposes_its_filters_add_and_last_visible_project() {
     let mut rail_overflow = AppState::new(
         (0..80)
             .map(|index| project(&format!("p{index:03}")))
@@ -124,7 +124,16 @@ fn an_overflowing_rail_exposes_its_scrollbar_and_add_button() {
     rail_overflow.app.projects_open = true;
     assert_scanned(
         &mut rail_overflow,
-        &[Target::Scrollbar(ScrollRegion::Rail), Target::RailAdd],
+        &[
+            Target::ProjectFilter(None),
+            Target::ProjectFilter(Some(crate::EntryKind::Repo)),
+            Target::RailAdd,
+        ],
+    );
+    rail_overflow.app.project_cursor = 79;
+    assert_scanned(
+        &mut rail_overflow,
+        &[Target::ProjectRow(79), Target::RailAdd],
     );
 }
 
@@ -145,13 +154,16 @@ fn every_degraded_tier_exposes_targets_under_every_focus() {
 }
 
 #[test]
-fn a_mixed_column_keeps_the_repository_buttons() {
+fn a_mixed_column_keeps_the_top_navigation_available() {
     let mut mixed = state_with_detail(120, 40);
     let repository = mixed.app.layout.columns[1].units.remove(0);
     mixed.app.layout.columns[2].units.insert(1, repository);
     assert_scanned(
         &mut mixed,
-        &[Target::RepositoryRecallViewer, Target::RepositorySettings],
+        &[
+            Target::DashboardTab(crate::dashboard::DashboardTab::Recall),
+            Target::DashboardTab(crate::dashboard::DashboardTab::Settings),
+        ],
     );
 }
 

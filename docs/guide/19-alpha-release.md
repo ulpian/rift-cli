@@ -35,7 +35,23 @@ Ask the owner before broad test sweeps; use focused checks during implementation
   requires separate explicit consent. Preserve unrelated settings and refuse conflicts.
 - Capture new sessions by default. Historical import is a separate opt-in action.
 - Reuse the existing setup/settings services and immutable/redacted storage gates.
-- Welcome/setup uses a white block-tile R. Tiles gently fade between gray and white
+- Setup is a standalone terminal wizard before the dashboard registry, data bus,
+  or view starts. Settings never embeds the setup plan. Cancel exits without
+  loading Canopy; successful verified setup is the only path into the dashboard.
+- Selecting Set up project expands Confirm setup and Back below a blank line. Both
+  work by keyboard and mouse; buffered input never confirms a newly shown step.
+  Inactive review text turns gray. Enter on Confirm is the final Enter, including
+  when raw transcript retention is enabled: its warning is visible beforehand,
+  and Confirm explicitly acknowledges keeping raw transcripts locally.
+- Show a step-based progress bar from native setup reports, including skipped
+  steps. Reserve 100% for verified success; show failures and require confirmation
+  again before a retry.
+- Setup choices are compact keyboard- and mouse-operated rows with white empty
+  circles when unselected and solid green circles when selected. There are no
+  option frames; harness selection remains multi-select. Review settings use
+  leading green/red circles for on/off. Permission labels use yellow for Keep
+  current, blue for Restricted, and orange for Workspace edits.
+- Welcome/setup uses a compact, abstract 6x4 white block-tile R. Tiles gently fade between gray and white
   at staggered times, keeping the R readable. Respect reduced motion and terminal
   capabilities. Established projects open directly, without a startup splash.
 
@@ -45,10 +61,22 @@ Ask the owner before broad test sweeps; use focused checks during implementation
   full-width main view, top tabs, and the existing bottom command panel.
 - Tabs: Home, Models, Activity, Token usage, Recall viewer, Settings. Home first.
 - A clickable left-arrow opens a project drawer with nested worktrees. Keyboard
-  navigation reaches the same acts. Selecting switches every project command and
-  view to that project. Keep active repository/path and branch visible.
+  navigation reaches the same acts. This is a full-screen picker, with repository
+  path headings, nested worktrees, status, and a details preview. Arrows highlight;
+  Enter/click selects and retargets commands. Esc keeps the active project.
+- Tab/Shift-Tab cycle All, Repositories, and Worktrees filters while the project
+  picker is open. Elsewhere they cycle the top views, including Recall and Settings.
+  Keep project information in the cards; omit the extra path and scope header rows.
+- Use the terminal's default background. The onboarding R visibly shimmers at a
+  bounded cadence; it becomes solid white with reduced motion. No logo animation
+  runs behind the dashboard or Settings. Apple Terminal uses its 256-color
+  palette with diffed updates; never advertise or send unsupported RGB colors.
 - Launch selects the actual launch worktree. Display activity/usage for the selected
   worktree; do not relabel family aggregates as local values.
+- Slash opens command suggestions; Backspace/Delete at the empty prompt closes
+  them. Suggestion scrolling and clicks share the visible window. Recall period
+  chips (24h, 7d, 30d, all) are clickable and also select with keys 1–4 on Home.
+- Repository has no Recall Viewer or Project Settings buttons; use the top tabs.
 - Home has compact stacked Repository and Recall boxes. Repository summarizes
   identity/path, branch, Git state, capture/integration health, active sessions and
   latest checkpoint. Recall summarizes enabled state, readiness/degradation,
@@ -70,3 +98,8 @@ Ask the owner before broad test sweeps; use focused checks during implementation
 - Present the working experience and honest release notes before tagging/publishing.
 - Required repository release checks remain release gates, not implied approvals
   to run a broad sweep. Platform proof and known limitations must be reported.
+
+The 2026-10-23 UI correction follows Codex's separate
+[onboarding host](https://github.com/openai/codex/blob/main/codex-rs/tui/src/onboarding/onboarding_screen.rs)
+and [picker geometry](https://github.com/openai/codex/blob/main/codex-rs/tui/src/resume_picker/layout.rs).
+Rift retains its own render backend and project lifecycle manager.

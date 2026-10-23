@@ -13,6 +13,9 @@ pub(super) fn on_key_editing(app: &mut App, key: CanopyKey) -> Action {
             Action::None
         }
         CanopyKey::Backspace => {
+            if app.mode == Mode::Command && app.command_line.is_empty() {
+                app.mode = Mode::Normal;
+            }
             app.command_line.pop();
             app.command_error = None;
             app.suggest_highlight = 0;
@@ -188,5 +191,22 @@ mod tests {
         assert_eq!(on_key(&mut app, CanopyKey::Esc), Action::None);
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.command_line.is_empty());
+    }
+    #[test]
+    fn backspace_at_the_empty_slash_prompt_dismisses_suggestions() {
+        let mut app = ready(vec![]);
+        on_key(&mut app, CanopyKey::Char('/'));
+        assert!(!crate::current_suggestions(&app).is_empty());
+        on_key(&mut app, CanopyKey::Backspace);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(crate::current_suggestions(&app).is_empty());
+        on_key(&mut app, CanopyKey::Char('/'));
+        on_key(&mut app, CanopyKey::Char('s'));
+        on_key(&mut app, CanopyKey::Backspace);
+        assert_eq!(
+            app.mode,
+            Mode::Command,
+            "deleting a character still edits the command"
+        );
     }
 }

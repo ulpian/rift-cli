@@ -59,14 +59,14 @@ impl DashboardTab {
     }
 }
 
-/// The full-width main area; two navigation rows sit below the global header.
+/// The full-width main area, immediately below the header and tabs.
 #[must_use]
 pub fn geometry(size: Size) -> (Rect, Rect, Rect) {
     chrome_split(Rect {
         x: 0,
-        y: 4,
+        y: 2,
         w: size.w,
-        h: size.h.saturating_sub(4),
+        h: size.h.saturating_sub(2),
     })
 }
 
@@ -181,7 +181,7 @@ mod tests {
     fn navigation_and_commands_never_overlap_the_content() {
         for size in [Size::new(80, 24), Size::new(120, 40)] {
             let (body, hint, command) = geometry(size);
-            assert_eq!(body.y, 4);
+            assert_eq!(body.y, 2);
             assert!(body.y + body.h <= hint.y);
             assert!(hint.y + hint.h <= command.y);
             for (_, rect) in tab_rects(size, DashboardTab::Home) {

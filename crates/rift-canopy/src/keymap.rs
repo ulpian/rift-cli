@@ -150,7 +150,7 @@ const RAIL: &[Hint] = &[
 const DETAIL: &[Hint] = &[
     hint("j/k", "scroll", CanopyKey::Down),
     hint("s", "settings", CanopyKey::Char('s')),
-    hint("tab", "panes", CanopyKey::Tab),
+    hint("tab", "views", CanopyKey::Tab),
     hint("/", "palette", CanopyKey::Char('/')),
     hint("q", "quit", CanopyKey::Char('q')),
 ];
@@ -161,7 +161,7 @@ const DETAIL_NOT_ADOPTED: &[Hint] = &[
     hint("j/k", "scroll", CanopyKey::Down),
     hint("A", "adopt", CanopyKey::Char('A')),
     hint("s", "settings", CanopyKey::Char('s')),
-    hint("tab", "panes", CanopyKey::Tab),
+    hint("tab", "views", CanopyKey::Tab),
     hint("/", "palette", CanopyKey::Char('/')),
     hint("q", "quit", CanopyKey::Char('q')),
 ];
@@ -179,18 +179,18 @@ const GRAPHS: &[Hint] = &[
     // savings breakdown, and until this hint existed the whole disclosed
     // basis was mouse-only.
     hint("S", "savings", CanopyKey::Char('S')),
-    hint("tab", "panes", CanopyKey::Tab),
+    hint("tab", "views", CanopyKey::Tab),
     hint("/", "palette", CanopyKey::Char('/')),
     hint("q", "quit", CanopyKey::Char('q')),
 ];
 const COMMAND_IDLE: &[Hint] = &[
     hint("/", "palette", CanopyKey::Char('/')),
-    hint("tab", "panes", CanopyKey::Tab),
+    hint("tab", "views", CanopyKey::Tab),
     hint("q", "quit", CanopyKey::Char('q')),
 ];
 const COMMAND_EDITING: &[Hint] = &[
     hint("↑/↓", "highlight", CanopyKey::Down),
-    hint("tab", "insert", CanopyKey::Tab),
+    hint("tab", "views", CanopyKey::Tab),
     hint("⏎", "run", CanopyKey::Enter),
     hint("esc", "close", CanopyKey::Esc),
 ];
@@ -404,7 +404,11 @@ mod tests {
     /// Normal-mode focus contexts: the panel focused, its scroll off the edge.
     fn focus_panel(app: &mut App, ctx: HintContext) {
         match ctx {
-            HintContext::Rail => app.set_focus(Panel::Projects),
+            HintContext::Rail => {
+                app.projects_open = true;
+                app.project_cursor = app.selected;
+                app.set_focus(Panel::Projects);
+            }
             HintContext::Detail => {
                 app.set_focus(Panel::Detail);
                 app.scroll.detail = 1;
@@ -650,7 +654,14 @@ mod tests {
         ) + &format!(
             "|{:?}|{:?}|{:?}",
             app.profile_menu, app.colour_picker, app.explorer
-        ) + &format!("|{:?}", app.project_settings)
+        ) + &format!(
+            "|{:?}|{:?}|{:?}|{}|{}",
+            app.project_settings,
+            app.dashboard_tab,
+            app.project_filter,
+            app.project_cursor,
+            app.projects_open
+        )
     }
 
     /// The hint-derivation proof: every hinted key, fed to the reducer in
@@ -660,10 +671,15 @@ mod tests {
     fn every_hint_key_is_handled_by_the_reducer() {
         for ctx in ALL {
             for h in hints(ctx) {
-                let mut app = app_in(ctx);
+                let app = app_in(ctx);
                 let before = fingerprint(&app);
-                let action = on_key(&mut app, h.probe);
-                let handled = action != Action::None || fingerprint(&app) != before;
+                let mut state =
+                    crate::state::AppState::new(vec![], crate::render::Size::new(120, 40));
+                state.app = app;
+                let flow = crate::state::update(&mut state, crate::state::Event::Key(h.probe));
+                let handled = matches!(flow, crate::state::Flow::Quit)
+                    || matches!(flow, crate::state::Flow::Continue(ref effects) if !effects.is_empty())
+                    || fingerprint(&state.app) != before;
                 assert!(
                     handled,
                     "{ctx:?}: hinted key {:?} (`{}` {}) is dead in the reducer",

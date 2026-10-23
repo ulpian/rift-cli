@@ -101,6 +101,8 @@ pub(crate) enum ColorChoice {
 /// The `rift` subcommands.
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Choose and save default harnesses and features for future project setup.
+    Install,
     /// Install a compatible alpha using a fresh invitation download link.
     Update(UpdateArgs),
     /// Remove the managed installation and owned integrations; keep data by default.

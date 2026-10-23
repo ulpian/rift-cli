@@ -11,7 +11,7 @@ use std::io::Stdout;
 use xre_core::math::UVec2;
 use xre_core::{Attrs, Cell as XCell, CellBuffer, Color as XColor};
 use xre_render::{Braille, LuminanceRamp, SampleBuffer};
-use xre_term::{Capabilities as XCaps, Presenter};
+use xre_term::Presenter;
 
 use super::frame::{Cell, Color, Frame, Mods};
 use super::{Capabilities, CellShaderKind, RenderBackend, RenderError, ShadeSample};
@@ -35,7 +35,7 @@ impl XreBackend {
     /// # Errors
     /// [`RenderError::Terminal`] on a presenter/terminal init failure.
     pub fn try_new(caps: Capabilities) -> Result<Self, RenderError> {
-        let probe = XCaps::probe();
+        let probe = super::caps::terminal_probe();
         let mut presenter = Presenter::stdout(&probe);
         // The presenter resolves every colour to a depth at present time, and
         // its default is the engine's environment probe — 16 colours wherever
@@ -213,6 +213,7 @@ fn to_xre_attrs(m: Mods) -> Attrs {
 mod tests {
     use super::*;
     use crate::render::frame::Style;
+    use xre_term::Capabilities as XCaps;
 
     #[test]
     fn color_conversion_round_trips_through_xre() {
@@ -250,6 +251,43 @@ mod tests {
             present_depth(Capabilities::UNICODE, ColorDepth::Mono),
             ColorDepth::Mono
         );
+    }
+
+    #[test]
+    fn palette_presenter_quantizes_rgb_resets_defaults_and_leaves_idle_silent() {
+        let caps = XCaps {
+            color: xre_term::ColorDepth::Ansi256,
+            ..XCaps::FALLBACK
+        };
+        let mut output = Vec::new();
+        let mut presenter = Presenter::new(&mut output, &caps);
+        let mut frame = Frame::new(crate::render::Size::new(4, 1));
+        frame.put_str(
+            0,
+            0,
+            "R",
+            Style::fg(Color::Rgb(160, 160, 160)).with_bg(Color::Rgb(240, 196, 92)),
+        );
+        let mut scratch = CellBuffer::new(UVec2::new(4, 1));
+        blit_into(&frame, &mut scratch);
+        presenter.present(&scratch).unwrap();
+        frame = Frame::new(frame.size());
+        blit_into(&frame, &mut scratch);
+        presenter.present(&scratch).unwrap();
+        drop(presenter);
+        let text = String::from_utf8(output.clone()).unwrap();
+        assert!(text.contains("38;5;"));
+        assert!(text.contains("48;5;"));
+        assert!(text.contains("39;49m"));
+        assert!(!text.contains("38;2;") && !text.contains("48;2;"));
+        // Repeated frames add no bytes: shimmer diffs stay confined to the mark.
+        let mut presenter = Presenter::new(Vec::new(), &caps);
+        presenter.present(&scratch).unwrap();
+        let initial = presenter.into_inner();
+        let mut presenter = Presenter::new(Vec::new(), &caps);
+        presenter.present(&scratch).unwrap();
+        presenter.present(&scratch).unwrap();
+        assert_eq!(presenter.into_inner(), initial);
     }
 
     #[test]

@@ -33,17 +33,31 @@ impl ProjectSettingId {
         Self::RawTranscripts,
     ];
 
+    /// Stable preference and setup-plan key.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::TotalRecall => "total_recall",
+            Self::TurnInjection => "turn_injection",
+            Self::Documents => "documents",
+            Self::Search => "search",
+            Self::ToolCallCapture => "tool_call_capture",
+            Self::TokenUsageCapture => "token_usage_capture",
+            Self::RawTranscripts => "raw_transcripts",
+        }
+    }
+
     /// Human-facing row label.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::TotalRecall => "Total Recall",
-            Self::TurnInjection => "per-turn delta injection",
-            Self::Documents => "documents as Markdown",
-            Self::Search => "native search",
-            Self::ToolCallCapture => "tool-call capture",
-            Self::TokenUsageCapture => "token-usage capture",
-            Self::RawTranscripts => "raw transcripts",
+            Self::TurnInjection => "Per-Turn Delta Injection",
+            Self::Documents => "Documents as Markdown",
+            Self::Search => "Native Search",
+            Self::ToolCallCapture => "Tool-Call Capture",
+            Self::TokenUsageCapture => "Token-Usage Capture",
+            Self::RawTranscripts => "Raw Transcripts",
         }
     }
 
@@ -522,7 +536,15 @@ impl ProjectSetupPlan {
                 .is_some_and(|row| row.enabled)
         };
         Self {
-            permissions: view.permission_changes(),
+            permissions: view
+                .permission_changes()
+                .into_iter()
+                .filter(|choice| {
+                    view.integrations
+                        .iter()
+                        .any(|row| row.selected && row.agent == choice.agent)
+                })
+                .collect(),
             total_recall: enabled(ProjectSettingId::TotalRecall),
             turn_injection: enabled(ProjectSettingId::TurnInjection),
             documents: enabled(ProjectSettingId::Documents),
@@ -888,9 +910,9 @@ mod tests {
     fn setting_order_and_labels_are_stable() {
         assert_eq!(ProjectSettingId::ALL.len(), 7);
         assert_eq!(ProjectSettingId::ALL[0].label(), "Total Recall");
-        assert_eq!(ProjectSettingId::ALL[2].label(), "documents as Markdown");
-        assert_eq!(ProjectSettingId::ALL[3].label(), "native search");
-        assert_eq!(ProjectSettingId::ALL[6].label(), "raw transcripts");
+        assert_eq!(ProjectSettingId::ALL[2].label(), "Documents as Markdown");
+        assert_eq!(ProjectSettingId::ALL[3].label(), "Native Search");
+        assert_eq!(ProjectSettingId::ALL[6].label(), "Raw Transcripts");
     }
 
     #[test]

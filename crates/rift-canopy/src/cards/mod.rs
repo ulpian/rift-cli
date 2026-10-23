@@ -34,12 +34,7 @@ use crate::theme::{Section, Theme};
 use activity::draw_activity;
 use models::draw_models;
 use repository::draw_repository;
-pub use repository::{
-    repository_adopt_rect, repository_button_layout, repository_recall_rect,
-    repository_settings_rect, RepositoryButton, RepositoryButtonLayout,
-    REPOSITORY_RECALL_COLLAPSED, REPOSITORY_RECALL_VIEWER, REPOSITORY_SETTINGS,
-    REPOSITORY_SETTINGS_COLLAPSED,
-};
+pub use repository::repository_adopt_rect;
 
 /// One card in the column-2 stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,19 +168,6 @@ pub struct CardCtx<'a> {
     pub pressed: Option<crate::hit::Target>,
     /// The press-flash progress (1.0 → 0.0) keyed by [`Self::pressed`].
     pub press_pulse: f32,
-}
-
-impl CardCtx<'_> {
-    /// The press-flash fraction (0.0 at rest) for a card button drawn as
-    /// `target` (the press-flash rule).
-    #[must_use]
-    fn flash(&self, target: &crate::hit::Target) -> f32 {
-        if self.pressed.as_ref() == Some(target) {
-            self.press_pulse
-        } else {
-            0.0
-        }
-    }
 }
 
 /// Draw the card stack into `area`. An uninitialized project shows only the
@@ -346,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn uninitialized_shows_only_repository_with_project_settings() {
+    fn uninitialized_shows_repository_without_retired_buttons() {
         // Every status with nothing to project reads the same way: the
         // repository card alone, with its Settings door — the surface the
         // hit-test mirrors through the same predicate.
@@ -362,7 +344,8 @@ mod tests {
             let act = ActivityView::NoProjection;
             let (_, text) = render(&fixture_ctx(&d, &act), fixture_rect(0, 0, 40, 60));
             assert!(text.contains("repository"), "{word}: {text}");
-            assert!(text.contains("Project Settings"), "{word}: {text}");
+            assert!(!text.contains("Project Settings"), "{word}: {text}");
+            assert!(!text.contains("Recall Viewer"), "{word}: {text}");
             assert!(text.contains(word), "{word}: {text}");
             // The data cards are suppressed for a project with no projection.
             assert!(!text.contains("models"), "{word}: {text}");

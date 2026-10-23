@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install an invited alpha without changing the current project or agent settings.
+# Install an invited alpha, then choose per-user defaults without changing a project.
 set -eu
 umask 077
 
@@ -18,6 +18,24 @@ digest() {
         shasum -a 256 "$1" | awk '{print $1}'
     else
         die 'SHA-256 verification needs sha256sum or shasum.'
+    fi
+}
+
+# The native wizard owns animated UI; the bootstrap reports real download milestones.
+progress() { printf '  %s\n' "$1"; }
+configure_terminal() {
+    # Use the concrete terminal device: macOS kqueue cannot monitor /dev/tty.
+    terminal=$(tty <&3) || die 'Cannot resolve terminal. Run rift install to resume.'
+    "$binary" install <"$terminal" >"$terminal" 3<&- || die 'Binary installed; preferences incomplete. Run rift install to resume.'
+}
+preferences() {
+    [ "${RIFT_UPDATE:-0}" != 1 ] || return 0
+    if [ "${RIFT_NONINTERACTIVE:-0}" != 1 ] && [ -t 1 ]; then
+        configure_terminal 3<&1
+    elif [ "${RIFT_NONINTERACTIVE:-0}" != 1 ] && [ -t 2 ]; then
+        configure_terminal 3<&2
+    else
+        printf 'Run rift install in a terminal to choose default harnesses and features.\n'
     fi
 }
 
@@ -77,6 +95,7 @@ recheck_installation() {
 }
 
 [ -n "${RIFT_DOWNLOAD_MANIFEST:-}" ] || die 'A fresh invitation link is required. Use the install command from your invitation email.'
+progress "@--o--o  Step 1/3: Download invitation and binary"
 fetch "$RIFT_DOWNLOAD_MANIFEST" "$stage/manifest" 1048576
 version=$(awk -F '\t' 'NR == 1 && NF == 2 && $1 == "rift-download-v1" {print $2}' "$stage/manifest")
 printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v1\.0\.0-alpha(\.[0-9]+)?$' || die 'Invalid or incompatible alpha invitation.'
@@ -93,10 +112,12 @@ printf '%s\n' "$expected" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || die 'Invalid a
 recheck_installation
 if [ -f "$binary" ] && [ "$(sed -n '3p' "$receipt")" = "$version" ]; then
     printf 'Rift %s is already installed.\n' "$version"
+    preferences
     exit 0
 fi
 
 fetch "$archive_url" "$stage/archive.tar.gz"
+progress "*--@--o  Step 2/3: Verify archive and executable"
 [ "$(digest "$stage/archive.tar.gz")" = "$expected" ] || die 'Archive checksum mismatch; existing installation was preserved.'
 [ "$(tar -tzf "$stage/archive.tar.gz")" = rift ] || die 'Unexpected archive contents.'
 # Stream the named member into our own file: archive links never control a path.
@@ -107,6 +128,7 @@ chmod 755 "$stage/rift"
 checksum=$(digest "$stage/rift")
 printf 'rift-install-v1\n%s\n%s\n' "$checksum" "$version" > "$stage/receipt"
 
+progress "*--*--@  Step 3/3: Install verified binary"
 recheck_installation
 # Keep a rollback copy until both replacements have landed.
 if [ -f "$binary" ]; then cp -p "$binary" "$stage/previous"; fi
@@ -115,7 +137,9 @@ if ! mv -f "$stage/receipt" "$receipt"; then
     if [ -f "$stage/previous" ]; then mv -f "$stage/previous" "$binary"; else rm -f "$binary"; fi
     die 'Could not commit installation receipt; executable replacement was rolled back.'
 fi
+progress "*--*--*  Binary installation complete"
 printf 'Installed Rift %s at %s\n' "$version" "$binary"
+preferences
 case ":${PATH:-}:" in
     *":$bin_dir:"*) printf 'Run rift inside your project to choose harnesses and permissions.\n' ;;
     *) printf 'Add %s to PATH, then run rift inside your project.\n' "$bin_dir" ;;

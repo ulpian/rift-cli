@@ -228,11 +228,8 @@ fn golden_col1_worktree_children() {
     insta::assert_snapshot!("col1_worktree_children", frame_text(&f));
 }
 
-/// The family row selected: the rail carries every member-row state at the
-/// Unicode tier (`●` running, `◔` not adopted, `◒` setup incomplete, `!` the
-/// gone checkout), and the Repository card's status row names the members the
-/// family's three sessions came from — the badge read back to its checkouts
-/// (the family view, the serve accounting seam's discipline for numbers on screen).
+/// The project picker groups repository/worktree rows and shows each member's
+/// status, including unadopted, incomplete, and missing checkouts.
 #[test]
 fn golden_col1_member_row_states() {
     let detail = member_row_detail(
@@ -245,14 +242,16 @@ fn golden_col1_member_row_states() {
         },
         vec!["main".into(), "swt-a".into()],
     );
-    let frame = member_row_frame(0, detail, Capabilities::TRUECOLOR | Capabilities::UNICODE);
+    let frame = member_row_frame(
+        0,
+        detail,
+        Capabilities::TRUECOLOR | Capabilities::UNICODE,
+        true,
+    );
     insta::assert_snapshot!("col1_member_row_states", frame_text(&frame));
 }
 
-/// The unadopted MEMBER selected, at the ASCII floor: its Repository card asks
-/// for the one act that changes anything (the verb, never a key — the rail's
-/// `a` is already "add project"), and `◔` degrades to `a` rather than
-/// collapsing into `·`'s `-`.
+/// Home asks to adopt an unadopted member through its repository status row.
 #[test]
 fn golden_member_row_not_adopted_ascii() {
     let detail = member_row_detail(
@@ -262,13 +261,11 @@ fn golden_member_row_not_adopted_ascii() {
         ProjectStatus::NotAdopted,
         Vec::new(),
     );
-    let frame = member_row_frame(2, detail, Capabilities::empty());
+    let frame = member_row_frame(2, detail, Capabilities::empty(), false);
     insta::assert_snapshot!("member_row_not_adopted_ascii", frame_text(&frame));
 }
 
-/// A repository whose wired agent's capture is being lost, at the ASCII floor:
-/// the rail's dot degrades to `!`, and the Repository card's status row names
-/// the act — Project Settings, where the remedy is printed under the adapter.
+/// Home names the integration error and its Settings remedy in the status row.
 #[test]
 fn golden_repository_card_integration_error_ascii() {
     let detail = member_row_detail(
@@ -278,7 +275,7 @@ fn golden_repository_card_integration_error_ascii() {
         ProjectStatus::Error(rift_canopy::StatusError::Integration),
         Vec::new(),
     );
-    let frame = member_row_frame(0, detail, Capabilities::empty());
+    let frame = member_row_frame(0, detail, Capabilities::empty(), false);
     insta::assert_snapshot!(
         "repository_card_integration_error_ascii",
         frame_text(&frame)

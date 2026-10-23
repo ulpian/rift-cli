@@ -26,7 +26,7 @@ mod overlay;
 mod profile_menu;
 mod project_settings;
 mod rail;
-mod text;
+pub(crate) mod text;
 
 #[cfg(test)]
 mod fixtures;
@@ -101,6 +101,13 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
         draw_too_small(frame, area);
         return;
     }
+    if vm.projects_open {
+        crate::project_picker::draw(vm, frame, unicode);
+        if vm.overlay.is_some() {
+            draw_overlay(vm, unicode, frame);
+        }
+        return;
+    }
 
     let header = Rect {
         x: area.x,
@@ -118,10 +125,6 @@ pub fn draw(vm: &ViewModel, backend: &mut dyn RenderBackend, frame: &mut Frame) 
     draw_body(vm, backend, frame, body, unicode);
     dashboard::draw_navigation(vm, frame);
     draw_modal_layer(vm, unicode, frame);
-    if vm.overlay.is_none() && matches!(vm.mode, crate::Mode::Normal | crate::Mode::ProjectSettings)
-    {
-        dashboard::draw_drawer(vm, frame, unicode);
-    }
     apply_startup_sweep(vm, frame, body);
 }
 
@@ -234,6 +237,18 @@ fn apply_startup_sweep(vm: &ViewModel, frame: &mut Frame, body: Rect) {
     crate::chrome::fill(frame, hidden, surface_fill(vm));
 }
 
+/// The same suggestion window feeds rendering and clicks, keeping the active
+/// row visible when keyboard or mouse navigation moves past the row cap.
+pub(crate) fn suggestion_window(vm: &ViewModel) -> (usize, usize) {
+    let rect = suggest_panel_rect(vm.size, vm.suggestions.len());
+    visible_window(
+        vm.suggest_highlight
+            .min(vm.suggestions.len().saturating_sub(1)),
+        vm.suggestions.len(),
+        usize::from(rect.h.saturating_sub(2)),
+    )
+}
+
 /// Draw the suggest panel: `verb  usage` + a muted one-line description per
 /// row, the highlight bar, and the animator contract fade — unselected text ramps from
 /// the muted tone to the settled foreground as `suggest_fade` advances
@@ -248,10 +263,15 @@ fn draw_suggest_panel(vm: &ViewModel, frame: &mut Frame) {
     let inner = frame.border(rect, "suggest", ACCENT);
     let t = vm.suggest_fade.clamp(0.0, 1.0);
     let text_fg = crate::theme::lerp_color(crate::theme::MUTED, vm.theme.body_fg(), t);
-    let visible = usize::from(inner.h);
-    for (i, sug) in vm.suggestions.iter().take(visible).enumerate() {
-        let Ok(dy) = u16::try_from(i) else { break };
-        let selected = i == vm.suggest_highlight;
+    let (start, end) = suggestion_window(vm);
+    for (i, sug) in vm.suggestions.iter().enumerate().take(end).skip(start) {
+        let Ok(dy) = u16::try_from(i - start) else {
+            break;
+        };
+        let selected = i
+            == vm
+                .suggest_highlight
+                .min(vm.suggestions.len().saturating_sub(1));
         let marker = if selected { '>' } else { ' ' };
         let line = format!(
             "{marker} {:<30} {}",
@@ -736,6 +756,29 @@ mod tests {
             let mut f = Frame::new(Size::new(w, h));
             let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
             draw(&s.snapshot(), &mut b, &mut f); // must not panic at any size
+        }
+    }
+    #[test]
+    fn suggestion_highlight_scrolls_into_view_and_clicks_use_the_visible_window() {
+        let mut state = sized(80, 24);
+        state.app.mode = crate::Mode::Command;
+        state.app.command_line.clear();
+        let total = crate::current_suggestions(&state.app).len();
+        assert!(total > SUGGEST_MAX_ROWS);
+        for highlighted in [0, total / 2, total - 1] {
+            state.app.suggest_highlight = highlighted;
+            let vm = state.snapshot();
+            let (start, end) = suggestion_window(&vm);
+            assert!(highlighted >= start && highlighted < end);
+            let inner = crate::hit::inner_of(suggest_panel_rect(vm.size, total));
+            let mut frame = Frame::new(vm.size);
+            draw_suggest_panel(&vm, &mut frame);
+            let y = inner.y + u16::try_from(highlighted - start).unwrap();
+            assert_eq!(frame.get(inner.x, y).unwrap().ch, '>');
+            assert_eq!(
+                crate::hit::hit_test(&vm, inner.x, y),
+                Some(crate::hit::Target::SuggestRow(highlighted))
+            );
         }
     }
 }

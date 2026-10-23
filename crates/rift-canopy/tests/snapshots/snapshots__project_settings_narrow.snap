@@ -1,24 +1,25 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 61
 expression: "render_state(&mut\nproject_settings_state(Size::new(60, 20),\nrift_canopy::ProjectInitialization::Initialized,\nrift_canopy::ProjectPolicyState::Declared,))"
 ---
  RIFT  Canopy  *                  ? Help  / Palette  q Quit
 [<]   Models   Activity   Tokens   Recall  [Settings]   < >
- rift-cli · branch unknown · /r/rift-cli
- Local facts only; Recall: family
 ╭─ Project Settings · rift-cli ─────────────────────────[x]╮
 │Recall                                                    │
-│> Total Recall                                         [x]│
-│  per-turn delta injection · custom effective budget:  [x]│
-│  documents as Markdown                                [x]│
-│  native search                                        [x]│
+│> * Total Recall                                          │
+│  * Per-Turn Delta Injection · custom effective budget: 7 │
+│  * Documents as Markdown                                 │
+│  * Native Search                                         │
 │                                                          │
 │Capture                                                   │
+│  * Tool-Call Capture                                     │
+│  * Token-Usage Capture                                   │
 │About: Build and serve git-native project memory; disablin│
 │                                                          │
 │ j/k move · enter/space apply · pgup/pgdn scroll · esc/x c│
 ╰──────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command
+← Projects  Tab views  1–4 Recall period  s Settings  / comm
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │
 ╰──────────────────────────────────────────────────────────╯

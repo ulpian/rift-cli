@@ -17,7 +17,7 @@ CONFIG = tomllib.loads((ROOT / "release/storage.toml").read_text())
 
 
 def command(*args):
-    result = subprocess.run(args, capture_output=True, text=True, timeout=180)
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=180)
     if result.returncode:
         # Signed links are credentials: never echo captured command output.
         raise RuntimeError(f"{args[0]} operation failed; inspect cloud access and object ownership")
@@ -45,18 +45,23 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def assets(dist):
+def release_checksums(text):
     tag = packaging.version()
     expected = {f"rift-{tag}-{target}." + ("zip" if "windows" in target else "tar.gz")
                 for target in packaging.TARGETS}
     entries = {}
-    for line in (dist / "SHA256SUMS").read_text().splitlines():
+    for line in text.splitlines():
         sha, name = line.split("  ", 1)
         if name in entries or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
             raise ValueError("invalid or duplicate release checksum")
         entries[name] = sha
     if set(entries) != expected:
         raise ValueError("all five current-version platform archives are required")
+    return tag, entries
+
+
+def assets(dist):
+    tag, entries = release_checksums((dist / "SHA256SUMS").read_text())
     for name, sha in entries.items():
         if digest(dist / name) != sha:
             raise ValueError(f"release archive checksum mismatch: {name}")
@@ -64,14 +69,22 @@ def assets(dist):
 
 
 def upload(dist):
+    tag = packaging.version()
+    if command("git", "rev-parse", "HEAD") != command("git", "rev-parse", f"refs/tags/{tag}^{{commit}}"):
+        raise ValueError("check out the release tag before uploading its archives")
     tag, entries = assets(dist)
     with tempfile.TemporaryDirectory(prefix="rift-upload-readback-") as temp:
         readback = Path(temp) / "object"
-        for name in [*sorted(entries), "SHA256SUMS"]:
+        notes = ROOT / "release/notes" / f"{tag}.md"
+        if not notes.is_file():
+            raise ValueError("versioned release notes are missing")
+        files = [(dist / name, name) for name in [*sorted(entries), "SHA256SUMS"]]
+        files.append((notes, "NOTES.md"))
+        for source, name in files:
             target = remote(f"releases/{tag}/{name}")
-            command("gcloud", "storage", "cp", "--no-clobber", str(dist / name), target, "--quiet")
+            command("gcloud", "storage", "cp", "--no-clobber", str(source), target, "--quiet")
             command("gcloud", "storage", "cp", target, str(readback), "--quiet")
-            if digest(readback) != digest(dist / name):
+            if digest(readback) != digest(source):
                 raise ValueError(f"cloud readback differs: {name}; existing objects were preserved")
             readback.unlink()
     print(f"Uploaded and independently verified {len(entries)} archives for {tag}.")
@@ -86,11 +99,14 @@ def manifest(tag, entries):
     return "".join(lines)
 
 
-def invitation(dist):
-    tag, entries = assets(dist)
+def invitation():
+    tag = packaging.version()
     recorded = command("gcloud", "storage", "cat", remote(f"releases/{tag}/SHA256SUMS"))
-    if recorded != (dist / "SHA256SUMS").read_text().strip():
-        raise ValueError("uploaded release checksums differ; upload and verify first")
+    _, entries = release_checksums(recorded)
+    existing = command("gcloud", "storage", "ls", remote(f"releases/{tag}/")).splitlines()
+    required = {remote(f"releases/{tag}/{name}") for name in [*entries, "SHA256SUMS", "NOTES.md"]}
+    if not required.issubset(set(existing)):
+        raise ValueError("uploaded release is incomplete; upload and verify first")
     shell_source = command("git", "show", f"{tag}:install.sh")
     powershell_source = command("git", "show", f"{tag}:install.ps1")
     if "RIFT_DOWNLOAD_MANIFEST" not in shell_source or "RIFT_DOWNLOAD_MANIFEST" not in powershell_source:
@@ -109,7 +125,7 @@ def invitation(dist):
         powershell += "\n} finally { $env:RIFT_DOWNLOAD_MANIFEST = $RiftInvitePreviousManifest }\n"
         (stage / "install.sh").write_text(shell, encoding="utf-8")
         (stage / "install.ps1").write_text(powershell, encoding="utf-8")
-        links = {}
+        links = {"notes": signed(f"releases/{tag}/NOTES.md")}
         for name in ["install.sh", "install.ps1"]:
             command("gcloud", "storage", "cp", str(stage / name), remote(f"{prefix}/{name}"), "--quiet")
             links[name] = signed(f"{prefix}/{name}")
@@ -129,7 +145,8 @@ def invitation_text(tag, links, update_link):
             "Run `rift` in your project and review setup before applying it.\n\n"
             "Update using the fresh update link provided with a release:\n\n```sh\n"
             f"rift update --from {shlex.quote(update_link)}\n```\n\n"
-            "No GitHub or Google account is required. An expired invitation needs a new link.\n")
+            "No GitHub or Google account is required. An expired invitation needs a new link.\n"
+            + (f"\n[Read the release notes]({links['notes']})\n" if "notes" in links else ""))
 
 
 def main():
@@ -138,7 +155,10 @@ def main():
     parser.add_argument("operation", choices=["upload", "invite"])
     parser.add_argument("--dist", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
-    {"upload": upload, "invite": invitation}[args.operation](args.dist)
+    if args.operation == "upload":
+        upload(args.dist)
+    else:
+        invitation()
 
 
 if __name__ == "__main__":

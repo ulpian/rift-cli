@@ -1,5 +1,24 @@
 //! Lifecycle of installer-managed executables. Development binaries are never removed.
 
+#[cfg(feature = "tui")]
+mod configure;
+#[cfg(any(feature = "tui", test))]
+pub(crate) mod defaults;
+
+pub(crate) fn preferences(ascii: bool) -> Result<Outcome> {
+    #[cfg(feature = "tui")]
+    {
+        configure::run(ascii)
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = ascii;
+        Err(refusal(
+            "installer preferences require a build with terminal UI support",
+        ))
+    }
+}
+
 mod uninstall;
 
 use crate::cli::{Outcome, UninstallArgs, UpdateArgs};

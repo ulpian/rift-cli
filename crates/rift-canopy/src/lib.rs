@@ -30,6 +30,7 @@ pub mod col2;
 pub mod col3;
 pub mod colour_picker;
 pub mod command;
+mod controls;
 pub mod dashboard;
 pub mod dispatch;
 pub mod editor;
@@ -39,9 +40,12 @@ pub mod input;
 pub mod keymap;
 pub mod layout;
 pub mod layout_model;
+#[cfg(any(feature = "xre", test))]
+mod onboarding;
 pub mod plot;
 pub mod profile;
 pub mod profile_menu;
+mod project_picker;
 pub mod project_settings_modal;
 pub mod recall_viewer;
 pub mod render;
@@ -51,6 +55,7 @@ pub mod state;
 pub mod suggest;
 pub mod theme;
 pub mod view;
+#[cfg(any(feature = "xre", test))]
 mod welcome;
 
 pub use app::{load_profile_plane, prime_startup, CanopyOpts};
@@ -328,6 +333,10 @@ pub struct App {
     pub dashboard_tab: dashboard::DashboardTab,
     /// Whether the temporary repository/worktree drawer is open.
     pub projects_open: bool,
+    /// Highlight in the project picker; applied only after Enter/click.
+    pub project_cursor: usize,
+    /// Picker kind filter: None shows every repository and worktree.
+    pub project_filter: Option<EntryKind>,
     /// Watched projects.
     pub projects: Vec<Project>,
     /// Selected project index.
@@ -421,6 +430,8 @@ impl App {
         Self {
             dashboard_tab: dashboard::DashboardTab::Home,
             projects_open: false,
+            project_cursor: 0,
+            project_filter: None,
             projects,
             selected: 0,
             focus: Panel::Detail,
@@ -495,6 +506,16 @@ impl App {
     /// registry becomes empty (the message-routing rule).
     pub fn set_projects(&mut self, projects: Vec<Project>) {
         self.selected = self.selected.min(projects.len().saturating_sub(1));
+        let cursor_path = self
+            .projects
+            .get(self.project_cursor)
+            .map(|p| p.path.as_str());
+        let accepts = |p: &Project| crate::project_picker::accepts(self.project_filter, p.kind);
+        self.project_cursor = projects
+            .iter()
+            .position(|p| cursor_path == Some(p.path.as_str()) && accepts(p))
+            .or_else(|| projects.iter().position(accepts))
+            .unwrap_or(0);
         self.projects = projects;
         self.maybe_raise_wizard();
     }

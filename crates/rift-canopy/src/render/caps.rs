@@ -98,7 +98,12 @@ pub fn detect(force_ascii: bool) -> Capabilities {
         || std::env::var_os("NO_COLOR").is_some()
         || std::env::var_os("RIFT_CANOPY_ASCII").is_some();
     let (truecolor, unicode_full, legacy_win) = probe();
-    derive_caps(truecolor, unicode_full, legacy_win, forced)
+    let caps = derive_caps(truecolor, unicode_full, legacy_win, forced);
+    #[cfg(feature = "xre")]
+    if !forced && terminal_probe().color != xre_term::ColorDepth::Mono && !legacy_win {
+        return caps.with(Capabilities::ANSI_COLOR);
+    }
+    caps
 }
 
 /// The Windows probe: the console's own answer, mapped by [`windows_facts`].
@@ -125,12 +130,31 @@ fn probe_windows_console() -> WindowsConsole {
 /// describes the terminal (every POSIX host).
 #[cfg(all(not(windows), feature = "xre"))]
 fn probe() -> (bool, bool, bool) {
-    let probe = xre_term::Capabilities::probe();
+    let probe = terminal_probe();
     (
         probe.color == xre_term::ColorDepth::TrueColor,
         probe.unicode == xre_term::UnicodeLevel::Full,
         false,
     )
+}
+
+/// Keep the host correction shared by capability detection and presentation.
+#[cfg(feature = "xre")]
+pub(super) fn terminal_probe() -> xre_term::Capabilities {
+    let mut probe = xre_term::Capabilities::probe();
+    probe.color = host_color_depth(std::env::var("TERM_PROGRAM").ok().as_deref(), probe.color);
+    probe
+}
+
+#[cfg(feature = "xre")]
+fn host_color_depth(host: Option<&str>, depth: xre_term::ColorDepth) -> xre_term::ColorDepth {
+    // Apple Terminal interprets unsupported RGB parameters as independent SGR
+    // codes, corrupting attributes and backgrounds. Ignore inherited truecolor.
+    if host == Some("Apple_Terminal") && depth == xre_term::ColorDepth::TrueColor {
+        xre_term::ColorDepth::Ansi256
+    } else {
+        depth
+    }
 }
 
 /// Without the engine we can't probe unicode; assume the safe ASCII floor.
@@ -146,6 +170,18 @@ fn probe() -> (bool, bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "xre")]
+    #[test]
+    fn apple_terminal_caps_rgb_without_overriding_mono_or_other_hosts() {
+        use xre_term::ColorDepth::{Ansi16, Ansi256, Mono, TrueColor};
+        for depth in [Mono, Ansi16, Ansi256, TrueColor] {
+            let expected = if depth == TrueColor { Ansi256 } else { depth };
+            assert_eq!(host_color_depth(Some("Apple_Terminal"), depth), expected);
+            assert_eq!(host_color_depth(Some("iTerm.app"), depth), depth);
+            assert_eq!(host_color_depth(None, depth), depth);
+        }
+    }
 
     #[test]
     fn force_ascii_yields_empty() {

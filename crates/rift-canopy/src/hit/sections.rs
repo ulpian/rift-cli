@@ -26,7 +26,7 @@ pub(super) fn section_or_focus(
     if on_scrollbar(rect, offset, usize::from(col3::content_rows(ids)), col, row) {
         return Target::Scrollbar(ScrollRegion::Graphs);
     }
-    let inner = inner_of(rect);
+    let inner = rect;
     let Some(dy) = local_row(inner, col, row) else {
         return Target::PanelFocus(Panel::Graphs);
     };
@@ -144,7 +144,7 @@ mod tests {
             w,
             h: content + 2,
         };
-        let inner = inner_of(rect);
+        let inner = rect;
         let slot = col3::solve_stack(&SectionId::ALL, inner.h)
             .into_iter()
             .find(|slot| slot.id == id)
@@ -422,13 +422,12 @@ mod tests {
         let mut s = AppState::new(vec![project("a")], size);
         s.app.splash.skip();
         s.size = size;
-        s.app.dashboard_tab = crate::dashboard::DashboardTab::Tokens;
         let v = s.snapshot();
-        let col3 = crate::dashboard::geometry(size).0;
+        let col3 = crate::dashboard::home_recall_content(size);
         let bar = crate::chrome::scrollbar(
             col3,
             v.graphs_scroll,
-            usize::from(col3::content_rows(&[col3::SectionId::TokenUsage])),
+            usize::from(col3::content_rows(&[col3::SectionId::Recall])),
         )
         .expect("the short column overflows, so a bar exists");
         // Every track cell resolves to the graphs scrollbar (pixels == targets).
@@ -478,5 +477,44 @@ mod tests {
             Some(Target::Scrollbar(ScrollRegion::Graphs)),
             "no scrollbar target where there is no overflow"
         );
+    }
+    #[test]
+    fn home_recall_period_cells_select_the_window_the_renderer_displays() {
+        use crate::state::{update, Event};
+        let mut state = AppState::new(vec![project("demo")], Size::new(120, 40));
+        state.app.splash.skip();
+        let mut vm = state.snapshot();
+        let area = crate::dashboard::home_recall_content(vm.size);
+        let slot = col3::solve_stack(
+            &[SectionId::Recall],
+            area.h.max(col3::content_rows(&[SectionId::Recall])),
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let inner = inner_of(Rect {
+            x: area.x,
+            y: area.y + slot.y,
+            w: area.w,
+            h: slot.rows,
+        });
+        let buttons = col3::recall_window_buttons(slot.collapsed, inner);
+        assert_eq!(buttons.len(), 4);
+        for button in buttons {
+            assert_eq!(
+                hit_test(&vm, button.rect.x, button.rect.y),
+                Some(Target::RecallWindow(button.window))
+            );
+            update(
+                &mut state,
+                Event::Mouse(crate::MouseInput {
+                    kind: crate::MouseKind::Down(crate::MouseButton::Left),
+                    col: button.rect.x,
+                    row: button.rect.y,
+                }),
+            );
+            vm = state.snapshot();
+            assert_eq!(vm.col3.recall_window, button.window);
+        }
     }
 }

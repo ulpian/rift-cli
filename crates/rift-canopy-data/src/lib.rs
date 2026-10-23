@@ -107,8 +107,8 @@ pub mod viewer;
 pub mod workflows;
 
 pub use bus::{
-    project_settings_view, spawn, spawn_poll_only_with_root, spawn_read_only_viewer,
-    spawn_with_root, Bus,
+    installation_settings_view, project_settings_view, spawn, spawn_poll_only_with_root,
+    spawn_read_only_viewer, spawn_with_root, Bus,
 };
 pub use dirlist::list_dir;
 pub use loader::StoreProfileLoader;

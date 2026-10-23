@@ -1,14 +1,19 @@
 //! The onboarding mark: a tiled R with independently phased, gentle brightness.
 
 use crate::layout::Rect;
-use crate::render::frame::{Color, Frame, Style};
+use crate::render::frame::{Color, Frame, Size, Style};
 
-const TILES: [&str; 7] = [
-    "111110", "110011", "110011", "111110", "111000", "110110", "110011",
-];
+const TILES: [&str; 4] = ["111", "101", "110", "101"];
+pub(crate) const WIDTH: u16 = 6;
+pub(crate) const HEIGHT: u16 = 4;
 
-/// Render the mark using elapsed time injected by the event loop. A fixed zero
-/// time gives a static, readable mark for reduced motion and headless output.
+/// Whether the wizard has room for the mark and usable prompt rows.
+pub(crate) const fn fits(size: Size) -> bool {
+    size.h >= 24 && size.w >= 48
+}
+
+/// Render the mark with elapsed time injected by the event loop. Non-finite
+/// time gives a solid white mark for reduced motion and headless output.
 pub(crate) fn draw(frame: &mut Frame, area: Rect, seconds: f32, unicode: bool) {
     for (y, line) in TILES.iter().enumerate() {
         for (x, tile) in line.bytes().enumerate() {
@@ -30,9 +35,11 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, seconds: f32, unicode: bool) {
 
 fn brightness(x: usize, y: usize, seconds: f32) -> u8 {
     let phase = ((x * 19 + y * 31) % 47) as f32 * 0.41;
-    let speed = 0.7 + ((x * 7 + y * 11) % 9) as f32 * 0.08;
-    let t = if seconds.is_finite() { seconds } else { 0.0 };
-    (192.0 + 63.0 * (t * speed + phase).sin()) as u8
+    let speed = 1.7 + ((x * 7 + y * 11) % 9) as f32 * 0.13;
+    if !seconds.is_finite() {
+        return 255;
+    }
+    (160.0 + 95.0 * (seconds * speed + phase).sin()) as u8
 }
 
 #[cfg(test)]
@@ -44,9 +51,9 @@ mod tests {
         assert_ne!(brightness(0, 0, 1.0), brightness(1, 0, 1.0));
         assert_ne!(brightness(0, 0, 1.0), brightness(0, 0, 2.0));
         for time in [0.0, 1.0, 10.0, f32::NAN] {
-            for x in 0..6 {
-                for y in 0..7 {
-                    assert!(brightness(x, y, time) >= 128);
+            for x in 0..3 {
+                for y in 0..4 {
+                    assert!(brightness(x, y, time) >= 64);
                 }
             }
         }

@@ -5,9 +5,8 @@ expression: "render_at(36, 16)"
 ---
  RIFT  Canopy  *
 [<]  [Home]  Models   Activity  < >
- rift-cli · branch unknown · /r/rif
- Local facts only; Recall: family
-[recall] rift-cli · runni [settings]
+rift-cli · running
+
 
 
 
@@ -15,7 +14,8 @@ expression: "render_at(36, 16)"
 ╭─ recall ─────────────────────────#
 │recall off — open Project Settings|
 │                                  |
-← Projects  [/] tabs  s Settings  r
+│[24h][7d][30d][all]               |
+← Projects  Tab views  1–4 Recall pe
 ╭─ command ────────────────────────╮
 │/█                                │
 ╰──────────────────────────────────╯

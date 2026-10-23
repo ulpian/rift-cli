@@ -1,12 +1,10 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 999
+assertion_line: 1002
 expression: "render_state(&mut suggest_state(\"se\"))"
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 [<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
 ╭─ repository ─────────────────────────────────────────────────────────────────────────────────────╮
 │rift-cli (repo)                                                                                   │
 │path: /r/rift-cli                                                                                 │
@@ -15,7 +13,7 @@ expression: "render_state(&mut suggest_state(\"se\"))"
 │No attributed capture facts available                                                             │
 │Latest checkpoint: unavailable                                                                    │
 │Harnesses:                                                                                        │
-│[ Recall Viewer ]                                                             [ Project Settings ]│
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
  Recall setup required (Settings)
 ╭─ recall ─────────────────────────────────────────────────────────────────────────────────────────╮
@@ -25,13 +23,15 @@ expression: "render_state(&mut suggest_state(\"se\"))"
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> select  /select [project]      select a project row                                             │
 │  session  /session [list|show <id>] inspect sessions                                             │
 │  settings  /settings            open repository Project Settings                                 │
 │  disable  /disable <agent>      remove an agent's hook wiring                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/se█                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

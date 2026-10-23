@@ -70,6 +70,38 @@ impl ConfigRead {
     }
 }
 
+/// Machine-only installer choices. No repository, store, or hook files are read.
+#[must_use]
+pub fn installation_settings_view() -> ProjectSettingsView {
+    installation_settings_view_from(
+        &rift_agent_install::native::DetectionEnvironment::from_process(),
+    )
+}
+
+fn installation_settings_view_from(
+    env: &rift_agent_install::native::DetectionEnvironment,
+) -> ProjectSettingsView {
+    let effective = EffectiveConfig::secure_default().ok();
+    let policy = rift_recall_policy::ServePolicy::default();
+    let mut view = ProjectSettingsView::thin(String::new(), "Installation defaults".into());
+    view.settings = project_setting_rows(
+        effective.as_ref(),
+        ProjectInitialization::NotInitialized,
+        true,
+        ServeLevers {
+            injection_budget: policy.injection_turn_budget,
+            doc_mode: policy.doc.mode,
+            search_mode: policy.search.mode,
+        },
+    );
+    view.integrations = native_settings_rows(
+        rift_agent_install::native::installation_candidates(env),
+        &[],
+        ProjectInitialization::NotInitialized,
+    );
+    view
+}
+
 /// Build the complete read-only Project Settings projection for a repository.
 ///
 /// This function has no write path and never probes or launches an agent. It is
@@ -188,7 +220,7 @@ fn restore_pending_choices(
     integrations: &mut [NativeAgentIntegrationRow],
 ) {
     for row in settings.iter_mut() {
-        let key = setting_plan_key(row.id);
+        let key = row.id.token();
         if let Some(enabled) = plan.get(key).and_then(serde_json::Value::as_bool) {
             row.enabled = enabled;
         }
@@ -232,19 +264,7 @@ fn restore_pending_permissions(
     }
 }
 
-/// The setup plan's key for a settings row.
-const fn setting_plan_key(id: ProjectSettingId) -> &'static str {
-    match id {
-        ProjectSettingId::TotalRecall => "total_recall",
-        ProjectSettingId::TurnInjection => "turn_injection",
-        ProjectSettingId::Documents => "documents",
-        ProjectSettingId::Search => "search",
-        ProjectSettingId::ToolCallCapture => "tool_call_capture",
-        ProjectSettingId::TokenUsageCapture => "token_usage_capture",
-        ProjectSettingId::RawTranscripts => "raw_transcripts",
-    }
-}
-
+/// Effective project feature choices in their stable display order.
 fn project_setting_rows(
     effective: Option<&rift_config::EffectiveConfig>,
     initialization: ProjectInitialization,
@@ -561,6 +581,29 @@ mod tests {
     use super::super::fixtures::record_hooks_installed;
     use super::super::project_read::read_project;
     use super::*;
+
+    #[test]
+    fn installer_choices_are_machine_only_with_secure_defaults_and_alpha_scope() {
+        let view = installation_settings_view_from(
+            &rift_agent_install::native::DetectionEnvironment::default(),
+        );
+        assert_eq!(view.initialization, ProjectInitialization::NotInitialized);
+        assert!(view.path.is_empty());
+        assert!(view.permissions.is_empty());
+        assert_eq!(view.settings.len(), ProjectSettingId::ALL.len());
+        assert!(view.settings.iter().all(|row| row.actionable));
+        assert_eq!(
+            view.integrations
+                .iter()
+                .filter(|row| row.alpha_supported)
+                .count(),
+            rift_agent_install::native::ALPHA_AGENTS.len()
+        );
+        assert!(view
+            .integrations
+            .iter()
+            .all(|row| !row.selected && !row.enabled()));
+    }
 
     #[test]
     fn uninitialized_settings_use_native_defaults_and_all_adapters() {

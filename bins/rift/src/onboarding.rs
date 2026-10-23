@@ -1,20 +1,31 @@
 //! Interactive launch preparation. Project setup itself stays in the shared manager.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rift_core::{Result, RiftError};
 
-/// Ensure the launch repository is in the dashboard without provisioning it.
-/// A fresh project opens staged settings after its first read-only status delivery.
-pub(crate) fn prepare(store: &rift_canopy_data::CanopyStore) -> Result<bool> {
+/// Finish setup before the dashboard's registry, workers, or view are created.
+/// Return the family root to register, or `None` when the operator cancels.
+pub(crate) fn prepare(ascii: bool) -> Result<Option<PathBuf>> {
+    use rift_canopy::{ProjectInitialization, ProjectSettingsManager};
     let cwd = std::env::current_dir().map_err(RiftError::from)?;
     let Some(paths) = rift_git::discover(&cwd)
         .map(Some)
         .or_else(|_| initialize_git(&cwd))?
     else {
-        return Ok(false);
+        return Ok(None);
     };
+    let mut manager = crate::project_settings::RiftProjectSettingsManager;
+    let mut view = manager
+        .load(&paths.work_tree.to_string_lossy())
+        .map_err(RiftError::Other)?;
+    crate::installation::defaults::seed(&mut view)?;
+    if view.initialization != ProjectInitialization::Initialized
+        && !rift_canopy::app::live::run_onboarding(view, &mut manager, ascii)?
+    {
+        return Ok(None);
+    }
     // The catalogue owns one row per family and derives linked worktrees as
     // children. Register the main checkout so launch can select the member
     // without violating that invariant, including the first launch in a member.
@@ -26,12 +37,7 @@ pub(crate) fn prepare(store: &rift_canopy_data::CanopyStore) -> Result<bool> {
     } else {
         paths.work_tree
     };
-    let path = registered.to_string_lossy().into_owned();
-    store.apply(
-        &rift_canopy::PersistOp::AddProject { path },
-        crate::hooks::now_ms(),
-    )?;
-    Ok(true)
+    Ok(Some(registered))
 }
 
 fn initialize_git(path: &Path) -> Result<Option<rift_git::RepoPaths>> {

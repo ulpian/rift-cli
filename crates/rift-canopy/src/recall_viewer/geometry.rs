@@ -191,7 +191,7 @@ mod tests {
             ),
             (0, 40, 80)
         );
-        assert_eq!(geometry.checkpoints.y, 4);
+        assert_eq!(geometry.checkpoints.y, 2);
     }
 
     #[test]

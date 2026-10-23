@@ -3,6 +3,7 @@ name: Alpha release packages
 on:
   workflow_dispatch:
   push:
+    branches: ['release/**']
     tags: ['v1.0.0-alpha*']
 
 permissions:
@@ -84,4 +85,5 @@ jobs:
             install.sh
             install.ps1
             release/NOTES.md
+            release/notes/*.md
           if-no-files-found: error

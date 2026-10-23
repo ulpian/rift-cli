@@ -279,18 +279,29 @@ mod tests {
         assert_eq!(s.col3.recall_window, RecallWindow::AllTime);
     }
 
-    /// The digits are bound where they are hinted and nowhere else — the rail
-    /// and the detail column must not swallow them.
     #[test]
-    fn the_period_digits_are_bound_only_with_the_graphs_column_focused() {
+    fn period_digits_work_on_home_and_are_inert_in_other_views_and_picker() {
         use crate::col3::RecallWindow;
-        for panel in [Panel::Projects, Panel::Detail] {
+        use crate::dashboard::DashboardTab;
+        for tab in [DashboardTab::Home, DashboardTab::Models] {
             let mut s = ready(vec![project("a")]);
-            s.app.set_focus(panel);
-            let effects = effects_of(update(&mut s, Event::Key(CanopyKey::Char('1'))));
-            assert!(effects.data_requests.is_empty(), "{panel:?}");
-            assert_eq!(s.col3.recall_window, RecallWindow::AllTime, "{panel:?}");
+            s.app.dashboard_tab = tab;
+            s.app.set_focus(Panel::Detail);
+            update(&mut s, Event::Key(CanopyKey::Char('1')));
+            assert_eq!(
+                s.col3.recall_window,
+                if tab == DashboardTab::Home {
+                    RecallWindow::Today
+                } else {
+                    RecallWindow::AllTime
+                }
+            );
         }
+        let mut s = ready(vec![project("a")]);
+        open_drawer(&mut s);
+        let effects = effects_of(update(&mut s, Event::Key(CanopyKey::Char('1'))));
+        assert!(effects.data_requests.is_empty());
+        assert_eq!(s.col3.recall_window, RecallWindow::AllTime);
     }
 
     /// the priced savings estimate: the headline opens the breakdown as the existing read-only

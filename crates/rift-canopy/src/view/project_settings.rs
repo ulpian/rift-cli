@@ -29,8 +29,10 @@ pub enum ProjectSettingsDisplayRow {
         index: usize,
         /// Left-side label/detail.
         label: String,
-        /// Right-aligned checkbox/action chip.
+        /// Action chip; empty for a leading toggle.
         chip: String,
+        /// Boolean selection, rendered with the shared onboarding control.
+        checked: Option<bool>,
     },
     /// One line of an integration finding's remedy, under its adapter row:
     /// the headline, or a wrapped line of the sentence. Not a cursor stop and
@@ -70,14 +72,13 @@ pub fn project_settings_display_rows(
         )];
     }
     if view.initialization.offers_setup() {
-        rows.push(ProjectSettingsDisplayRow::Info(
-            "Review your harnesses and settings before initializing this project.".into(),
-        ));
-        rows.push(ProjectSettingsDisplayRow::Info(
-            "Capture starts with new sessions. Historical import is a separate opt-in command."
-                .into(),
-        ));
-        rows.push(ProjectSettingsDisplayRow::Spacer);
+        return vec![
+            ProjectSettingsDisplayRow::Info("Project setup runs before Canopy opens.".into()),
+            ProjectSettingsDisplayRow::Info(
+                "Exit Canopy and run `rift` in this project to start the CLI wizard.".into(),
+            ),
+            ProjectSettingsDisplayRow::Info(crate::col2::sanitize_for_terminal(&view.path)),
+        ];
     }
     push_settings_section(
         &mut rows,
@@ -116,12 +117,6 @@ pub fn project_settings_display_rows(
         push_remedy_lines(&mut rows, &integration.remedies);
     }
     push_permissions_section(&mut rows, &items, view);
-    if view.initialization.offers_setup() {
-        rows.push(ProjectSettingsDisplayRow::Spacer);
-        if let Some(index) = item_index(&items, &crate::ProjectSettingsItem::Initialize) {
-            rows.push(initialize_row(index, view.initialization));
-        }
-    }
     rows
 }
 
@@ -132,7 +127,7 @@ fn push_permissions_section(
 ) {
     rows.push(ProjectSettingsDisplayRow::Spacer);
     rows.push(ProjectSettingsDisplayRow::Heading(
-        "Harness permissions · project only".into(),
+        "Harness Permissions · Project Only".into(),
     ));
     for permission in &view.permissions {
         let item = crate::ProjectSettingsItem::Permission(permission.agent.clone());
@@ -142,8 +137,13 @@ fn push_permissions_section(
         ) {
             rows.push(ProjectSettingsDisplayRow::Action {
                 index,
-                label: permission.agent.clone(),
+                label: view
+                    .integrations
+                    .iter()
+                    .find(|row| row.agent == permission.agent)
+                    .map_or_else(|| permission.agent.clone(), |row| row.display_name.clone()),
                 chip: format!("[{}]", option.label),
+                checked: None,
             });
             rows.extend(
                 wrap_words(&option.detail, REMEDY_WRAP_COLS)
@@ -161,6 +161,7 @@ fn push_permissions_section(
             index,
             label: "Confirm reviewed native permission changes".into(),
             chip: "[Apply permissions]".into(),
+            checked: None,
         });
     }
 }
@@ -177,32 +178,17 @@ pub fn project_settings_body_rect(modal: Rect) -> Rect {
     }
 }
 
-/// Reserve the welcome mark only while project setup is on offer.
+/// Settings content starts directly inside the settings surface.
 #[must_use]
 pub fn project_settings_content_rect(
     modal: Rect,
-    state: &crate::ProjectSettingsModalState,
+    _state: &crate::ProjectSettingsModalState,
 ) -> Rect {
-    let body = project_settings_body_rect(modal);
-    let welcome = if state
-        .view
-        .as_ref()
-        .is_some_and(|view| view.initialization.offers_setup())
-        && body.h > 10
-    {
-        8
-    } else {
-        0
-    };
-    Rect {
-        y: body.y + welcome,
-        h: body.h.saturating_sub(welcome),
-        ..body
-    }
+    project_settings_body_rect(modal)
 }
 
-/// Right-aligned checkbox/action-chip rects for visible modal actions. Mouse
-/// activation is deliberately limited to these exact cells.
+/// Visible toggle rows and action-chip rects. The full toggle row is clickable;
+/// non-toggle actions retain their exact chip targets.
 #[must_use]
 pub fn project_settings_action_rects(
     modal: Rect,
@@ -214,7 +200,13 @@ pub fn project_settings_action_rects(
     rows.iter()
         .enumerate()
         .filter_map(|(line_index, row)| {
-            let ProjectSettingsDisplayRow::Action { index, chip, .. } = row else {
+            let ProjectSettingsDisplayRow::Action {
+                index,
+                chip,
+                checked,
+                ..
+            } = row
+            else {
                 return None;
             };
             let dy = line_index.checked_sub(scroll)?;
@@ -222,7 +214,11 @@ pub fn project_settings_action_rects(
             if dy >= body.h {
                 return None;
             }
-            let w = u16::try_from(chip.chars().count()).unwrap_or(0).min(body.w);
+            let w = if checked.is_some() {
+                body.w
+            } else {
+                u16::try_from(chip.chars().count()).unwrap_or(0).min(body.w)
+            };
             Some((
                 *index,
                 Rect {
@@ -273,27 +269,7 @@ pub(super) fn draw_project_settings(vm: &ViewModel, frame: &mut Frame, unicode: 
     let inner = frame.border(rect, &settings_title(vm), ACCENT);
     draw_mode_close(vm, frame, rect, &crate::hit::Target::ProjectSettingsClose);
     let content = project_settings_content_rect(rect, &vm.project_settings);
-    let body = project_settings_body_rect(rect);
-    if content.y > body.y {
-        crate::welcome::draw(frame, body, vm.project_settings.animation_seconds, unicode);
-        clip_at(
-            frame,
-            body.x + 15,
-            body.y + 2,
-            body.w.saturating_sub(15),
-            "Welcome to Rift",
-            vm.theme.key_hint(),
-        );
-        clip_at(
-            frame,
-            body.x + 15,
-            body.y + 3,
-            body.w.saturating_sub(15),
-            "Set up this project",
-            vm.theme.dim(),
-        );
-    }
-    draw_settings_rows(vm, frame, content);
+    draw_settings_rows(vm, frame, content, unicode);
     draw_settings_footer(vm, frame, inner);
     if let Some(cancel) = project_settings_cancel_rect(rect, &vm.project_settings) {
         let style = mode_chip_style(vm, &crate::hit::Target::ProjectSettingsCancel);
@@ -346,7 +322,8 @@ fn push_setting_row(
         Some(index) => ProjectSettingsDisplayRow::Action {
             index,
             label,
-            chip: checkbox(row.enabled),
+            chip: String::new(),
+            checked: Some(row.enabled),
         },
         None if initialization == Init::NotProvisioned => ProjectSettingsDisplayRow::Info(format!(
             "{label} · {} · committed by the repository",
@@ -374,11 +351,11 @@ fn push_policy_section(
     };
     rows.push(ProjectSettingsDisplayRow::Info(source.into()));
     rows.push(ProjectSettingsDisplayRow::Info(format!(
-        "sensitive paths: {}",
+        "Sensitive Paths: {}",
         policy.sensitive_path_count
     )));
     rows.push(ProjectSettingsDisplayRow::Info(format!(
-        "redactor packs: {} loaded · {} failed",
+        "Redactor Packs: {} loaded · {} failed",
         policy.loaded_redactor_packs, policy.failed_redactor_packs
     )));
     if let Some(detail) = &policy.detail {
@@ -412,7 +389,8 @@ fn integration_row(
     ProjectSettingsDisplayRow::Action {
         index,
         label,
-        chip: checkbox(enabled),
+        chip: String::new(),
+        checked: Some(enabled),
     }
 }
 
@@ -525,22 +503,8 @@ fn flush_line(lines: &mut Vec<String>, current: &mut String) {
     }
 }
 
-/// The initialize row: what pressing it sets up on this machine.
-fn initialize_row(index: usize, initialization: Init) -> ProjectSettingsDisplayRow {
-    let label = if initialization == Init::NotProvisioned {
-        "set up this machine: projection, git hooks, selected agents"
-    } else {
-        "apply every selected local setup step"
-    };
-    ProjectSettingsDisplayRow::Action {
-        index,
-        label: label.into(),
-        chip: "[ initialize project ]".into(),
-    }
-}
-
 fn checkbox(enabled: bool) -> String {
-    if enabled { "[x]" } else { "[ ]" }.to_owned()
+    if enabled { "●" } else { "○" }.to_owned()
 }
 
 fn project_settings_scroll(
@@ -591,7 +555,7 @@ fn settings_title(vm: &ViewModel) -> String {
 }
 
 /// The section rows from the scroll offset down, as many as the body holds.
-fn draw_settings_rows(vm: &ViewModel, frame: &mut Frame, body: Rect) {
+fn draw_settings_rows(vm: &ViewModel, frame: &mut Frame, body: Rect, unicode: bool) {
     let rows = project_settings_display_rows(&vm.project_settings);
     let scroll = project_settings_scroll(&vm.project_settings, &rows, usize::from(body.h));
     for (line_index, row) in rows.iter().enumerate().skip(scroll) {
@@ -601,7 +565,7 @@ fn draw_settings_rows(vm: &ViewModel, frame: &mut Frame, body: Rect) {
         if dy >= body.h {
             break;
         }
-        draw_settings_row(vm, frame, body, body.y + dy, row);
+        draw_settings_row(vm, frame, body, body.y + dy, row, unicode);
     }
 }
 
@@ -615,6 +579,7 @@ fn draw_settings_row(
     body: Rect,
     y: u16,
     row: &ProjectSettingsDisplayRow,
+    unicode: bool,
 ) {
     match row {
         ProjectSettingsDisplayRow::Heading(text) => {
@@ -625,7 +590,12 @@ fn draw_settings_row(
             let dim = vm.theme.dim();
             clip_at(frame, body.x + 2, y, body.w.saturating_sub(2), &text, dim);
         }
-        ProjectSettingsDisplayRow::Action { index, label, chip } => {
+        ProjectSettingsDisplayRow::Action {
+            index,
+            label,
+            chip,
+            checked,
+        } => {
             let selected = *index == vm.project_settings.cursor;
             let style = if selected {
                 vm.theme.selection()
@@ -642,9 +612,16 @@ fn draw_settings_row(
                 crate::chrome::cursor_row(frame, row, style);
             }
             let chip_w = u16::try_from(chip.chars().count()).unwrap_or(0).min(body.w);
-            let label_w = body.w.saturating_sub(chip_w + 3);
+            let prefix = if let Some(enabled) = checked {
+                let (glyph, toggle_style) = crate::controls::toggle(*enabled, unicode);
+                frame.set(body.x + 2, y, glyph, toggle_style.with_bg(style.bg));
+                4
+            } else {
+                2
+            };
+            let label_w = body.w.saturating_sub(chip_w + prefix + 1);
             let label = sanitize_for_terminal(label);
-            clip_at(frame, body.x + 2, y, label_w, &label, style);
+            clip_at(frame, body.x + prefix, y, label_w, &label, style);
             let chip_x = body.x + body.w.saturating_sub(chip_w);
             clip_at(frame, chip_x, y, chip_w, chip, style);
         }
@@ -695,7 +672,13 @@ fn draw_settings_footer(vm: &ViewModel, frame: &mut Frame, inner: Rect) {
 
 /// The hints line: only the keys the stage answers to.
 fn settings_hints(state: &crate::ProjectSettingsModalState) -> &'static str {
-    if state.confirm_raw {
+    if state
+        .view
+        .as_ref()
+        .is_some_and(|view| view.initialization.offers_setup())
+    {
+        " Tab/Shift-Tab views · esc/x close"
+    } else if state.confirm_raw {
         " enter acknowledge · esc cancel"
     } else if state.running {
         " settings locked while operation completes"
@@ -709,6 +692,38 @@ fn settings_hints(state: &crate::ProjectSettingsModalState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_toggles_use_onboarding_marks_and_the_visible_row_is_clickable() {
+        let size = crate::render::Size::new(80, 24);
+        let mut state = crate::AppState::new(vec![], size);
+        let vm = state.snapshot();
+        let body = Rect {
+            x: 2,
+            y: 2,
+            w: 60,
+            h: 10,
+        };
+        for (enabled, glyph, color) in [
+            (false, '○', crate::render::Color::Rgb(255, 255, 255)),
+            (true, '●', crate::theme::HEALTH_OK),
+        ] {
+            let mut frame = Frame::new(size);
+            let row = ProjectSettingsDisplayRow::Action {
+                index: 0,
+                label: "Total Recall".into(),
+                chip: String::new(),
+                checked: Some(enabled),
+            };
+            draw_settings_row(&vm, &mut frame, body, 3, &row, true);
+            assert_eq!(frame.get(4, 3).unwrap().ch, glyph);
+            assert_eq!(frame.get(4, 3).unwrap().style.fg, color);
+        }
+        let settings = integrations_view(vec![adapter("codex", Vec::new())]);
+        let rects = project_settings_action_rects(Rect { h: 40, ..body }, &settings);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects.first().unwrap().1.w, body.w - 2);
+    }
 
     /// The label matrix for the alpha capture scope: a coming-soon row says
     /// so instead of "not wired" (which advertises a toggle the manager

@@ -5,8 +5,6 @@ expression: "render_state_with_caps(&mut state, Capabilities::empty())"
 ---
  RIFT  Canopy  *                  ? Help  / Palette  q Quit
 [<]   Home   Models   Activity   Tokens  [Recall]       < >
- rift-cli · branch unknown · /r/rift-cli
- Local facts only; Recall: family
 [Checkpoints]                  Timeline
 ╭─ checkpoints · 2 ────────────────────────────────────────╮
 │[ Filter ]                                                │
@@ -20,6 +18,8 @@ expression: "render_state_with_caps(&mut state, Capabilities::empty())"
 │  cp 998877665544 · commit fedcba987654                   │
 │  legacy/br refs/heads/legacy/checkpoints/v1 · unchained  │
 │  no containing branch · strategy ? · unprojected · wt:unk│
+│                                                          │
+│                                                          │
 │                                                          │
 │                                                          │
 ╰──────────────────────────────────────────────────────────╯

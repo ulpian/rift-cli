@@ -5,33 +5,33 @@ expression: "render_state(&mut\nproject_settings_state(Size::new(100, 32),\nrift
 ---
  RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
 [<]   Home   Models   Activity   Token usage   Recall viewer  [Settings]                        < >
- rift-cli · branch unknown · /r/rift-cli
- Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
 ╭─ Project Settings · rift-cli ─────────────────────────────────────────────────────────────────[x]╮
 │Recall                                                                                            │
 │  Total Recall · locked                                                                           │
-│  per-turn delta injection · custom effective budget: 777 · locked                                │
-│  documents as Markdown · locked                                                                  │
-│  native search · locked                                                                          │
+│  Per-Turn Delta Injection · custom effective budget: 777 · locked                                │
+│  Documents as Markdown · locked                                                                  │
+│  Native Search · locked                                                                          │
 │                                                                                                  │
 │Capture                                                                                           │
-│  tool-call capture · locked                                                                      │
-│  token-usage capture · locked                                                                    │
-│  raw transcripts · locked                                                                        │
+│  Tool-Call Capture · locked                                                                      │
+│  Token-Usage Capture · locked                                                                    │
+│  Raw Transcripts · locked                                                                        │
 │                                                                                                  │
 │Security / Policy                                                                                 │
 │  policy: invalid · fail-closed                                                                   │
-│  sensitive paths: 11                                                                             │
-│  redactor packs: 2 loaded · 1 failed                                                             │
+│  Sensitive Paths: 11                                                                             │
+│  Redactor Packs: 2 loaded · 1 failed                                                             │
 │  .rift/config.toml is invalid; repair it before changing settings                                │
 │                                                                                                  │
 │Integrations                                                                                      │
-│> Claude Code · PATH command · managed                                                         [x]│
+│> * Claude Code · PATH command · managed                                                          │
+│  * Codex · PATH command + VS Code extension · capture managed · hooks managed                    │
+│  o Gemini CLI · PATH command · conflict · coming soon                                            │
 │About: Installed: PATH command (availability only); wiring: managed.                              │
 │                                                                                                  │
 │ j/k move · enter/space apply · pgup/pgdn scroll · esc/x close                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
+← Projects  Tab views  1–4 Recall period  s Settings  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
