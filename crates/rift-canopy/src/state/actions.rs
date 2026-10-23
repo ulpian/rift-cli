@@ -299,6 +299,7 @@ mod tests {
     #[test]
     fn remove_key_emits_remove_persist_for_selected() {
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         update(&mut s, Event::Key(CanopyKey::Down)); // select /r/b
         let flow = update(&mut s, Event::Key(CanopyKey::Char('d')));
         match flow {
@@ -315,6 +316,7 @@ mod tests {
     #[test]
     fn reorder_key_emits_reorder_persist_for_selected() {
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         let flow = update(&mut s, Event::Key(CanopyKey::ShiftDown));
         match flow {
             Flow::Continue(e) => assert_eq!(
@@ -343,6 +345,7 @@ mod tests {
         // Story 8: a column-1 remove/reorder touches only the active profile's
         // view — the catalogue op is the unwired fallback, not the default.
         let mut s = ready_with_profiles(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('d'))));
         assert_eq!(
             e.persist,

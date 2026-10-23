@@ -108,8 +108,10 @@ pub fn tab_rects(size: Size, active: DashboardTab) -> Vec<(DashboardTab, Rect)> 
         .unwrap_or(0);
     let mut start = 0;
     while start < active_index
-        && 5 + DashboardTab::ALL[start..=active_index]
+        && 5 + DashboardTab::ALL
             .iter()
+            .take(active_index + 1)
+            .skip(start)
             .map(|tab| width(*tab))
             .sum::<u16>()
             > limit

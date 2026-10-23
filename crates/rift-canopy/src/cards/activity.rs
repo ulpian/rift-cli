@@ -75,7 +75,7 @@ pub(super) fn draw_activity(
         ActivityView::Days(d) => Some(d),
     };
     let title = activity_title(data.map_or_else(Default::default, |d| d.off_strip));
-    let inner = card_frame(theme, Section::Activity, &title, rect, frame);
+    let inner = card_frame(theme, Section::Activity, &title, rect, ctx.focused, frame);
     let Some(days) = data.map(|d| &d.days) else {
         line(frame, inner, 0, "(no projection yet)", theme.dim());
         return;

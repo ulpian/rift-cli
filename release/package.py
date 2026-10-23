@@ -18,8 +18,9 @@ def version():
     if not re.fullmatch(r"v1\.0\.0-alpha(?:\.[0-9]+)?", tag):
         raise ValueError("invalid alpha version")
     package = tomllib.loads((ROOT / "bins/rift/Cargo.toml").read_text())["package"]
-    if package["version"] != tag[1:]:
-        raise ValueError("CLI version and release channel disagree")
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
+    if package["version"] != {"workspace": True} or workspace["version"] != tag[1:]:
+        raise ValueError("CLI, workspace version, and release channel disagree")
     return tag
 
 

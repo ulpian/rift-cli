@@ -875,6 +875,16 @@ mod tests {
     /// typed out.
     const SURFACE_CENSUS: &[(&str, bool, &str)] = &[
         (
+            "update",
+            false,
+            "operator lifecycle: replaces the managed executable from an invitation",
+        ),
+        (
+            "uninstall",
+            false,
+            "operator lifecycle: removes the managed executable and owned integrations; a human confirms data purge",
+        ),
+        (
             "init",
             false,
             "operator lifecycle: a human wires the repository",

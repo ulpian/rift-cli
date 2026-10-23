@@ -304,6 +304,7 @@ mod tests {
     #[test]
     fn snapshot_marks_selection() {
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         update(&mut s, Event::Key(CanopyKey::Down));
         let v = s.snapshot();
         assert_eq!(v.selected, 1);

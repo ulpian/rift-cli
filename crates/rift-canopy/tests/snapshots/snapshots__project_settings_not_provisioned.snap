@@ -1,45 +1,45 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 240
+assertion_line: 88
 expression: "render_state(&mut\nproject_settings_state(Size::new(120, 40),\nrift_canopy::ProjectInitialization::NotProvisioned,\nrift_canopy::ProjectPolicyState::Declared,))"
 ---
- RIFT  Canopy  *                                                              ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  2 ────────╮╭─ repository ─────────────────────────────────╮╭─ token usage ────────────────────────────────#
-│># rift-cli╭─ Project Settings · rift-cli · not set up on this machine ────────────────────────────────[x]╮           #
-│ # rift-sit│Recall                                                                                        │           #
-│           │  Total Recall · [x] · committed by the repository                                            │           #
-│           │  per-turn delta injection · custom effective budget: 777 · [x] · committed by the repository │           #
-│           │  documents as Markdown · [x] · committed by the repository                                   │           #
-│           │  native search · [x] · committed by the repository                                           │           #
-│           │                                                                                              │           #
-│           │Capture                                                                                       │───────────#
-│           │  tool-call capture · [x] · committed by the repository                                       │───────────#
-│           │  token-usage capture · [x] · committed by the repository                                     │           #
-│           │  raw transcripts · [ ] · committed by the repository                                         │           #
-│           │                                                                                              │           #
-│           │Security / Policy                                                                             │           #
-│           │  policy: declared · valid                                                                    │           #
-│           │  sensitive paths: 11                                                                         │           #
-│           │  redactor packs: 2 loaded · 1 failed                                                         │───────────#
-│           │                                                                                              │───────────#
-│           │Integrations                                                                                  │           #
-│           │> Claude Code · PATH command · managed                                                     [x]│           #
-│           │  Codex · PATH command + VS Code extension · capture managed · hooks managed               [x]│           #
-│           │  Gemini CLI · PATH command · conflict · coming soon                                       [ ]│           #
-│           │  Antigravity · PATH command · invalid                                                     [ ]│           #
-│           │  Cursor · not installed · coming soon                                                     [ ]│           #
-│           │  Copilot CLI · not installed · coming soon                                                [ ]│           #
-│           │  OpenCode · not installed · coming soon                                                   [ ]│           #
-│           │  Factory Droid · not installed · coming soon                                              [ ]│           #
-│           │  Ollama · not installed · coming soon                                                     [ ]│           |
-│           │                                                                                              │           |
-│           │About: Installed: PATH command (availability only); wiring: managed.                          │───────────|
-│           │                                                                                              │───────────|
-│           │ j/k move · enter/space apply · pgup/pgdn scroll · esc/x close                                │           |
-│           ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           |
-│[+][^][v][x]          ││                                              ││                                              |
-╰──────────────────────╯╰──────────────────────────────────────────────╯│                                              |
- j/k move  ·  ⏎ apply  ·  esc close
+ RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
+[<]   Home   Models   Activity   Token usage   Recall viewer  [Settings]                                            < >
+ rift-cli · branch unknown · /r/rift-cli
+ Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
+╭─ Project Settings · rift-cli · not set up on this machine ────────────────────────────────────────────────────────[x]╮
+│##########                                                                                                            │
+│####    ####                                                                                                          │
+│####    ####   Welcome to Rift                                                                                        │
+│##########     Set up this project                                                                                    │
+│######                                                                                                                │
+│####  ####                                                                                                            │
+│####    ####                                                                                                          │
+│                                                                                                                      │
+│                                                                                                                      │
+│Recall                                                                                                                │
+│  Total Recall · [x] · committed by the repository                                                                    │
+│  per-turn delta injection · custom effective budget: 777 · [x] · committed by the repository                         │
+│  documents as Markdown · [x] · committed by the repository                                                           │
+│  native search · [x] · committed by the repository                                                                   │
+│                                                                                                                      │
+│Capture                                                                                                               │
+│  tool-call capture · [x] · committed by the repository                                                               │
+│  token-usage capture · [x] · committed by the repository                                                             │
+│  raw transcripts · [ ] · committed by the repository                                                                 │
+│                                                                                                                      │
+│Security / Policy                                                                                                     │
+│  policy: declared · valid                                                                                            │
+│  sensitive paths: 11                                                                                                 │
+│  redactor packs: 2 loaded · 1 failed                                                                                 │
+│                                                                                                                      │
+│Integrations                                                                                                          │
+│> Claude Code · PATH command · managed                                                                             [x]│
+│About: Installed: PATH command (availability only); wiring: managed.                                                  │
+│                                                                                                                      │
+│ j/k move · enter/space apply · pgup/pgdn scroll · esc/x close                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

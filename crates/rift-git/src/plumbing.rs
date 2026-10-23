@@ -988,6 +988,10 @@ mod tests {
         assert!(fresh.exists(), "a fresh index is a graft in progress");
         assert!(unrelated.exists(), "only the graft prefix is listed");
 
+        // Other tests spawn Git concurrently: a child can inherit this open
+        // description until exec closes it. Explicit unlock makes the release
+        // independent of that child's scheduling, without sleeping or retrying.
+        held_lock.unlock().unwrap();
         drop(held_lock);
         assert_eq!(sweep_stale_graft_indexes(git_dir, now_ms), 1);
         assert!(!held.exists() && !graft_held_path(&held).exists());

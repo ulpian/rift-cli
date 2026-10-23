@@ -1,24 +1,25 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 143
 expression: "render_at(60, 20)"
 ---
- RIFT  Canopy  *
-╭─ projects  2 ────╮[recall] rift-cli · running   [settings]
-│># rift-cli      *│0 models · 0 calls
-│ # rift-site     o│(no projection yet)
-│                  │
-│                  │
-│                  │
-│                  │
-│                  │╭─ token usage ────────────────────────#
-│                  ││(no token activity yet)               |
-│                  ││                                      |
-│                  ││                                      |
-│                  ││                                      |
-│                  ││                                      |
-│[+][^][v][x]      ││                                      |
-╰──────────────────╯│                                      |
- j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reo
+ RIFT  Canopy  *                  ? Help  / Palette  q Quit
+[<]  [Home]  Models   Activity   Tokens   Recall        < >
+ rift-cli · branch unknown · /r/rift-cli
+ Local facts only; Recall: family
+╭─ repository ─────────────────────────────────────────────╮
+│rift-cli (repo)                                           │
+│path: /r/rift-cli                                         │
+│* running                                                 │
+│[ Recall Viewer ]                     [ Project Settings ]│
+╰──────────────────────────────────────────────────────────╯
+ Recall setup required (Settings)
+╭─ recall ─────────────────────────────────────────────────#
+│recall off — open Project Settings                        |
+│                                                          |
+│[24h][7d][30d][all]                                       |
+│                                                          |
+← Projects  [/] tabs  s Settings  r Recall viewer  / command
 ╭─ command ────────────────────────────────────────────────╮
 │/█                                                        │
 ╰──────────────────────────────────────────────────────────╯

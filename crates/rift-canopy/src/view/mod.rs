@@ -294,7 +294,11 @@ mod tests {
         let mut f = Frame::new(vm.size);
         let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
         draw(&vm, &mut b, &mut f);
-        let modal = modal_rect(vm.size);
+        let modal = if vm.mode == crate::Mode::ProjectSettings {
+            crate::dashboard::geometry(vm.size).0
+        } else {
+            modal_rect(vm.size)
+        };
         let rows = (modal.y..modal.y + modal.h)
             .filter(|&y| {
                 f.get(modal.x + 1, y)
@@ -335,10 +339,20 @@ mod tests {
     /// A state in Project Settings over the detail fixture's view.
     fn settings_state() -> AppState {
         let mut settings = state_with_detail(ProjectStatus::Idle, "model");
-        let view = settings.snapshot().detail.as_deref().map_or_else(
+        let mut view = settings.snapshot().detail.as_deref().map_or_else(
             || crate::ProjectSettingsView::thin("/r/p".into(), "p".into()),
             |detail| detail.project_settings.as_ref().clone(),
         );
+        view.initialization = crate::ProjectInitialization::Initialized;
+        view.settings = crate::ProjectSettingId::ALL
+            .iter()
+            .map(|id| crate::ProjectSettingRow {
+                id: *id,
+                enabled: false,
+                actionable: true,
+                detail: None,
+            })
+            .collect();
         settings.app.project_settings.open(view);
         settings.app.mode = crate::input::Mode::ProjectSettings;
         settings

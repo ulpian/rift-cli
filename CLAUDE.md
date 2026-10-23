@@ -267,8 +267,8 @@ reviewers enforce:
 ## Gotchas
 
 - Commit `Cargo.lock` (this workspace produces binaries).
-- `rustfmt.toml` sets `imports_granularity`/`group_imports`, which are
-  nightly-only; on stable they warn-and-skip (`fmt --check` still passes).
+- Keep `rustfmt.toml` compatible with the pinned stable toolchain. Nightly-only
+  options are ignored on stable and produce repeated warnings.
 - The false-memory guard lives in `rift-recall-validity`: a stale summary has a
   different key and `ValidSummary` is unconstructible outside the crate — keep it
   that way; `envelope_for` is the single way to build a served artifact.

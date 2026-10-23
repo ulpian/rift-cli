@@ -1,6 +1,6 @@
 # Private alpha distribution
 
-GitHub holds the private source tag and draft prerelease. Google Cloud Storage
+GitHub holds the private source tag and owner-created prerelease. Google Cloud Storage
 holds the downloadable archives. Testers receive bearer links that expire within
 12 hours; no GitHub or Google account is needed. Invitations are sent manually.
 
@@ -13,14 +13,20 @@ artifacts after thirty days. Released archives remain available for reissues.
 
 ## Publish after review and verification
 
+Keep `release/alpha-version` (with its `v` prefix) aligned with
+`[workspace.package].version` in `Cargo.toml`. All workspace packages inherit
+that version; the packaging tool rejects a mismatch.
+
 1. Complete the approved repository gate and review the working setup, Canopy,
    and `NOTES.md` before creating or pushing `v1.0.0-alpha`.
-2. The release workflow builds all five platforms and makes a private draft
-   prerelease, or attaches archives to an existing release record without changing
-   its publication status or notes. Inspect the platform results before describing
-   those packages as verified. Existing assets are preserved on a name conflict.
-3. Download its five archives and `SHA256SUMS` into `dist/` with the owner's
-   authenticated GitHub CLI. Tester machines do not need GitHub CLI.
+2. Pushing the tag starts the five-platform packaging workflow. It uploads a
+   `rift-release-bundle` artifact with archives, checksums, installers, and release
+   notes. It has read-only repository permissions and does not create or publish
+   a GitHub Release.
+3. After inspecting the platform results, download the bundle from GitHub Actions
+   and create a prerelease for the existing tag through GitHub's web interface.
+   Use `NOTES.md` as its description and attach the verified archives and checksums.
+   Put the five archives and `SHA256SUMS` in local `dist/` for the upload step below.
 4. Run `python3 release/downloads.py upload`. Every archive must match the CI
    checksum. Uploads preserve existing objects and independently read them back.
 5. Run `python3 release/downloads.py invite`. It writes a private `INVITE.md`

@@ -581,6 +581,10 @@ pub(crate) fn member_row_frame(
     let path = detail.path.clone();
     let mut s = AppState::new(member_row_projects(), Size::new(120, 40));
     s.app.splash.skip();
+    rift_canopy::update(
+        &mut s,
+        rift_canopy::Event::Key(rift_canopy::CanopyKey::Left),
+    );
     s.app.selected = selected;
     rift_canopy::update(
         &mut s,

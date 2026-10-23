@@ -32,21 +32,14 @@
 //! rule they cannot import, it is a record of **which arm each site takes and
 //! whether it takes it through the shared derivation or around it**.
 //!
-//! The four sites are still **enumerated, not summarized**:
+//! The reader sites are enumerated, including the shared attribution predicate:
 //!
-//! 1. `bus::project_read::read_projection_detail` fills
-//!    `CaptureSummary::last_checkpoint_at_ms` with
-//!    `SELECT created_at FROM checkpoint ORDER BY created_at DESC LIMIT 1`.
-//!    **STILL OPEN, and its stated blocker is now gone.** On the projection
-//!    for this repository that query returns `-1`, so the field holds a
-//!    sentinel typed as an epoch-millisecond instant. Nothing renders the
-//!    field today (checked workspace-wide), which is the only reason a
-//!    sentinel is not on screen. This entry used to end *"not fixed here:
-//!    classifying `-1` requires the constant"* — the constant is reachable
-//!    now, so that excuse has been deleted rather than left to age. It stays
-//!    open because it is a different site with a different question (whether
-//!    `last_checkpoint_at_ms` becomes an `Option` across the crate boundary),
-//!    not because anything prevents it.
+//! 1. `bus::projection_detail::read_capture_summary` reads worktree-scoped
+//!    counts and the latest recorded checkpoint time. Unknown timestamps suppress
+//!    both the optional time and checkpoint ID; tied latest times suppress the ID.
+//!    **CLOSED for the sentinel.** `scope::WorktreeScope::checkpoints` reads
+//!    `checkpoint_worktree` attribution only, with no timestamp column. Missing
+//!    attribution is excluded rather than assigned to main.
 //! 2. [`feeds::compute_activity`]'s thirty-day strips read the same column
 //!    **through [`rift_store::window::CHECKPOINT_TIME_CTE`]**, so a shard that
 //!    records no time of its own is placed at `MAX(session.started_at)` over
@@ -86,7 +79,7 @@
 //! Nothing else in this crate reads that table; the other `created_at` columns
 //! here belong to Canopy's **own** append-only registry tables, whose times
 //! this crate mints itself and which carry no sentinel. That sentence is not
-//! taken on trust: `tests/checkpoint_time_readers.rs` pins the list, so a fifth
+//! taken on trust: `tests/checkpoint_time_readers.rs` pins the list, so a new
 //! reader of `checkpoint` reddens rather than quietly joining a summary. What
 //! the guard covers, and the assembly shape it would not notice, are stated in
 //! its own module docs.

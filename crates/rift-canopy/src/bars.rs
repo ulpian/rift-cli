@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn header_action_at_resolves_and_misses() {
         let spans = header_action_spans(80, None);
-        assert_eq!(spans.len(), 4, "unwired: the four static actions");
+        assert_eq!(spans.len(), 3, "unwired: the three static actions");
         for span in &spans {
             assert_eq!(header_action_at(80, None, span.start), Some(span.action));
             assert_eq!(header_action_at(80, None, span.end - 1), Some(span.action));
@@ -438,32 +438,29 @@ mod tests {
         // Too narrow: the cluster clips away whole; nothing is clickable.
         assert!(header_action_spans(30, None).is_empty());
         assert_eq!(header_action_at(30, None, 15), None);
-        // Wired: five items, the identity immediately before Palette
+        // Wired: four items, the identity immediately before Palette
         // (the profile hub).
         let spans = header_action_spans(90, Some("work"));
-        assert_eq!(spans.len(), 5);
+        assert_eq!(spans.len(), 4);
         assert_eq!(
             spans.iter().map(|s| s.action).collect::<Vec<_>>(),
             vec![
                 HeaderAction::Help,
                 HeaderAction::Profile,
                 HeaderAction::Palette,
-                HeaderAction::Editor,
                 HeaderAction::Quit
             ]
         );
     }
 
     #[test]
-    fn an_unwired_cluster_keeps_the_four_item_geometry() {
-        // With no profile the cluster is byte-identical to its pre-hub
-        // four-item form: same positions, same clip threshold — so the
-        // unprofiled goldens never re-cut.
+    fn an_unwired_cluster_keeps_the_three_visible_actions() {
+        // The three visible actions are right-aligned and disappear together.
         let spans = header_action_spans(80, None);
-        assert_eq!(spans.first().map(|s| s.start), Some(38), "right-aligned");
+        assert_eq!(spans.first().map(|s| s.start), Some(54), "right-aligned");
         assert_eq!(spans.last().map(|s| s.end), Some(79), "one-cell margin");
-        assert!(header_action_spans(60, None).is_empty());
-        assert_eq!(header_action_spans(61, None).len(), 4);
+        assert!(header_action_spans(36, None).is_empty());
+        assert_eq!(header_action_spans(37, None).len(), 3);
     }
 
     /// A snapshot with the profile plane wired: one active profile named `name`.
@@ -543,10 +540,10 @@ mod tests {
     fn identity_clips_away_whole_on_a_narrow_header() {
         // The ladder (the profile hub) spends the name first: at moderate
         // narrowness the label shrinks to its ellipsis floor…
-        let v = vm_with_profile("work", 75, 24);
+        let v = vm_with_profile("work", 51, 24);
         let (start, end) =
-            identity_span(75, "work").expect("above the floor the item shrinks instead of hiding");
-        let mut f = Frame::new(Size::new(75, 24));
+            identity_span(51, "work").expect("above the floor the item shrinks instead of hiding");
+        let mut f = Frame::new(Size::new(51, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
@@ -554,39 +551,39 @@ mod tests {
             text.ends_with('…'),
             "the floor label is an ellipsis: {text}"
         );
-        // …narrower, the item drops WHOLE while the four actions stand…
-        let v = vm_with_profile("work", 70, 24);
-        assert_eq!(identity_span(70, "work"), None);
-        let spans = header_action_spans(70, Some("work"));
-        assert_eq!(spans.len(), 4, "the actions survive the identity drop");
-        let mut f = Frame::new(Size::new(70, 24));
+        // …narrower, the item drops WHOLE while the three actions stand…
+        let v = vm_with_profile("work", 46, 24);
+        assert_eq!(identity_span(46, "work"), None);
+        let spans = header_action_spans(46, Some("work"));
+        assert_eq!(spans.len(), 3, "the actions survive the identity drop");
+        let mut f = Frame::new(Size::new(46, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
-        let row: String = (0..70u16)
+        let row: String = (0..46u16)
             .map(|x| f.get(x, 0).map_or(' ', |c| c.ch))
             .collect();
         assert!(
             !row.contains(Icon::Profile.unicode()),
             "no partial button: {row}"
         );
-        for col in 0..70u16 {
+        for col in 0..46u16 {
             assert_ne!(
-                header_action_at(70, Some("work"), col),
+                header_action_at(46, Some("work"), col),
                 Some(HeaderAction::Profile)
             );
         }
         // …and at the narrowest the whole cluster clips; nothing hits.
-        assert!(header_action_spans(50, Some("work")).is_empty());
+        assert!(header_action_spans(26, Some("work")).is_empty());
     }
 
     #[test]
     fn identity_name_shrinks_before_the_button_hides() {
         // The hidden-band class, found in real use: at widths where the full name
         // misses the fit, the label shrinks instead of vanishing.
-        let v = vm_with_profile("collaboration", 80, 24);
+        let v = vm_with_profile("collaboration", 56, 24);
         let (start, end) =
-            identity_span(80, "collaboration").expect("the shrunk item shows in the cluster");
-        let mut f = Frame::new(Size::new(80, 24));
+            identity_span(56, "collaboration").expect("the shrunk item shows in the cluster");
+        let mut f = Frame::new(Size::new(56, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
@@ -594,14 +591,14 @@ mod tests {
         // The shrunk label and the hit target come from one solver.
         for col in start..end {
             assert_eq!(
-                header_action_at(80, Some("collaboration"), col),
+                header_action_at(56, Some("collaboration"), col),
                 Some(HeaderAction::Profile)
             );
         }
         // Wider, the same name renders whole again.
-        let v = vm_with_profile("collaboration", 95, 24);
-        let (start, end) = identity_span(95, "collaboration").unwrap();
-        let mut f = Frame::new(Size::new(95, 24));
+        let v = vm_with_profile("collaboration", 71, 24);
+        let (start, end) = identity_span(71, "collaboration").unwrap();
+        let mut f = Frame::new(Size::new(71, 24));
         let area = f.rect();
         draw_header(&v, Theme::rift_dark(), true, &mut f, area);
         let text: String = (start..end).map(|x| f.get(x, 0).unwrap().ch).collect();
@@ -697,7 +694,9 @@ mod tests {
 
     #[test]
     fn hint_bar_shows_the_rail_keymap() {
-        let v = vm(100, 30); // focus starts on Projects
+        let mut v = vm(100, 30);
+        v.projects_open = true;
+        v.focus = crate::Panel::Projects;
         let mut f = Frame::new(Size::new(100, 30));
         let rect = Rect {
             x: 0,

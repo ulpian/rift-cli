@@ -1,36 +1,37 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 909
 expression: render_state(&mut s)
 ---
- RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  0 ────╮no project selected                     ╭─ token usage ────────────────────────#
-│No projec╭─ welcome to Rift ─────────────────────────────────────────────────────────[x]╮         #
-│         │No projects registered yet.                                                   │         #
-│         │Add a project to start capturing agent sessions,                              │         #
-│         │or run `rift init` in a repository.                                           │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │─────────#
-│         │                                                                              │─────────#
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │─────────|
-│         │                                                                              │─────────|
-│         │                                                                              │tings    |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │< Add a project >                                                             │         |
-│[+]      ╰──────────────────────────────────────────────────────────────────────────────╯         |
-╰──────────────────╯                                        │                                      |
- ⏎ action  ·  esc dismiss
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+[<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
+          ╭─ welcome to Rift ─────────────────────────────────────────────────────────[x]╮
+ Models/ac│No projects registered yet.                                                   │
+no project│Add a project to start capturing agent sessions,                              │
+          │or run `rift init` in a repository.                                           │
+          │                                                                              │
+          │                                                                              │
+          │                                                                              │
+          │                                                                              │
+          │                                                                              │
+          │                                                                              │
+          │                                                                              │
+          │                                                                              │
+ Recall re│                                                                              │
+╭─ recall │                                                                              │─────────╮
+│recall of│                                                                              │         │
+│         │                                                                              │         │
+│[24h][7d]│                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │< Add a project >                                                             │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

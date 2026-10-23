@@ -64,11 +64,16 @@ Uninstalling does not rewrite captured Git history or remove repository policy.
 
 Focused tests and native terminal checks passed on Intel macOS: staged setup,
 Git initialization consent, cancellation, the tiled R, tab navigation, and
-launching in linked worktrees. Private Cloud Storage downloads were checked for
-unsigned-access denial, signed retrieval, archive integrity, installation,
+launching in linked worktrees. Earlier private Cloud Storage preview downloads
+were checked for unsigned-access denial, signed retrieval, archive integrity, installation,
 same-version update, and uninstall/purge in a disposable installation.
 
-The full workspace format/Clippy/test gate and five-platform optimized release
-builds are not yet verified. The available Intel Mac preview uses reduced CLI
-optimization with optimized dependencies. Treat other platforms as unverified
-until their build results and release archives are available.
+The full local workspace gate passed on Intel macOS: formatting, workspace
+Clippy with warnings denied, the CLI feature-off Clippy check, workspace tests,
+and doctests. The refreshed native preview passed linked-worktree Home/drawer
+and fresh-setup cancellation checks.
+
+Five-platform optimized release builds remain unverified until the packaging
+workflow completes. The available Intel Mac preview uses reduced CLI optimization
+with optimized dependencies. Final release invitations require the verified
+platform archives; the earlier Cloud Storage preview is not the final tagged build.

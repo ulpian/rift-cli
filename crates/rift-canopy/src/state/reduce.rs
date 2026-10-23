@@ -431,19 +431,18 @@ mod tests {
                 "{status:?}: the first read decides"
             );
             let effects = effects_of(flow);
-            let init = vec![crate::ProjectSettingsAction {
-                path: "/r/b".into(),
-                kind: crate::ProjectSettingsActionKind::Init,
-            }];
-            assert_eq!(
-                effects.project_settings_actions,
-                if opens { init } else { Vec::new() },
-                "{status:?}: adding IS initializing, with no page in the way"
+            assert!(
+                effects.project_settings_actions.is_empty(),
+                "{status:?}: setup needs explicit review before any writes"
             );
-            assert_ne!(
+            assert_eq!(
                 s.app.mode,
-                Mode::ProjectSettings,
-                "{status:?}: the page is not opened — the dialog is"
+                if opens {
+                    Mode::ProjectSettings
+                } else {
+                    Mode::Normal
+                },
+                "{status:?}: open staged setup only when it is needed"
             );
             if opens {
                 assert_eq!(
@@ -502,7 +501,7 @@ mod tests {
             vec![DataRequest::Refresh("/r/a".into())]
         );
 
-        let modal = crate::view::modal_rect(s.size);
+        let modal = crate::dashboard::geometry(s.size).0;
         let body = crate::view::project_settings_body_rect(modal);
         for _ in 0..4 {
             update(&mut s, mouse(MouseKind::ScrollDown, body.x + 1, body.y + 1));
@@ -678,6 +677,7 @@ mod tests {
     #[test]
     fn selection_change_requests_new_project_data() {
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         // Move selection down → a data request for the newly selected project.
         let flow = update(&mut s, Event::Key(CanopyKey::Down));
         match flow {
@@ -765,6 +765,7 @@ mod tests {
     fn selection_change_resets_activity_to_placeholder() {
         use crate::col3::{ActivityData, ActivityView};
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         s.activity = Arc::new(ActivityView::Days(ActivityData::default()));
         update(&mut s, Event::Key(CanopyKey::Down)); // select b
         assert_eq!(
@@ -946,6 +947,7 @@ mod tests {
             })
         };
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         // A feed for the unselected project must not paint a's column 3.
         update(&mut s, feed("/r/b"));
         assert_eq!(s.snapshot().col3.tokens, TokensView::NoActivity);

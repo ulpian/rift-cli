@@ -192,11 +192,9 @@ fn golden_chrome_bars_four_tiers() {
 
 // ---- the whole themed dashboard, per tier ------------------------
 
-/// The full dashboard (header · projects rail · detail · col3 placeholders ·
-/// hint · command) rendered through the real `view::draw` for `tier`. This is
-/// the load-bearing surface later cards/panels regenerate; here it
-/// pins the header/hint/command chrome and the rail (count badge, kind
-/// icons, status dots, the selection pill) at every capability tier.
+/// The Home dashboard rendered through the real `view::draw` for `tier`.
+/// Pins the header, tab navigation, stacked cards, hints, and command chrome
+/// at every capability tier.
 fn dashboard_frame(tier: Tier) -> Frame {
     use rift_canopy::{AppState, EntryKind, Project, ProjectStatus};
     let mut s = AppState::new(

@@ -154,11 +154,7 @@ fn read_capture_summary(
     scope: &crate::scope::WorktreeScope,
 ) -> CaptureSummary {
     let count = |table: &str| {
-        let predicate = if table == "checkpoint" {
-            scope.checkpoints("checkpoint.checkpoint_id")
-        } else {
-            scope.sessions("session_id")
-        };
+        let predicate = scope.capture_rows(table);
         let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
         u64::try_from(
             rt.block_on(store.query_opt_i64(&sql, &[scope.parameter()]))
@@ -171,14 +167,14 @@ fn read_capture_summary(
     // Native records may have no timestamp. In that case no newest checkpoint
     // can be inferred; neither hash order nor projection insertion order is time.
     let latest = rt.block_on(store.query(
-        &format!("SELECT checkpoint_id, created_at FROM checkpoint WHERE {} ORDER BY created_at DESC LIMIT 2", scope.checkpoints("checkpoint.checkpoint_id")),
+        &format!("SELECT checkpoint_id, created_at FROM checkpoint WHERE {} ORDER BY created_at DESC LIMIT 2", crate::scope::WorktreeScope::checkpoints("checkpoint.checkpoint_id")),
         &[scope.parameter()],
     )).ok().unwrap_or_default();
     let unknown = rt
         .block_on(store.query_opt_i64(
             &format!(
                 "SELECT COUNT(*) FROM checkpoint WHERE ({}) AND created_at = {CREATED_AT_UNKNOWN}",
-                scope.checkpoints("checkpoint.checkpoint_id")
+                crate::scope::WorktreeScope::checkpoints("checkpoint.checkpoint_id")
             ),
             &[scope.parameter()],
         ))

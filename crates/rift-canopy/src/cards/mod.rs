@@ -242,12 +242,19 @@ pub fn draw_one(
 }
 
 /// Draw a card border + title, returning the inner content rect.
-fn card_frame(theme: Theme, section: Section, title: &str, rect: Rect, frame: &mut Frame) -> Rect {
+fn card_frame(
+    theme: Theme,
+    section: Section,
+    title: &str,
+    rect: Rect,
+    focused: bool,
+    frame: &mut Frame,
+) -> Rect {
     crate::chrome::panel(
         frame,
         rect,
         title,
-        theme.border(section, false),
+        theme.border(section, focused),
         theme.title(section),
     )
 }

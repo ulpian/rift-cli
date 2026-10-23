@@ -31,8 +31,24 @@ impl WorktreeScope {
             GROUP BY w.session_id HAVING MIN(w.worktree_name)=MAX(w.worktree_name) AND MIN(w.worktree_name)=?)")
     }
 
-    pub(crate) fn checkpoints(&self, column: &str) -> String {
+    pub(crate) fn checkpoints(column: &str) -> String {
         format!("EXISTS (SELECT 1 FROM checkpoint_worktree rift_w WHERE rift_w.checkpoint_id={column} AND rift_w.worktree_name=?)")
+    }
+
+    /// Captured events carry native IDs; attribution carries canonical IDs.
+    /// A native ID shared by different canonical sessions cannot be attributed.
+    fn events(&self, column: &str) -> String {
+        let canonical = self.sessions("MIN(c.session_id)");
+        format!("{column} IN (SELECT c.native_session_id FROM capture_session_identity c \
+            GROUP BY c.native_session_id HAVING MIN(c.session_id)=MAX(c.session_id) AND {canonical})")
+    }
+
+    pub(crate) fn capture_rows(&self, table: &str) -> String {
+        match table {
+            "checkpoint" => Self::checkpoints("checkpoint.checkpoint_id"),
+            "captured_event" => self.events("session_id"),
+            _ => self.sessions("session_id"),
+        }
     }
 
     pub(crate) fn parameter(&self) -> Value {
@@ -44,8 +60,7 @@ impl WorktreeScope {
 mod tests {
     use super::*;
 
-    #[test]
-    fn scope_excludes_unknown_and_conflicting_observations_and_follows_moves() {
+    fn fixture() -> (SqliteStore, Runtime, String) {
         let store = SqliteStore::open_in_memory().unwrap();
         store.create_canonical_schema().unwrap();
         let rt = crate::store::runtime().unwrap();
@@ -106,10 +121,18 @@ mod tests {
             ))
             .unwrap();
         }
-        let relation = rt.block_on(rift_store::SessionWorktreeRow::relation(&store));
+        let relation = rt
+            .block_on(rift_store::SessionWorktreeRow::relation(&store))
+            .to_owned();
+        (store, rt, relation)
+    }
+
+    #[test]
+    fn scope_excludes_unknown_and_conflicting_observations_and_follows_moves() {
+        let (store, rt, relation) = fixture();
         for (member, expected) in [("main", 1), ("feature", 2), ("x' OR 1=1 --", 0)] {
             let scope = WorktreeScope {
-                relation: relation.into(),
+                relation: relation.clone(),
                 member: member.into(),
             };
             let sql = format!(
@@ -120,6 +143,46 @@ mod tests {
                 rt.block_on(store.query_opt_i64(&sql, &[scope.parameter()]))
                     .unwrap(),
                 Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn native_events_require_unambiguous_canonical_identity_and_attribution() {
+        let (store, rt, relation) = fixture();
+        for (session, agent, native) in [
+            ("a", "codex", "native-a"),
+            ("b", "codex", "shared"),
+            ("c", "claude-code", "shared"),
+            ("d", "codex", "native-d"),
+            ("e", "codex", "native-e"),
+        ] {
+            rt.block_on(store.insert(
+                "capture_session_identity",
+                &["session_id", "agent", "native_session_id", "schema_version"],
+                &[
+                    Value::text(session),
+                    Value::text(agent),
+                    Value::text(native),
+                    Value::Int(1),
+                ],
+            ))
+            .unwrap();
+        }
+        for (member, expected) in [("main", 1), ("feature", 1), ("x' OR 1=1 --", 0)] {
+            let scope = WorktreeScope {
+                relation: relation.clone(),
+                member: member.into(),
+            };
+            let sql = format!(
+                "SELECT COUNT(*) FROM capture_session_identity WHERE {}",
+                scope.events("native_session_id")
+            );
+            assert_eq!(
+                rt.block_on(store.query_opt_i64(&sql, &[scope.parameter()]))
+                    .unwrap(),
+                Some(expected),
+                "native identities must resolve unambiguously before attribution"
             );
         }
     }

@@ -55,7 +55,15 @@ fn viewer_headless_frame_is_bounded_and_creates_no_state() {
         .expect("spawn read-only viewer");
     assert_eq!(code(&out), 0, "viewer exits successfully: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("projects"), "projects rail: {stdout}");
+    assert!(stdout.contains("[<]"), "closed project drawer: {stdout}");
+    assert!(
+        stdout.contains("[Recall viewer]"),
+        "selected viewer tab: {stdout}"
+    );
+    assert!(
+        !stdout.contains("─ projects"),
+        "drawer starts closed: {stdout}"
+    );
     assert!(stdout.contains("checkpoints"), "checkpoint pane: {stdout}");
     assert!(stdout.contains("timeline"), "timeline pane: {stdout}");
     assert!(stdout.lines().count() <= 40, "one bounded frame: {stdout}");

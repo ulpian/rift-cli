@@ -76,7 +76,7 @@ fn latest_worktree_by_session(
              JOIN (SELECT session_id, MAX(first_observed_at) AS latest \
                    FROM {relation} GROUP BY session_id) l \
                ON l.session_id = w.session_id AND l.latest = w.first_observed_at \
-             GROUP BY w.session_id"
+             GROUP BY w.session_id HAVING MIN(w.worktree_name)=MAX(w.worktree_name)"
         ),
         &[],
     )) else {
@@ -165,9 +165,8 @@ pub fn compute_tokens(root: &Path, path: &str) -> FeedUpdate {
 /// the projection is absent/unreadable.
 ///
 /// The `turn` hop is a LEFT JOIN and so is the worktree lookup that follows
-/// it: the row set is **exactly** what the panel's total is summed over, with
-/// or without a session behind the call. That is what makes the by-worktree
-/// axis sum to the family total rather than merely agree with it.
+/// it: raw family totals retain calls with or without an attributed session.
+/// The public feed then selects only this checkout's attributed rows.
 fn read_token_rows(root: &Path, path: &str) -> Option<Vec<TokenRow>> {
     let db = projection_db_for_family_under(root, &project_family(Path::new(path))?);
     if !db.exists() {
@@ -186,8 +185,8 @@ fn read_token_rows(root: &Path, path: &str) -> Option<Vec<TokenRow>> {
         ))
         .ok()?;
     // Separate query, deliberately: a pre-v14 projection has no
-    // `session_worktree` table, and the token panel must not go blank because
-    // the axis is unavailable. An unreadable map reads every fact `unknown`.
+    // `session_worktree` table. Keep its raw facts as unknown; the worktree
+    // feed excludes them rather than assigning them to main.
     let worktrees = latest_worktree_by_session(&store, &rt);
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -420,6 +419,8 @@ mod tests {
         let proj = make_project(root.path(), "p");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
+        seed_session_turn(&store, &rt, "s1", "t1");
+        seed_observation(&store, &rt, "o1", "s1", "main", 1);
         seed_token_fact(&store, &rt, "c1", 1_000, (100, 400, 50, 200));
         seed_token_fact(&store, &rt, "c2", 2_000, (50, 600, 0, 100));
 
@@ -467,6 +468,10 @@ mod tests {
         // greatest `first_observed_at` is its current worktree.
         seed_observation(&store, &rt, "o2", "s-moved", "main", 1_000);
         seed_observation(&store, &rt, "o3", "s-moved", "swt-d", 2_000);
+        seed_session_turn(&store, &rt, "s-conflict", "t-conflict");
+        seed_observation(&store, &rt, "o4", "s-conflict", "main", 2_000);
+        seed_observation(&store, &rt, "o5", "s-conflict", "swt-d", 2_000);
+        seed_model_fact_in_turn(&store, &rt, "c5", "t-conflict", "m", 5_000, (7, 0, 0, 0));
         // 100 + 400 + 50 + 200 = 750 under `main`
         seed_model_fact_in_turn(&store, &rt, "c1", "t-main", "m", 1_000, (100, 400, 50, 200));
         // 300 under `swt-d`
@@ -477,16 +482,12 @@ mod tests {
         // the LEFT JOIN keeps it, which is why the sum holds)
         seed_model_fact_in_turn(&store, &rt, "c4", "t-missing", "m", 4_000, (5, 0, 0, 0));
 
-        let FeedPayload::Tokens { tokens, .. } = compute_tokens(root.path(), &proj).payload else {
-            panic!("expected a Tokens payload");
-        };
-        let TokensView::Data(t) = tokens else {
-            panic!("expected token data");
-        };
-        assert!((t.total - 1_115.0).abs() < f64::EPSILON, "{}", t.total);
+        let rows = read_token_rows(root.path(), &proj).expect("raw family facts");
+        let t = tokens_data(&rows);
+        assert!((t.total - 1_122.0).abs() < f64::EPSILON, "{}", t.total);
         assert_eq!(
             t.by_worktree.total(),
-            1_115,
+            1_122,
             "the breakdown sums to the family total"
         );
         assert_eq!(
@@ -502,16 +503,27 @@ mod tests {
                 },
                 WorktreeSlice {
                     name: None,
-                    tokens: 65,
+                    tokens: 72,
                 },
             ],
             "largest first; the moved session counts under its LATEST \
-             observation; both unattributable calls land in ONE unknown row"
+             observation; unattributable and conflicting calls land in ONE unknown row"
         );
         assert_eq!(
             t.by_worktree.family_only, 0,
             "every token fact reaches a session or fails to — none is \
              family-only, which is the serve trail's case"
+        );
+        let FeedPayload::Tokens {
+            tokens: TokensView::Data(main),
+            ..
+        } = compute_tokens(root.path(), &proj).payload
+        else {
+            panic!("main has attributed facts");
+        };
+        assert_eq!(
+            main.total, 750.0,
+            "the main feed excludes moved and unknown facts"
         );
     }
 
@@ -529,12 +541,8 @@ mod tests {
         seed_session_turn(&store, &rt, "s1", "t1");
         seed_token_fact(&store, &rt, "c1", 1_000, (10, 0, 0, 0));
 
-        let FeedPayload::Tokens { tokens, .. } = compute_tokens(root.path(), &proj).payload else {
-            panic!("expected a Tokens payload");
-        };
-        let TokensView::Data(t) = tokens else {
-            panic!("expected token data");
-        };
+        let rows = read_token_rows(root.path(), &proj).expect("raw family facts");
+        let t = tokens_data(&rows);
         assert_eq!(
             t.by_worktree.rows,
             vec![WorktreeSlice {
@@ -544,12 +552,20 @@ mod tests {
             "no observation ⇒ unknown, and unknown is None — never `main`"
         );
         assert_eq!(t.by_worktree.total(), 10);
+        assert!(
+            matches!(
+                compute_tokens(root.path(), &proj).payload,
+                FeedPayload::Tokens {
+                    tokens: TokensView::NoActivity,
+                    ..
+                }
+            ),
+            "unknown or other-member facts never appear in the main feed"
+        );
     }
 
-    /// The map query is defensive on purpose: an unreadable
-    /// `session_worktree` (a pre-v14 projection has no such table) must cost
-    /// the axis, never the panel. Proven by dropping the table under the
-    /// reader.
+    /// A pre-v14 projection retains its raw token facts as unknown.
+    /// The worktree feed excludes them instead of assigning them to main.
     #[test]
     fn a_projection_without_the_worktree_table_still_reads_its_tokens() {
         let root = tempfile::tempdir().unwrap();
@@ -571,14 +587,20 @@ mod tests {
             latest_worktree_by_session(&store, &rt).is_empty(),
             "an unreadable relation is an empty map, not an error"
         );
-        let FeedPayload::Tokens { tokens, .. } = compute_tokens(root.path(), &proj).payload else {
-            panic!("expected a Tokens payload");
-        };
-        let TokensView::Data(t) = tokens else {
-            panic!("the panel keeps its facts when the axis cannot be read");
-        };
+        let rows = read_token_rows(root.path(), &proj).expect("raw family facts");
+        let t = tokens_data(&rows);
         assert!((t.total - 7.0).abs() < f64::EPSILON);
         assert_eq!(t.by_worktree.total(), 7, "and still decomposes, as unknown");
+        assert!(
+            matches!(
+                compute_tokens(root.path(), &proj).payload,
+                FeedPayload::Tokens {
+                    tokens: TokensView::NoActivity,
+                    ..
+                }
+            ),
+            "unknown or other-member facts never appear in the main feed"
+        );
     }
 
     /// A session whose latest read a leading `cd` filed under a member is
@@ -617,12 +639,8 @@ mod tests {
         );
         seed_session_turn(&store, &rt, "s1", "t1");
         seed_model_fact_in_turn(&store, &rt, "c1", "t1", "m", 1_000, (10, 0, 0, 0));
-        let FeedPayload::Tokens { tokens, .. } = compute_tokens(root.path(), &proj).payload else {
-            panic!("expected a Tokens payload");
-        };
-        let TokensView::Data(t) = tokens else {
-            panic!("expected token data");
-        };
+        let rows = read_token_rows(root.path(), &proj).expect("raw family facts");
+        let t = tokens_data(&rows);
         assert_eq!(
             t.by_worktree.rows,
             vec![WorktreeSlice {
@@ -632,6 +650,16 @@ mod tests {
             "the worktree column names the member the read was filed under"
         );
 
+        assert!(
+            matches!(
+                compute_tokens(root.path(), &proj).payload,
+                FeedPayload::Tokens {
+                    tokens: TokensView::NoActivity,
+                    ..
+                }
+            ),
+            "unknown or other-member facts never appear in the main feed"
+        );
         rt.block_on(async {
             let conn = rift_store::Store::conn(&store).await.unwrap();
             conn.execute("DROP TABLE session_worktree_cd", &[]).await
@@ -652,6 +680,8 @@ mod tests {
         let proj = make_project(root.path(), "p");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
+        seed_session_turn(&store, &rt, "s1", "t1");
+        seed_observation(&store, &rt, "o1", "s1", "main", 1);
         // Output-only usage: input + read == 0.
         seed_token_fact(&store, &rt, "c1", 1_000, (0, 0, 0, 500));
         let update = compute_tokens(root.path(), &proj);
@@ -670,6 +700,8 @@ mod tests {
         let proj = make_project(root.path(), "p");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
+        seed_session_turn(&store, &rt, "s1", "t1");
+        seed_observation(&store, &rt, "o1", "s1", "main", 1);
         for i in 0..20i64 {
             seed_token_fact(&store, &rt, &format!("c{i}"), i * 7_000, (10, 20, 0, 5));
         }
@@ -696,6 +728,8 @@ mod tests {
         let proj = make_project(root.path(), "p");
         let store = open_proj(root.path(), &proj);
         let rt = runtime().unwrap();
+        seed_session_turn(&store, &rt, "s1", "t1");
+        seed_observation(&store, &rt, "o1", "s1", "main", 1);
         seed_token_fact(&store, &rt, "c1", 1_000, (-50, 100, -3, 20));
         let update = compute_tokens(root.path(), &proj);
         let FeedPayload::Tokens { tokens, breakdown } = update.payload else {
@@ -838,6 +872,10 @@ mod tests {
             let pb = make_project(root.path(), "b");
             let (sa, sb) = (open_proj(root.path(), &pa), open_proj(root.path(), &pb));
             let rt = runtime().unwrap();
+            for store in [&sa, &sb] {
+                seed_session_turn(store, &rt, "s1", "t1");
+                seed_observation(store, &rt, "o1", "s1", "main", 1);
+            }
             let mut a_total = 0.0f64;
             for (i, (t, v)) in a_facts.iter().enumerate() {
                 seed_token_fact(&sa, &rt, &format!("a{i}"), *t, (*v, 0, 0, 0));

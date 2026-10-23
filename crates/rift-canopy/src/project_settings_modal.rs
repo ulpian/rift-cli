@@ -74,7 +74,7 @@ impl ProjectSettingsModalState {
         let Some(view) = self.view.as_deref() else {
             return Vec::new();
         };
-        if view.settings.is_empty() {
+        if view.is_loading() {
             return Vec::new();
         }
         let mut items = view

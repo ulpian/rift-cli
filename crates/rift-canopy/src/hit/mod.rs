@@ -516,11 +516,10 @@ mod tests {
     fn header_actions_resolve_on_row_zero() {
         let v = vm(120, 40);
         let spans = crate::bars::header_action_spans(120, None);
-        assert_eq!(spans.len(), 4);
+        assert_eq!(spans.len(), 3);
         let expect = [
             Target::HeaderHelp,
             Target::HeaderPalette,
-            Target::HeaderEditor,
             Target::HeaderQuit,
         ];
         for (span, want) in spans.iter().zip(expect) {

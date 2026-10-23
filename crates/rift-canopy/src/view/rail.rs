@@ -387,19 +387,24 @@ mod tests {
             Size::new(120, 40),
         );
         s.app.splash.skip();
+        s.app.projects_open = true;
         let mut f = Frame::new(s.size);
         let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
         draw(&s.snapshot(), &mut b, &mut f);
 
         // The count badge shows "2" on the title row (col1 spans x=0..24).
-        let title: String = (0..24).map(|x| f.get(x, 1).unwrap().ch).collect();
+        let drawer = crate::dashboard::drawer_rect(s.size);
+        let title: String = (drawer.x..drawer.x + drawer.w)
+            .map(|x| f.get(x, drawer.y).unwrap().ch)
+            .collect();
+        let row = drawer.y + 1;
         assert!(title.contains('2'), "the project count badge: {title}");
 
         // Row 0 of the rail (inner y=2) is the selected `alpha` — its trailing
         // status dot is running-green, and the pill wash tints the row.
-        let dot_x = 22; // col1 inner right edge (width 24 → inner 1..23)
+        let dot_x = drawer.x + drawer.w - 2; // col1 inner right edge (width 24 → inner 1..23)
         assert_eq!(
-            f.get(dot_x, 2).unwrap().style.fg,
+            f.get(dot_x, row).unwrap().style.fg,
             status_color(ProjectStatus::Running {
                 since_ms: 0,
                 active_sessions: 1
@@ -407,16 +412,19 @@ mod tests {
             "the running dot is green"
         );
         assert_eq!(
-            f.get(2, 2).unwrap().style.bg,
+            f.get(2, row).unwrap().style.bg,
             SELECT_BG,
             "the selected row carries the pill wash"
         );
         // Row 1 (`beta`, unselected) has no pill wash — just the surface the
         // dashboard paints for itself (the background slot's canvas).
-        assert_eq!(f.get(2, 3).unwrap().style.bg, crate::theme::SURFACE_BG);
+        assert_eq!(
+            f.get(2, row + 1).unwrap().style.bg,
+            crate::theme::SURFACE_BG
+        );
         // …and its idle dot is the idle slate.
         assert_eq!(
-            f.get(dot_x, 3).unwrap().style.fg,
+            f.get(dot_x, row + 1).unwrap().style.fg,
             status_color(ProjectStatus::Idle)
         );
     }
@@ -424,6 +432,7 @@ mod tests {
     #[test]
     fn long_names_truncate_with_ellipsis() {
         let mut s = sized(120, 40);
+        s.app.projects_open = true;
         s.app.projects = vec![Project {
             name: "a-really-long-project-name-that-cannot-possibly-fit".into(),
             path: "/r/x".into(),

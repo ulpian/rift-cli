@@ -21,28 +21,28 @@ toml_edit = { workspace = true }
 # and the SHIPPED decision rather than a second opinion about either, so the
 # harness reflects whatever grammar the checkout it is built from has. All four
 # are leaves of the graph from here: nothing depends on xtask.
-rift-agent = { version = "0.0.1", path = "../crates/rift-agent" }
-rift-agent-claude-code = { version = "0.0.1", path = "../crates/rift-agent-claude-code" }
-rift-core = { version = "0.0.1", path = "../crates/rift-core" }
-rift-recall-validity = { version = "0.0.1", path = "../crates/rift-recall-validity" }
-rift-tokens = { version = "0.0.1", path = "../crates/rift-tokens" }
+rift-agent = { version = "1.0.0-alpha", path = "../crates/rift-agent" }
+rift-agent-claude-code = { version = "1.0.0-alpha", path = "../crates/rift-agent-claude-code" }
+rift-core = { version = "1.0.0-alpha", path = "../crates/rift-core" }
+rift-recall-validity = { version = "1.0.0-alpha", path = "../crates/rift-recall-validity" }
+rift-tokens = { version = "1.0.0-alpha", path = "../crates/rift-tokens" }
 
 [dev-dependencies]
 # Committed crate-graph adjacency snapshot.
 insta = { workspace = true }
 # The off arm's policy is asserted through the loader that actually reads it,
 # rather than through the bytes the harness wrote (dev-only).
-rift-recall-policy = { version = "0.0.1", path = "../crates/rift-recall-policy" }
+rift-recall-policy = { version = "1.0.0-alpha", path = "../crates/rift-recall-policy" }
 # The structure share of the list-shaped pull answers is measured on the
 # answers the real dispatcher ships, over the eval harness's own corpus seeded
 # into an in-memory projection, so the figure moves when a payload's shape
 # does (dev-only: the crate graph counts normal dependencies).
-rift-config = { version = "0.0.1", path = "../crates/rift-config" }
-rift-recall-eval = { version = "0.0.1", path = "../crates/rift-recall-eval" }
-rift-recall-ledger = { version = "0.0.1", path = "../crates/rift-recall-ledger" }
-rift-recall-serve = { version = "0.0.1", path = "../crates/rift-recall-serve" }
-rift-recall-substrate = { version = "0.0.1", path = "../crates/rift-recall-substrate" }
-rift-recall-types = { version = "0.0.1", path = "../crates/rift-recall-types" }
-rift-store = { version = "0.0.1", path = "../crates/rift-store" }
+rift-config = { version = "1.0.0-alpha", path = "../crates/rift-config" }
+rift-recall-eval = { version = "1.0.0-alpha", path = "../crates/rift-recall-eval" }
+rift-recall-ledger = { version = "1.0.0-alpha", path = "../crates/rift-recall-ledger" }
+rift-recall-serve = { version = "1.0.0-alpha", path = "../crates/rift-recall-serve" }
+rift-recall-substrate = { version = "1.0.0-alpha", path = "../crates/rift-recall-substrate" }
+rift-recall-types = { version = "1.0.0-alpha", path = "../crates/rift-recall-types" }
+rift-store = { version = "1.0.0-alpha", path = "../crates/rift-store" }
 tempfile = { workspace = true }
 tokio = { workspace = true }

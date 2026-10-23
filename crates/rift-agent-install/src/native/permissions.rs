@@ -167,12 +167,14 @@ fn codex_settings(path: &Path, text: &str, preset: &str) -> Result<Vec<u8>, Inst
             "Codex permission profiles are configured; keep them and change permissions in Codex",
         ));
     }
-    doc["sandbox_mode"] = toml_edit::value(if preset == "restricted" {
+    let sandbox = if preset == "restricted" {
         "read-only"
     } else {
         "workspace-write"
-    });
-    doc["approval_policy"] = toml_edit::value("on-request");
+    };
+    let table = doc.as_table_mut();
+    table.insert("sandbox_mode", toml_edit::value(sandbox));
+    table.insert("approval_policy", toml_edit::value("on-request"));
     Ok(doc.to_string().into_bytes())
 }
 

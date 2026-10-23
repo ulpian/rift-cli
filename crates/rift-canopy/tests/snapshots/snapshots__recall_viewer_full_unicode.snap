@@ -1,43 +1,44 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 161
 expression: "render_state_with_caps(&mut state, Capabilities::UNICODE)"
 ---
- RIFT  Canopy  *                                                              ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  2 ────────╮╭─ checkpoints · 2 ────────────────────────────╮╭─ timeline · a1b2c3d4e5f6 ────────────────────╮
-│># rift-cli          *││[ Filter ]                                    ││[ Full session ]                 [ Dashboard ]│
-│ # rift-site         o││> 2025-08-11T10:40Z · recorded                ││◆ Checkpoint summary                          │
-│                      ││  Add read-only Recall Viewer fixtures        ││  ┆ facts grouped by field; not an event chron│
-│                      ││  cp a1b2c3d4e5f6 · commit 0123456789ab       ││  • checkpoint a1b2c3d4e5f6 · 2025-08-11T10:40│
-│                      ││  rift/br refs/heads/rift/checkpoints/v1 +1 · ││    anchor: 0123456789ab                      │
-│                      ││  main +1 · compact · partial · !parse:1 · wt:││    chain: #42 · strategy: compact            │
-│                      ││  2025-08-10T06:53Z · commit                  ││    partial projection                        │
-│                      ││  … loading excerpt                           ││◆ Recall summary                              │
-│                      ││  cp 998877665544 · commit fedcba987654       ││  ┆ repository-wide totals are not checkpoint │
-│                      ││  legacy/br refs/heads/legacy/checkpoints/v1 ·││  • durable Recall state                      │
-│                      ││  no containing branch · strategy ? · unprojec││    coverage: 2/2 IDs · 3 origins · 8 serves  │
-│                      ││                                              ││◆ Transcript                                  │
-│                      ││                                              ││  ┆ redacted compact artifact order only      │
-│                      ││                                              ││  • user                                      │
-│                      ││                                              ││    Show the checkpoint-new transcript slice. │
-│                      ││                                              ││◆ Checkpoint assembly                         │
-│                      ││                                              ││  ┆ ordering unavailable                      │
-│                      ││                                              ││  • src/viewer.rs · +1 -1                     │
-│                      ││                                              ││    src/viewer.rs · +1 -1                     │
-│                      ││                                              ││          @ @@ -12,4 +12,4 @@                 │
-│                      ││                                              ││  13      - let mode = Writable;              │
-│                      ││                                              ││       13 + let mode = ReadOnly;              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-│                      ││                                              ││                                              │
-╰──────────────────────╯╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
+[<]   Home   Models   Activity   Token usage  [Recall viewer]  Settings                                             < >
+ rift-cli · branch unknown · /r/rift-cli
+ Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
+╭─ checkpoints · 2 ────────────────────╮╭─ timeline · a1b2c3d4e5f6 ────────────────────────────────────────────────────╮
+│[ Filter ]                            ││[ Full session ]                                                 [ Dashboard ]│
+│> 2025-08-11T10:40Z · recorded        ││◆ Checkpoint summary                                                          │
+│  Add read-only Recall Viewer fixtures││  ┆ facts grouped by field; not an event chronology                           │
+│  cp a1b2c3d4e5f6 · commit 0123456789a││  • checkpoint a1b2c3d4e5f6 · 2025-08-11T10:40Z                               │
+│  rift/br refs/heads/rift/checkpoints/││    anchor: 0123456789ab                                                      │
+│  main +1 · compact · partial · !parse││    chain: #42 · strategy: compact                                            │
+│  2025-08-10T06:53Z · commit          ││    partial projection                                                        │
+│  … loading excerpt                   ││◆ Recall summary                                                              │
+│  cp 998877665544 · commit fedcba98765││  ┆ repository-wide totals are not checkpoint events                          │
+│  legacy/br refs/heads/legacy/checkpoi││  • durable Recall state                                                      │
+│  no containing branch · strategy ? · ││    coverage: 2/2 IDs · 3 origins · 8 serves                                  │
+│                                      ││◆ Transcript                                                                  │
+│                                      ││  ┆ redacted compact artifact order only                                      │
+│                                      ││  • user                                                                      │
+│                                      ││    Show the checkpoint-new transcript slice.                                 │
+│                                      ││◆ Checkpoint assembly                                                         │
+│                                      ││  ┆ ordering unavailable                                                      │
+│                                      ││  • src/viewer.rs · +1 -1                                                     │
+│                                      ││    src/viewer.rs · +1 -1                                                     │
+│                                      ││          @ @@ -12,4 +12,4 @@                                                 │
+│                                      ││  13      - let mode = Writable;                                              │
+│                                      ││       13 + let mode = ReadOnly;                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full session · r Dashboard · / command
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                                    │

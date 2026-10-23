@@ -457,15 +457,7 @@ fn reload_catalogue(s: &mut AppState) -> Effects {
 fn move_viewer_pane(s: &mut AppState, key: CanopyKey) {
     let pane = s.app.viewer.pane;
     s.app.viewer.pane = match key {
-        CanopyKey::Tab | CanopyKey::BackTab => {
-            let order = [
-                ViewerPane::Checkpoints,
-                ViewerPane::Timeline,
-                ViewerPane::Command,
-            ];
-            let i = order.iter().position(|p| *p == pane).unwrap_or(0);
-            order[(i + if key == CanopyKey::Tab { 1 } else { 2 }) % order.len()]
-        }
+        CanopyKey::Tab | CanopyKey::BackTab => pane.cycle(key == CanopyKey::Tab),
         CanopyKey::Left => match pane {
             ViewerPane::Projects | ViewerPane::Checkpoints => ViewerPane::Projects,
             ViewerPane::Timeline | ViewerPane::Command => ViewerPane::Checkpoints,

@@ -279,9 +279,8 @@ fn repository_button_at(rect: Rect, collapsed: bool, col: u16, row: u16) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hit::fixtures::{body_of, editor_vm, project, state_with_detail, vm};
+    use crate::hit::fixtures::{editor_vm, project, state_with_detail, vm};
     use crate::hit::hit_test;
-    use crate::layout::solve;
     use crate::render::frame::Size;
     use crate::state::AppState;
 
@@ -300,17 +299,18 @@ mod tests {
 
     /// The settings chip in the full grid's physical `column`, solved from the
     /// same model the hit-test reads.
-    fn full_grid_settings_chip(view: &ViewModel, column: usize) -> (Rect, bool) {
-        let solved = solve_model(&view.layout, body_of(view.size));
-        let card_col = &solved.columns[column];
-        settings_chip_in(&card_col.card_kinds(), card_col.rect)
+    fn home_settings_chip(view: &ViewModel) -> (Rect, bool) {
+        settings_chip_in(
+            &[CardKind::Repository],
+            crate::dashboard::home_rects(view.size).0,
+        )
     }
 
     #[test]
     fn the_settings_button_hits_on_the_full_grid() {
         let mut s = state_with_detail(120, 40);
         let v = s.snapshot();
-        let (chip, collapsed) = full_grid_settings_chip(&v, 1);
+        let (chip, collapsed) = home_settings_chip(&v);
         assert!(!collapsed, "the full grid draws the expanded card");
         assert_eq!(
             hit_test(&v, chip.x, chip.y),
@@ -323,7 +323,7 @@ mod tests {
         let mut s = state_with_detail(120, 40);
         s.app.layout.columns[1].units.rotate_left(1);
         let v = s.snapshot();
-        let (chip, _) = full_grid_settings_chip(&v, 1);
+        let (chip, _) = home_settings_chip(&v);
         assert_eq!(
             hit_test(&v, chip.x, chip.y),
             Some(Target::RepositorySettings)
@@ -336,14 +336,7 @@ mod tests {
         let repository = s.app.layout.columns[1].units.remove(0);
         s.app.layout.columns[2].units.insert(1, repository);
         let v = s.snapshot();
-        let solved = solve_model(&v.layout, body_of(v.size));
-        let mixed = &solved.columns[2];
-        let (slots, _) = solve_column(&mixed.units, mixed.rect, 0);
-        let repo = slots
-            .into_iter()
-            .find(|slot| slot.unit == Unit::Card(CardKind::Repository))
-            .unwrap();
-        let chip = cards::repository_settings_rect(repo.rect, repo.collapsed);
+        let (chip, _) = home_settings_chip(&v);
         assert_eq!(
             hit_test(&v, chip.x, chip.y),
             Some(Target::RepositorySettings)
@@ -354,8 +347,7 @@ mod tests {
     fn the_settings_button_hits_on_the_two_column_tier() {
         let mut s = state_with_detail(60, 20);
         let v = s.snapshot();
-        let panels = crate::layout::two_col(body_of(v.size));
-        let (chip, _) = settings_chip_in(&CardKind::ALL, panels.col2);
+        let (chip, _) = home_settings_chip(&v);
         assert_eq!(
             hit_test(&v, chip.x, chip.y),
             Some(Target::RepositorySettings)
@@ -368,8 +360,7 @@ mod tests {
         let mut s = state_with_detail(40, 16);
         s.app.set_focus(Panel::Detail);
         let v = s.snapshot();
-        let (_, panel, _, _) = single_panel(body_of(v.size));
-        let (chip, collapsed) = settings_chip_in(&CardKind::ALL, panel);
+        let (chip, collapsed) = home_settings_chip(&v);
         assert!(collapsed);
         assert_eq!(chip.w, 10);
         assert_eq!(
@@ -409,16 +400,21 @@ mod tests {
 
     #[test]
     fn clicking_a_project_row_resolves_to_its_index() {
-        let v = vm(120, 40);
-        // col1 inner content begins at (1, 2): border at x=0,y=1; inset by 1.
-        assert_eq!(hit_test(&v, 3, 2), Some(Target::ProjectRow(0)));
-        assert_eq!(hit_test(&v, 3, 3), Some(Target::ProjectRow(1)));
-        assert_eq!(hit_test(&v, 3, 4), Some(Target::ProjectRow(2)));
+        let mut v = vm(120, 40);
+        v.projects_open = true;
+        let drawer = crate::dashboard::drawer_rect(v.size);
+        for index in 0..3 {
+            assert_eq!(
+                hit_test(&v, drawer.x + 3, drawer.y + 1 + index),
+                Some(Target::ProjectRow(usize::from(index)))
+            );
+        }
     }
 
     #[test]
     fn clicking_empty_col1_focuses_projects() {
-        let v = vm(120, 40);
+        let mut v = vm(120, 40);
+        v.projects_open = true;
         // A row well below the three project rows is still inside col1 → focus.
         assert_eq!(
             hit_test(&v, 3, 20),
@@ -430,7 +426,8 @@ mod tests {
     fn clicking_the_graphs_column_hits_a_section_or_focus() {
         let v = vm(120, 40);
         // col3 starts at x = col1.w + col2.w; sample a column well inside it.
-        let hit = hit_test(&v, 100, 6);
+        let recall = crate::dashboard::home_recall_content(v.size);
+        let hit = hit_test(&v, recall.x + 4, recall.y + 2);
         assert!(
             matches!(
                 hit,
@@ -459,16 +456,9 @@ mod tests {
     fn rail_action_bar_buttons_are_clickable() {
         let mut s = AppState::new(vec![project("a"), project("b")], Size::new(120, 40));
         s.app.splash.skip();
+        s.app.projects_open = true;
         let v = s.snapshot();
-        // Recompute the rail inner exactly as hit_test does (Full3Col).
-        let body = Rect {
-            x: 0,
-            y: 1,
-            w: 120,
-            h: 39,
-        };
-        let col1 = solve(body).col1;
-        let inner = inner_of(col1);
+        let inner = inner_of(crate::dashboard::drawer_rect(v.size));
         let (_list, buttons) = crate::view::rail_action_layout(inner, true);
         assert!(!buttons.is_empty(), "the rail has an action bar");
         // Every chip cell resolves to its target (pixels == targets).

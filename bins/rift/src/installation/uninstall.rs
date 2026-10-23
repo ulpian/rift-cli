@@ -31,7 +31,7 @@ pub(crate) fn run(args: &UninstallArgs) -> Result<Outcome> {
     std::fs::create_dir(&lock).map_err(|_| {
         refusal("another installation operation is running, or its lock needs inspection")
     })?;
-    let _lock = Lock(lock);
+    let install_lock = Lock(lock);
     install.recheck()?;
     for project in &projects {
         remove_integrations(project, &install.binary)?;
@@ -42,9 +42,9 @@ pub(crate) fn run(args: &UninstallArgs) -> Result<Outcome> {
         }
     }
     install.recheck()?;
-    let status = remove_executable(&install, &_lock.0)?;
+    let status = remove_executable(&install, &install_lock.0)?;
     #[cfg(windows)]
-    std::mem::forget(_lock); // The deferred child now owns the installation lock.
+    std::mem::forget(install_lock); // The deferred child now owns the installation lock.
     Ok(Outcome::ok(format!("Rift uninstall {status}. Captured Git history and repository policy were preserved. Local data: {}.", if args.purge { "purged" } else { "preserved" }), serde_json::json!({ "status": status, "operation": "uninstall", "purged": args.purge, "binary": install.binary })))
 }
 

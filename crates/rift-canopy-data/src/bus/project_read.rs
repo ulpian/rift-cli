@@ -895,12 +895,8 @@ mod tests {
     }
 
     #[test]
-    fn a_member_with_a_fresh_session_reads_running_and_the_family_aggregates_it() {
-        // the family view, in one fixture because they are one fact
-        // read at two scopes. The member's session cache sits under its own
-        // administrative gitdir, which the family row has never looked in:
-        // before this, a repository whose work happens in worktrees reported
-        // `Idle` on the row the developer actually watches.
+    fn live_status_counts_only_sessions_in_the_selected_checkout() {
+        // Main and linked members each report their own sessions.
         let root = tempfile::tempdir().unwrap();
         let (main, member) = two_member_family(root.path(), 1);
         provision(&member);
@@ -918,24 +914,17 @@ mod tests {
             ),
             "the member row counts the session driven in it"
         );
-        assert!(
-            matches!(
-                status(root.path(), &main.to_string_lossy()),
-                ProjectStatus::Running {
-                    active_sessions: 1,
-                    ..
-                }
-            ),
-            "and the family row aggregates it, from a registry it is not in"
+        assert_eq!(
+            status(root.path(), &main.to_string_lossy()),
+            ProjectStatus::Idle
         );
 
-        // A second session, this one in main: the family sums, and neither
-        // member is credited with the other's.
+        // A session in main changes its status without changing the member's.
         live_session(&main.join(".git"), "in-main", &main, now);
         assert!(matches!(
             status(root.path(), &main.to_string_lossy()),
             ProjectStatus::Running {
-                active_sessions: 2,
+                active_sessions: 1,
                 ..
             }
         ));
@@ -947,11 +936,9 @@ mod tests {
             }
         ));
 
-        // The family row names the members its count came from, so a badge of
-        // 2 can be read back to the checkouts that produced it; a member row
-        // names none, because its count is its own.
+        // The main row names only its own running checkout.
         let family = read_project(root.path(), &main.to_string_lossy());
-        assert_eq!(family.running_members, vec!["main", "member"]);
+        assert_eq!(family.running_members, vec!["main"]);
         assert!(read_project(root.path(), &member.to_string_lossy())
             .running_members
             .is_empty());
@@ -1180,7 +1167,17 @@ mod tests {
         let store = open_proj(root.path(), &proj);
         let rt = runtime();
         seed_session(&store, &rt, "s1", "A");
-        attribute_session(&store, &rt, "sess");
+        rt.block_on(store.insert(
+            "capture_session_identity",
+            &["session_id", "agent", "native_session_id", "schema_version"],
+            &[
+                Value::text("s1"),
+                Value::text("claude-code"),
+                Value::text("sess"),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
         seed_checkpoint(&store, &rt, "k1", 100);
         seed_checkpoint(&store, &rt, "k2", 200);
 

@@ -177,6 +177,8 @@ mod tests {
     #[test]
     fn selection_is_bounded() {
         let mut app = ready(vec![project("a"), project("b")]);
+        app.projects_open = true;
+        app.set_focus(Panel::Projects);
         assert_eq!(on_key(&mut app, CanopyKey::Char('k')), Action::None); // already top
         assert_eq!(app.selected, 0);
         on_key(&mut app, CanopyKey::Down);
@@ -197,6 +199,8 @@ mod tests {
     #[test]
     fn remove_and_reorder_keys_act_on_focused_projects() {
         let mut app = ready(vec![project("a"), project("b")]);
+        app.projects_open = true;
+        app.set_focus(Panel::Projects);
         assert_eq!(app.focus, Panel::Projects);
         assert_eq!(
             on_key(&mut app, CanopyKey::Char('d')),
@@ -233,13 +237,8 @@ mod tests {
     #[test]
     fn tab_navigation_order_through_on_key() {
         let mut app = ready(vec![project("a")]);
-        assert_eq!(app.focus, Panel::Projects);
-        for expected in [
-            Panel::Detail,
-            Panel::Graphs,
-            Panel::Command,
-            Panel::Projects,
-        ] {
+        assert_eq!(app.focus, Panel::Detail);
+        for expected in [Panel::Graphs, Panel::Command, Panel::Detail] {
             assert_eq!(on_key(&mut app, CanopyKey::Tab), Action::None);
             assert_eq!(app.focus, expected);
         }
@@ -280,6 +279,8 @@ mod tests {
         // Selection and inspection are one motion: Enter on the rail
         // focuses the detail column; the selection is untouched.
         let mut app = ready(vec![project("a"), project("b")]);
+        app.projects_open = true;
+        app.set_focus(Panel::Projects);
         assert_eq!(app.focus, Panel::Projects);
         on_key(&mut app, CanopyKey::Down);
         assert_eq!(on_key(&mut app, CanopyKey::Enter), Action::None);

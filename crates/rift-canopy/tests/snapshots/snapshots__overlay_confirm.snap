@@ -1,36 +1,37 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 737
 expression: render_state(&mut s)
 ---
- RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────#
-│># rift-c╭─ confirm ─────────────────────────────────────────────────────────────────[x]╮         #
-│ # rift-s│will run: rift projects prune                                                 │         #
-│         │target repository: /r/rift-cli                                                │         #
-│         │                                                                              │         #
-│         │< Enter: confirm >   [ Esc: cancel ]                                          │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │─────────#
-│         │                                                                              │─────────#
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │         #
-│         │                                                                              │─────────|
-│         │                                                                              │─────────|
-│         │                                                                              │tings    |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│         │                                                                              │         |
-│[+][^][v]╰──────────────────────────────────────────────────────────────────────────────╯         |
-╰──────────────────╯╰──────────────────────────────────────╯│                                      |
- ⏎ confirm  ·  esc cancel
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+[<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
+ rift-cli ╭─ confirm ─────────────────────────────────────────────────────────────────[x]╮
+ Models/ac│will run: rift projects prune                                                 │
+╭─ reposit│target repository: /r/rift-cli                                                │─────────╮
+│rift-cli │                                                                              │         │
+│path: /r/│< Enter: confirm >   [ Esc: cancel ]                                          │         │
+│* running│                                                                              │         │
+│Git statu│                                                                              │         │
+│No attrib│                                                                              │         │
+│Latest ch│                                                                              │         │
+│Harnesses│                                                                              │         │
+│[ Recall │                                                                              │ettings ]│
+╰─────────│                                                                              │─────────╯
+ Recall se│                                                                              │
+╭─ recall │                                                                              │─────────╮
+│recall of│                                                                              │         │
+│         │                                                                              │         │
+│[24h][7d]│                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

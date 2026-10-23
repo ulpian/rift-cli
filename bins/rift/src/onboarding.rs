@@ -9,24 +9,11 @@ use rift_core::{Result, RiftError};
 /// A fresh project opens staged settings after its first read-only status delivery.
 pub(crate) fn prepare(store: &rift_canopy_data::CanopyStore) -> Result<bool> {
     let cwd = std::env::current_dir().map_err(RiftError::from)?;
-    let paths = match rift_git::discover(&cwd) {
-        Ok(paths) => paths,
-        Err(_) => {
-            if !confirm_git_init(&cwd)? {
-                return Ok(false);
-            }
-            let status = std::process::Command::new("git")
-                .args(["init", "--"])
-                .arg(&cwd)
-                .status()
-                .map_err(RiftError::from)?;
-            if !status.success() {
-                return Err(RiftError::Other(
-                    "Git initialization failed; Rift setup was not started".into(),
-                ));
-            }
-            rift_git::discover(&cwd)?
-        }
+    let Some(paths) = rift_git::discover(&cwd)
+        .map(Some)
+        .or_else(|_| initialize_git(&cwd))?
+    else {
+        return Ok(false);
     };
     // The catalogue owns one row per family and derives linked worktrees as
     // children. Register the main checkout so launch can select the member
@@ -45,6 +32,23 @@ pub(crate) fn prepare(store: &rift_canopy_data::CanopyStore) -> Result<bool> {
         crate::hooks::now_ms(),
     )?;
     Ok(true)
+}
+
+fn initialize_git(path: &Path) -> Result<Option<rift_git::RepoPaths>> {
+    if !confirm_git_init(path)? {
+        return Ok(None);
+    }
+    let status = std::process::Command::new("git")
+        .args(["init", "--"])
+        .arg(path)
+        .status()
+        .map_err(RiftError::from)?;
+    if !status.success() {
+        return Err(RiftError::Other(
+            "Git initialization failed; Rift setup was not started".into(),
+        ));
+    }
+    rift_git::discover(path).map(Some)
 }
 
 fn confirm_git_init(path: &Path) -> Result<bool> {

@@ -180,7 +180,7 @@ impl StripRead<'_> {
         let sql = format!(
             "SELECT {col} / {DAY_MS} AS day, COUNT(*) FROM {table} \
              WHERE {col} >= {window_start} AND {} GROUP BY day",
-            self.scope.sessions("session_id")
+            self.scope.capture_rows(table)
         );
         let Ok(rows) = self
             .rt
@@ -221,7 +221,7 @@ impl StripRead<'_> {
              SELECT ct.effective_at / {DAY_MS} AS day, COUNT(*) FROM ct \
              WHERE ct.effective_at IS NOT NULL AND ct.effective_at >= {window_start} \
              AND {} GROUP BY day",
-            self.scope.checkpoints("ct.checkpoint_id")
+            crate::scope::WorktreeScope::checkpoints("ct.checkpoint_id")
         );
         let parameters = [Value::Int(CREATED_AT_UNKNOWN), self.scope.parameter()];
         let query = self.store.query(&sql, &parameters);
@@ -243,11 +243,7 @@ impl StripRead<'_> {
     /// "nothing missing" rather than an underflowed number.
     fn off_strip(&self, bars: &[DayBar]) -> OffStrip {
         let total = |table: &str| -> u64 {
-            let predicate = if table == "checkpoint" {
-                self.scope.checkpoints("checkpoint.checkpoint_id")
-            } else {
-                self.scope.sessions("session_id")
-            };
+            let predicate = self.scope.capture_rows(table);
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
             u64::try_from(
                 self.rt
@@ -272,7 +268,7 @@ impl StripRead<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feeds::fixtures::{make_project, open_proj, seed_event_for};
+    use crate::feeds::fixtures::{make_project, open_proj, seed_event_for, seed_main_worktree};
 
     /// Seed a `session` row started at `t`.
     fn seed_session(store: &SqliteStore, rt: &tokio::runtime::Runtime, id: &str, t: i64) {
@@ -296,6 +292,7 @@ mod tests {
             ],
         ))
         .unwrap();
+        seed_main_worktree(store, rt, id);
     }
 
     /// Seed a `checkpoint` created at `t`.
@@ -320,10 +317,40 @@ mod tests {
             ],
         ))
         .unwrap();
+        rt.block_on(store.insert(
+            "checkpoint_worktree",
+            &[
+                "checkpoint_id",
+                "worktree_token",
+                "worktree_name",
+                "is_linked",
+                "schema_version",
+            ],
+            &[
+                Value::text(id),
+                Value::text("0123456789ab"),
+                Value::text("main"),
+                Value::Int(0),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
     }
 
     /// Seed a `captured_event` occurring at `t`.
     fn seed_event(store: &SqliteStore, rt: &tokio::runtime::Runtime, key: &str, t: i64) {
+        rt.block_on(store.insert_or_ignore(
+            "capture_session_identity",
+            &["session_id", "agent", "native_session_id", "schema_version"],
+            &[
+                Value::text("s"),
+                Value::text("claude-code"),
+                Value::text("s"),
+                Value::Int(1),
+            ],
+        ))
+        .unwrap();
+        seed_main_worktree(store, rt, "s");
         seed_event_for(store, rt, key, "s", t);
     }
     /// `now` fixed at day 20_000 (2024-10-04), the 8th hour, so "today" is stable.

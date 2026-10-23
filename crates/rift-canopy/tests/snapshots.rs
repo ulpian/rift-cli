@@ -35,7 +35,7 @@ fn golden_dashboard_frame() {
 
 #[test]
 fn golden_dashboard_frame_wide() {
-    // A wider terminal guards the 20/40/40 tiling at a second size.
+    // A wider terminal guards the stacked Home view at a second size.
     let mut s = dashboard_state();
     s.size = Size::new(120, 40);
     let mut f = Frame::new(s.size);
@@ -139,13 +139,13 @@ fn golden_project_settings_hooks_conflict() {
 
 #[test]
 fn golden_layout_two_col() {
-    // 48 ≤ w < 76 → the two-column degraded grid.
+    // Medium-width Home keeps the repository and Recall stack.
     insta::assert_snapshot!("layout_two_col", render_at(60, 20));
 }
 
 #[test]
 fn golden_layout_single_panel() {
-    // w < 48 → one panel + a tab strip.
+    // Narrow Home retains its stack and scrollable tab navigation.
     insta::assert_snapshot!("layout_single_panel", render_at(36, 16));
 }
 
@@ -218,6 +218,10 @@ fn golden_col1_worktree_children() {
         Size::new(80, 18),
     );
     s.app.splash.skip();
+    rift_canopy::update(
+        &mut s,
+        rift_canopy::Event::Key(rift_canopy::CanopyKey::Left),
+    );
     let mut f = Frame::new(s.size);
     let mut b = AsciiBackend::new(Capabilities::empty());
     rift_canopy::view::draw(&s.snapshot(), &mut b, &mut f);

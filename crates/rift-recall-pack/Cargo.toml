@@ -11,13 +11,13 @@ description = "Context-pack compiler: edge-placed sections, hard token ceiling, 
 workspace = true
 
 [dependencies]
-rift-core = { version = "0.0.1", path = "../rift-core" }
-rift-recall-types = { version = "0.0.1", path = "../rift-recall-types" }
+rift-core = { version = "1.0.0-alpha", path = "../rift-core" }
+rift-recall-types = { version = "1.0.0-alpha", path = "../rift-recall-types" }
 # Sealed-constructor outputs (Envelope / NeutralDigest) are the only material
 # a SectionEntry can be built from: unvalidated text has no way in.
-rift-recall-validity = { version = "0.0.1", path = "../rift-recall-validity" }
+rift-recall-validity = { version = "1.0.0-alpha", path = "../rift-recall-validity" }
 # The one token-counting authority backs pack budgeting.
-rift-tokens = { version = "0.0.1", path = "../rift-tokens" }
+rift-tokens = { version = "1.0.0-alpha", path = "../rift-tokens" }
 # The input-keyed PackKey is a SHA-256 over the immutable pack inputs, so the
 # same inputs always name the same pack.
 sha2 = { workspace = true }

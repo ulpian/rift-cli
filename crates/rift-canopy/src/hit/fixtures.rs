@@ -5,7 +5,6 @@
 //! One module so every surface's tests click the same states the goldens
 //! draw, built one way.
 
-use crate::layout::Rect;
 use crate::render::frame::Size;
 use crate::state::{AppState, ViewModel};
 use crate::{EntryKind, Project, ProjectStatus};
@@ -175,15 +174,4 @@ pub(super) fn populated_viewer_state(w: u16, h: u16) -> AppState {
         notice: None,
     });
     state
-}
-
-/// The body under the header at `size` — the rect the dispatcher hands every
-/// tier, so a test solves the same grid the hit-test does.
-pub(super) fn body_of(size: Size) -> Rect {
-    Rect {
-        x: 0,
-        y: 1,
-        w: size.w,
-        h: size.h.saturating_sub(1),
-    }
 }

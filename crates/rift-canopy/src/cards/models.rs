@@ -23,7 +23,7 @@ pub(super) fn draw_models(
         .iter()
         .fold(0u64, |sum, model| sum.saturating_add(model.calls));
     let title = format!("models · Σ {total} calls");
-    let inner = card_frame(theme, Section::Models, &title, rect, frame);
+    let inner = card_frame(theme, Section::Models, &title, rect, ctx.focused, frame);
     if models.is_empty() {
         if let Some(placeholder) = model_projection_placeholder(ctx.detail.status) {
             line(frame, inner, 0, placeholder, theme.dim());

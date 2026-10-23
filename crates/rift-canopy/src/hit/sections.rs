@@ -422,18 +422,13 @@ mod tests {
         let mut s = AppState::new(vec![project("a")], size);
         s.app.splash.skip();
         s.size = size;
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Tokens;
         let v = s.snapshot();
-        let body = Rect {
-            x: 0,
-            y: 1,
-            w: 100,
-            h: 15,
-        };
-        let col3 = solve(body).col3;
+        let col3 = crate::dashboard::geometry(size).0;
         let bar = crate::chrome::scrollbar(
             col3,
             v.graphs_scroll,
-            usize::from(col3::content_rows(&col3::SectionId::ALL)),
+            usize::from(col3::content_rows(&[col3::SectionId::TokenUsage])),
         )
         .expect("the short column overflows, so a bar exists");
         // Every track cell resolves to the graphs scrollbar (pixels == targets).

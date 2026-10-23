@@ -423,26 +423,33 @@ mod tests {
     use crate::{EntryKind, Project, ProjectStatus};
 
     #[test]
-    fn draws_three_panels_and_command_bar() {
+    fn draws_home_boxes_tabs_and_command_bar() {
         let text = render_to_text(&vm());
-        // The header: mark + product + the right-aligned actions.
-        assert!(text.contains("RIFT"));
-        assert!(text.contains("Canopy"));
-        assert!(text.contains("? Help"));
-        assert!(text.contains("q Quit"));
-        assert!(text.contains("projects"));
-        assert!(text.contains("rift-cli"));
-        // Column 2 is the card stack, not a single "detail" panel.
-        assert!(text.contains("repository"));
-        assert!(text.contains("models"));
-        // The hint bar teaches the focused (projects) keymap.
-        assert!(text.contains("j/k navigate"));
-        // Column 3 regroups into its own panels, each honest
-        // about absent data (never a fake zero).
-        assert!(text.contains("token usage"));
-        assert!(text.contains("no token activity yet"));
-        assert!(text.contains("system"));
-        assert!(text.contains("recall"));
+        for label in [
+            "RIFT",
+            "Canopy",
+            "? Help",
+            "q Quit",
+            "[Home]",
+            "Models",
+            "Activity",
+            "Token usage",
+            "Recall viewer",
+            "Settings",
+            "rift-cli",
+            "repository",
+            "recall",
+            "command",
+            "← Projects",
+        ] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+        for retired in ["─ projects ", "─ dispatch ", "─ recap ", "─ system "] {
+            assert!(
+                !text.contains(retired),
+                "retired permanent panel: {retired}"
+            );
+        }
     }
 
     #[test]
@@ -458,9 +465,8 @@ mod tests {
 
     #[test]
     fn focused_panel_border_is_highlighted() {
-        use crate::render::frame::Color;
         use crate::Panel;
-        let accent = Color::Rgb(0x6c, 0xe0, 0x9a);
+        let accent = crate::theme::Section::Repository.accent();
 
         let mut s = AppState::new(
             vec![Project {
@@ -472,63 +478,66 @@ mod tests {
             Size::new(120, 40),
         );
         s.app.splash.skip();
-        s.app.focus = Panel::Projects;
+        s.app.focus = Panel::Detail;
         let mut f = Frame::new(s.size);
         let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
         draw(&s.snapshot(), &mut b, &mut f);
 
-        // col1's top-left corner sits at (0, 1), just below the title row.
-        let c1 = f.get(0, 1).unwrap();
+        // The focused Repository card uses its section accent.
+        let repo = crate::dashboard::home_rects(s.size).0;
+        let c1 = f.get(repo.x, repo.y).unwrap();
         assert_eq!(c1.ch, '╭');
         assert_eq!(
             c1.style.fg, accent,
             "the focused panel's border is accented"
         );
 
-        // At width 120 col1 is 24 wide, so col2's border begins at x = 24.
-        let c2 = f.get(24, 1).unwrap();
+        // Recall is unfocused and retains the idle border tone.
+        let recall = crate::dashboard::home_recall_content(s.size);
+        let c2 = f.get(recall.x, recall.y).unwrap();
         assert_eq!(c2.ch, '╭');
-        assert_ne!(
-            c2.style.fg, accent,
-            "an unfocused panel's border is not accented"
+        assert_eq!(
+            c2.style.fg,
+            s.snapshot().theme.border_idle(),
+            "an unfocused panel's border uses the idle tone"
         );
     }
 
     #[test]
-    fn two_col_stacks_detail_over_graphs() {
+    fn medium_home_stacks_repository_above_recall() {
         assert_eq!(choose_mode(Size::new(60, 20)), LayoutMode::TwoCol);
         let text = render_to_text(&sized(60, 20).snapshot());
-        assert!(text.contains("projects"));
-        // Both columns are short here and collapse to headlines — the card
-        // stack's `<name> · <status>` sits above the col-3 panels' placeholder.
-        let detail_row = text.lines().position(|l| l.contains("· idle"));
-        let graphs_row = text.lines().position(|l| l.contains("no token activity"));
+        let repository = text
+            .lines()
+            .position(|line| line.contains("repository") || line.contains("· idle"));
+        let recall = text.lines().position(|line| line.contains("recall"));
         assert!(
-            detail_row < graphs_row && detail_row.is_some(),
-            "the card stack sits above graphs in two-column mode ({detail_row:?} < {graphs_row:?})"
+            repository.is_some() && recall.is_some() && repository < recall,
+            "repository must precede Recall: {text}"
         );
+        assert!(!text.contains("─ projects "));
     }
 
     #[test]
-    fn single_panel_tab_switches_active() {
+    fn narrow_tabs_switch_the_visible_content() {
         assert_eq!(choose_mode(Size::new(40, 16)), LayoutMode::SinglePanel);
         let mut s = sized(40, 16);
-
-        s.app.focus = Panel::Detail;
-        let text = render_to_text(&s.snapshot());
-        assert!(text.contains("[Detail]"), "focused tab is bracketed");
-        // The detail column is the card stack; the (collapsed) repository card
-        // headline shows the project name + status.
-        assert!(text.contains("· idle"), "the card stack is shown");
-
-        s.app.focus = Panel::Graphs;
-        let text = render_to_text(&s.snapshot());
-        assert!(text.contains("[Graphs]"));
-        // The col-3 panels are short here → collapsed to the token headline.
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Models;
+        let models = render_to_text(&s.snapshot());
         assert!(
-            text.contains("no token activity"),
-            "the graphs panel is shown"
+            models.contains("[Models]"),
+            "active tab is visible: {models}"
         );
+        assert!(models.contains("models"));
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Tokens;
+        s.app.set_focus(crate::Panel::Graphs);
+        let tokens = render_to_text(&s.snapshot());
+        assert!(
+            tokens.contains("[Tokens]"),
+            "active tab is visible: {tokens}"
+        );
+        assert!(tokens.contains("no token activity"));
+        assert!(!tokens.contains("[Models]"));
     }
 
     #[test]
@@ -538,7 +547,7 @@ mod tests {
         // Enlarging recovers the full dashboard.
         let text = render_to_text(&sized(120, 40).snapshot());
         assert!(!text.contains("too small"));
-        assert!(text.contains("projects"));
+        assert!(text.contains("repository"));
     }
 
     #[test]
@@ -546,6 +555,7 @@ mod tests {
         // A hostile model name carrying an SGR escape must not reach any cell as a
         // control character — the ESC is stripped, the inert text remains.
         let mut s = state_with_detail(ProjectStatus::Idle, "evil\x1b[31mmodel");
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Models;
         let mut f = Frame::new(s.size);
         let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
         draw(&s.snapshot(), &mut b, &mut f);
@@ -575,10 +585,13 @@ mod tests {
     #[test]
     fn detail_renders_sections_when_ready() {
         let mut s = state_with_detail(ProjectStatus::Idle, "claude-opus");
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Models;
         let text = render_to_text(&s.snapshot());
         assert!(text.contains("models"));
         assert!(text.contains("claude-opus"));
-        assert!(text.contains("activity"));
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Activity;
+        let activity = render_to_text(&s.snapshot());
+        assert!(activity.contains("activity"));
         assert!(!text.contains("│ settings"));
         assert!(!text.contains("│ features"));
         assert!(!text.contains("│ integrations"));
@@ -598,6 +611,7 @@ mod tests {
         #[test]
         fn no_control_chars_in_any_cell_for_arbitrary_model(model in "(?s).*") {
             let mut s = state_with_detail(ProjectStatus::Idle, &model);
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Models;
             let mut f = Frame::new(s.size);
             let mut b = crate::render::AsciiBackend::new(crate::render::Capabilities::empty());
             draw(&s.snapshot(), &mut b, &mut f);

@@ -13,17 +13,17 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rift-config = { path = "../crates/rift-config", version = "0.0.1" }
-rift-agent = { path = "../crates/rift-agent", version = "0.0.1" }
-rift-core = { path = "../crates/rift-core", version = "0.0.1" }
-rift-shadow-redact = { path = "../crates/rift-shadow-redact", version = "0.0.1" }
-rift-shadow-attribution = { path = "../crates/rift-shadow-attribution", version = "0.0.1" }
-rift-shadow-hooks = { path = "../crates/rift-shadow-hooks", version = "0.0.1" }
-rift-recall-substrate = { path = "../crates/rift-recall-substrate", version = "0.0.1", default-features = false }
-rift-recall-serve = { path = "../crates/rift-recall-serve", version = "0.0.1" }
-rift-recall-doc = { path = "../crates/rift-recall-doc", version = "0.0.1" }
-rift-recall-search = { path = "../crates/rift-recall-search", version = "0.0.1" }
-rift-canopy = { path = "../crates/rift-canopy", version = "0.0.1", default-features = false }
+rift-config = { path = "../crates/rift-config", version = "1.0.0-alpha" }
+rift-agent = { path = "../crates/rift-agent", version = "1.0.0-alpha" }
+rift-core = { path = "../crates/rift-core", version = "1.0.0-alpha" }
+rift-shadow-redact = { path = "../crates/rift-shadow-redact", version = "1.0.0-alpha" }
+rift-shadow-attribution = { path = "../crates/rift-shadow-attribution", version = "1.0.0-alpha" }
+rift-shadow-hooks = { path = "../crates/rift-shadow-hooks", version = "1.0.0-alpha" }
+rift-recall-substrate = { path = "../crates/rift-recall-substrate", version = "1.0.0-alpha", default-features = false }
+rift-recall-serve = { path = "../crates/rift-recall-serve", version = "1.0.0-alpha" }
+rift-recall-doc = { path = "../crates/rift-recall-doc", version = "1.0.0-alpha" }
+rift-recall-search = { path = "../crates/rift-recall-search", version = "1.0.0-alpha" }
+rift-canopy = { path = "../crates/rift-canopy", version = "1.0.0-alpha", default-features = false }
 serde_json = "1"
 
 # Every parser that reads untrusted bytes gets a fuzz target as it lands.

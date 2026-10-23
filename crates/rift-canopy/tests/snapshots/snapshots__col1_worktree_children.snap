@@ -1,22 +1,23 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 225
 expression: frame_text(&f)
 ---
- RIFT  Canopy  *                      ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  3 ╮[recall] rift-cli · i [settings]╭─ token usage ────────────────#
-│># rift-cli  o│0 models · 0 calls              │(no token activity yet)       #
-│   > featu…  -│(no projection yet)             │                              #
-│ # rift-si…  o│                                │                              |
-│              │                                │                              |
-│              │                                │                              |
-│              │                                │                              |
-│              │                                │                              |
-│              │                                ╰──────────────────────────────|
-│              │                                ╭─ system ─────────────────────|
-│              │                                │                              |
-│[+][^][v][x]  │                                │context unavailable           |
-╰──────────────╯                                │- events · 5m: —              |
- j/k navigate  ·  ⏎ open  ·  a add  ·  d remove  ·  ⇧↑/↓ reorder  ·  / palette
+ RIFT  Canopy  *                                      ? Help  / Palette  q Quit
+[>]  [Home]  Models   Activity   Tokens   Recall   Settings                 < >
+ rift-cli · branch unknown · /r/rift-cli
+ Local facts only; Recall: family
+╭─ projects  3 ──────────────────────────────╮                        [settings]
+│># rift-cli                                o│
+│   > feature-wt                            -│
+│ # rift-site                               o│
+│                                            │
+│                                            │
+│                                            │─────────────────────────────────#
+│                                            │                                 |
+│[+][^][v][x]                                │                                 |
+╰────────────────────────────────────────────╯                                 |
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────╮
 │/█                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯

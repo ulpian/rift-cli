@@ -439,6 +439,11 @@ pub struct ProjectSettingsView {
 }
 
 impl ProjectSettingsView {
+    /// A thin view has no settings or integration facts from the data worker yet.
+    pub(crate) fn is_loading(&self) -> bool {
+        self.settings.is_empty() && self.integrations.is_empty()
+    }
+
     /// A selected setup adapter, or an already enabled integration.
     #[must_use]
     pub fn integration_selected(&self, agent: &str) -> bool {

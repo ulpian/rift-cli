@@ -1,25 +1,26 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 994
 expression: "render_state(&mut suggest_state(\"\"))"
 ---
- RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────#
-│># rift-cli      *││rift-cli (repo)                       ││(no token activity yet)               #
-│ # rift-site     o││path: /r/rift-cli                     ││                                      #
-│                  ││* running                             ││                                      #
-│                  ││[ Recall Viewer ] [ Project Settings ]││                                      #
-│                  │╰──────────────────────────────────────╯│                                      #
-│                  │╭─ models · Σ 0 calls ─────────────────╮│                                      #
-│                  ││(none yet)                            ││                                      #
-│                  ││                                      │╰──────────────────────────────────────#
-│                  ││                                      │╭─ system ─────────────────────────────#
-│                  ││                                      ││                                      #
-│                  ││                                      ││context unavailable                   #
-│                  ││                                      ││- events · 5m: —                      #
-│                  ││                                      ││- tokens · 5m: —                      #
-│                  ││                                      ││- serves · 5m: —                      #
-│                  ││                                      ││- projection storage: —               #
-│                  │╰──────────────────────────────────────╯╰──────────────────────────────────────|
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+[<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
+ rift-cli · branch unknown · /r/rift-cli
+ Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
+╭─ repository ─────────────────────────────────────────────────────────────────────────────────────╮
+│rift-cli (repo)                                                                                   │
+│path: /r/rift-cli                                                                                 │
+│* running                                                                                         │
+│Git status unavailable                                                                            │
+│No attributed capture facts available                                                             │
+│Latest checkpoint: unavailable                                                                    │
+│Harnesses:                                                                                        │
+│[ Recall Viewer ]                                                             [ Project Settings ]│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Recall setup required (Settings)
+╭─ recall ─────────────────────────────────────────────────────────────────────────────────────────╮
+│recall off — open Project Settings                                                                │
+│                                                                                                  │
 ╭─ suggest ────────────────────────────────────────────────────────────────────────────────────────╮
 │> help  /help                    show every palette verb                                          │
 │  status  /status                capture / projection health snapshot                             │
@@ -30,7 +31,7 @@ expression: "render_state(&mut suggest_state(\"\"))"
 │  doctor  /doctor                backend + memory-chain readiness                                 │
 │  add  /add                      register the launch directory                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
- ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

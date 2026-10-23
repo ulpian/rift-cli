@@ -586,7 +586,9 @@ impl App {
         let i = order.iter().position(|p| *p == self.focus).unwrap_or(0);
         let n = order.len();
         let j = if fwd { (i + 1) % n } else { (i + n - 1) % n };
-        self.set_focus(order[j]);
+        if let Some(&panel) = order.get(j) {
+            self.set_focus(panel);
+        }
     }
 
     /// Open a modal and focus its default control (index 0), so a
@@ -1017,11 +1019,11 @@ mod tests {
     #[test]
     fn focus_cycles_and_moves() {
         let mut app = App::new(vec![]);
-        assert_eq!(app.focus, Panel::Projects);
-        app.cycle_focus(true);
         assert_eq!(app.focus, Panel::Detail);
+        app.cycle_focus(true);
+        assert_eq!(app.focus, Panel::Graphs);
         app.cycle_focus(false);
-        assert_eq!(app.focus, Panel::Projects);
+        assert_eq!(app.focus, Panel::Detail);
         app.cycle_focus(false); // wraps to the last panel
         assert_eq!(app.focus, Panel::Command);
         // Left/Right stay within the columns; a no-op from the command row.

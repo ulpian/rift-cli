@@ -123,9 +123,16 @@ measured under the new rule, **63 raw − 1 classified = 62**, with headroom for
 ordinary growth on the same terms as before. The shed-only policy is unchanged;
 the number is frozen again at 80.
 
+**Owner decision, alpha release:** `pii.email` moves 60 → 61. The measured
+candidate has 61 raw email spans; the additional span is the dedicated GCS
+signing account in `release/storage.toml`. It is configuration, so it remains
+unclassified and is still redacted in captured text. This records its measured
+cost without changing detector behavior. The ceiling is frozen again at 61;
+all other ceilings and both classification rules stay unchanged.
+
 ```fp-baseline
 entropy.high = 80
-pii.email = 60
+pii.email = 61
 pii.ipv4 = 0
 pii.us_taxpayer_id = 0
 pii.us_taxpayer_id_labelled = 0

@@ -297,7 +297,7 @@ mod tests {
         s.app.project_settings.open(view);
         s.app.mode = crate::input::Mode::ProjectSettings;
         let v = s.snapshot();
-        let modal = crate::view::modal_rect(v.size);
+        let modal = crate::dashboard::geometry(v.size).0;
         let close = crate::view::modal_close_rect(modal).unwrap();
         assert_eq!(
             hit_test(&v, close.x, close.y),

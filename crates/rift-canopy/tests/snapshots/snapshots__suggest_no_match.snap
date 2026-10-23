@@ -1,36 +1,37 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 1012
 expression: "render_state(&mut suggest_state(\"zzzzzz\"))"
 ---
- RIFT  Canopy  *                                          ? Help  / Palette  e Panel Editor  q Quit
-╭─ projects  2 ────╮╭─ repository ─────────────────────────╮╭─ token usage ────────────────────────#
-│># rift-cli      *││rift-cli (repo)                       ││(no token activity yet)               #
-│ # rift-site     o││path: /r/rift-cli                     ││                                      #
-│                  ││* running                             ││                                      #
-│                  ││[ Recall Viewer ] [ Project Settings ]││                                      #
-│                  │╰──────────────────────────────────────╯│                                      #
-│                  │╭─ models · Σ 0 calls ─────────────────╮│                                      #
-│                  ││(none yet)                            ││                                      #
-│                  ││                                      │╰──────────────────────────────────────#
-│                  ││                                      │╭─ system ─────────────────────────────#
-│                  ││                                      ││                                      #
-│                  ││                                      ││context unavailable                   #
-│                  ││                                      ││- events · 5m: —                      #
-│                  ││                                      ││- tokens · 5m: —                      #
-│                  ││                                      ││- serves · 5m: —                      #
-│                  ││                                      ││- projection storage: —               #
-│                  │╰──────────────────────────────────────╯╰──────────────────────────────────────|
-│                  │╭─ activity · 30d ─────────────────────╮╭─ recall ─────────────────────────────|
-│                  ││(no projection yet)                   ││recall off — open Project Settings    |
-│                  ││                                      ││                                      |
-│                  ││                                      ││[24h][7d][30d][all]                   |
-│                  ││                                      ││                                      |
-│                  ││                                      ││                                      |
-│                  ││                                      ││                                      |
-│                  ││                                      ││                                      |
-│[+][^][v][x]      ││                                      ││                                      |
-╰──────────────────╯╰──────────────────────────────────────╯│                                      |
- ↑/↓ highlight  ·  tab insert  ·  ⏎ run  ·  esc close
+ RIFT  Canopy  *                                                          ? Help  / Palette  q Quit
+[<]  [Home]  Models   Activity   Token usage   Recall viewer   Settings                         < >
+ rift-cli · branch unknown · /r/rift-cli
+ Models/activity/tokens: this worktree; unknown attribution excluded. Recall: family.
+╭─ repository ─────────────────────────────────────────────────────────────────────────────────────╮
+│rift-cli (repo)                                                                                   │
+│path: /r/rift-cli                                                                                 │
+│* running                                                                                         │
+│Git status unavailable                                                                            │
+│No attributed capture facts available                                                             │
+│Latest checkpoint: unavailable                                                                    │
+│Harnesses:                                                                                        │
+│[ Recall Viewer ]                                                             [ Project Settings ]│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Recall setup required (Settings)
+╭─ recall ─────────────────────────────────────────────────────────────────────────────────────────╮
+│recall off — open Project Settings                                                                │
+│                                                                                                  │
+│[24h][7d][30d][all]                                                                               │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+← Projects  [/] tabs  s Settings  r Recall viewer  / command  q Quit
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────╮
 │/zzzzzz█                                                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

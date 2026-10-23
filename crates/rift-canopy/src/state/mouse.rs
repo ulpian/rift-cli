@@ -496,7 +496,7 @@ mod tests {
         assert!(!s.app.splash.done());
         let f = update(&mut s, click(3, 2));
         assert!(s.app.splash.done(), "the click dismissed the splash");
-        assert_eq!(s.app.focus, Panel::Projects, "and was otherwise swallowed");
+        assert_eq!(s.app.focus, Panel::Detail, "and was otherwise swallowed");
         assert!(matches!(f, Flow::Continue(e) if e.is_empty()));
     }
 
@@ -507,6 +507,7 @@ mod tests {
         // code clamped it away, so this is the regression the old code fails.
         let mut s = ready(vec![project("a")]);
         s.size = Size::new(100, 16);
+        s.app.dashboard_tab = crate::dashboard::DashboardTab::Tokens;
         s.app.clamp_scrolls(s.size);
         let wheel = |kind| {
             Event::Mouse(MouseInput {

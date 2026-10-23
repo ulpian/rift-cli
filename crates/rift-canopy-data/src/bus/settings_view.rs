@@ -445,13 +445,10 @@ fn permission_rows(
             if options.is_empty() {
                 return None;
             }
-            let revision = match permission_revision(dir, &integration.agent) {
-                Ok(revision) => revision,
-                Err(_) => {
-                    options.truncate(1);
-                    String::new()
-                }
-            };
+            let revision = permission_revision(dir, &integration.agent).unwrap_or_else(|_| {
+                options.truncate(1);
+                String::new()
+            });
             options.retain(|option| {
                 option.token == "keep"
                     || validate_permission(dir, &integration.agent, option.token, &revision).is_ok()

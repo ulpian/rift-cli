@@ -749,7 +749,12 @@ mod tests {
     /// test invented.
     fn close_x_target(s: &mut AppState) -> Option<Target> {
         let vm = s.snapshot();
-        let cr = crate::view::modal_close_rect(crate::view::modal_rect(vm.size)).unwrap();
+        let rect = if vm.mode == Mode::ProjectSettings {
+            crate::dashboard::geometry(vm.size).0
+        } else {
+            crate::view::modal_rect(vm.size)
+        };
+        let cr = crate::view::modal_close_rect(rect).unwrap();
         crate::hit::hit_test(&vm, cr.x, cr.y)
     }
 
@@ -929,11 +934,13 @@ mod tests {
         let start = Some(std::path::PathBuf::from("/home/dev"));
 
         let mut s = ready(vec![project("a")]);
+        open_drawer(&mut s);
         s.app.home_dir = Some("/home/dev".into());
         let e = effects_of(update(&mut s, Event::Key(CanopyKey::Char('a'))));
         assert_eq!((s.app.mode, e.list_dir), (Mode::Explorer, start.clone()));
 
         let mut s = ready(vec![project("a")]);
+        open_drawer(&mut s);
         s.app.home_dir = Some("/home/dev".into());
         let m = click_on(Target::RailAdd, &mut s);
         let e = effects_of(update(&mut s, Event::Mouse(m)));
@@ -1216,10 +1223,13 @@ mod tests {
         // A click on the second project row must produce the same selection and
         // the same bus effects as pressing Down from the top.
         let mut sk = ready(vec![project("a"), project("b"), project("c")]);
+        open_drawer(&mut sk);
         let fk = update(&mut sk, Event::Key(CanopyKey::Down));
         let mut sm = ready(vec![project("a"), project("b"), project("c")]);
-        // col1 inner content starts at (1,2); project rows at y=2,3,4.
-        let fm = update(&mut sm, click(3, 3));
+        open_drawer(&mut sm);
+        // Resolve the second row in the visible drawer through its drawn target.
+        let mouse = click_on(Target::ProjectRow(1), &mut sm);
+        let fm = update(&mut sm, Event::Mouse(mouse));
         assert_eq!(sk.app.selected, 1);
         assert_eq!(sm.app.selected, 1, "the click selected the clicked row");
         match (fk, fm) {
@@ -1234,13 +1244,15 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_column_focuses_that_panel() {
+    fn clicking_home_boxes_focuses_their_panels() {
         let mut s = ready(vec![project("a")]);
-        assert_eq!(s.app.focus, Panel::Projects);
-        update(&mut s, click(40, 10)); // deep in the detail column
         assert_eq!(s.app.focus, Panel::Detail);
-        update(&mut s, click(100, 6)); // deep in the graphs column
+        let recall = crate::dashboard::home_recall_content(s.size);
+        update(&mut s, click(recall.x + 4, recall.y + 2));
         assert_eq!(s.app.focus, Panel::Graphs);
+        let repo = crate::dashboard::home_rects(s.size).0;
+        update(&mut s, click(repo.x + 4, repo.y + 2));
+        assert_eq!(s.app.focus, Panel::Detail);
     }
 
     #[test]

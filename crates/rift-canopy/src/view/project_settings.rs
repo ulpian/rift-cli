@@ -64,7 +64,7 @@ pub fn project_settings_display_rows(
     };
     let items = state.items();
     let mut rows = Vec::new();
-    if view.settings.is_empty() {
+    if view.is_loading() {
         return vec![ProjectSettingsDisplayRow::Info(
             "Loading project settings…".into(),
         )];
@@ -874,11 +874,10 @@ mod tests {
         let rows = project_settings_display_rows(&state);
         let visible = 8;
         let scroll = project_settings_scroll(&state, &rows, visible);
-        let last = rows.len() - 1;
-        assert!(matches!(
-            rows[last],
-            ProjectSettingsDisplayRow::Remedy { .. }
-        ));
+        let last = rows
+            .iter()
+            .rposition(|row| matches!(row, ProjectSettingsDisplayRow::Remedy { .. }))
+            .unwrap();
         assert!(
             last < scroll + visible,
             "scroll {scroll}, rows {}",
@@ -898,10 +897,11 @@ mod tests {
         state.follow_cursor = false;
         let rows = project_settings_display_rows(&state);
         let scroll = project_settings_scroll(&state, &rows, visible);
-        assert!(matches!(
-            rows.last(),
-            Some(ProjectSettingsDisplayRow::Remedy { .. })
-        ));
+        let last_remedy = rows
+            .iter()
+            .rposition(|row| matches!(row, ProjectSettingsDisplayRow::Remedy { .. }))
+            .unwrap();
+        assert!(last_remedy >= scroll && last_remedy < scroll + visible);
         assert!(
             rows.len() <= scroll + visible,
             "scroll {scroll}, rows {}",

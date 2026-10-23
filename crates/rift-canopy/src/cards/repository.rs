@@ -145,7 +145,14 @@ pub(super) fn draw_repository(
         EntryKind::Repo => "repo",
         EntryKind::Worktree => "worktree",
     };
-    let inner = card_frame(theme, Section::Repository, "repository", rect, frame);
+    let inner = card_frame(
+        theme,
+        Section::Repository,
+        "repository",
+        rect,
+        ctx.focused,
+        frame,
+    );
     if collapsed {
         draw_repository_headline(ctx, theme, rect, inner, frame);
         return;
@@ -211,12 +218,10 @@ fn draw_repository_facts(
         line(frame, inner, 4, &capture, theme.dim());
     }
     if bottom > 5 {
-        let id = d
-            .capture
-            .last_checkpoint_id
-            .as_deref()
-            .map(|id| id.chars().take(12).collect::<String>())
-            .unwrap_or_else(|| "unavailable".into());
+        let id = d.capture.last_checkpoint_id.as_deref().map_or_else(
+            || "unavailable".into(),
+            |id| id.chars().take(12).collect::<String>(),
+        );
         line(
             frame,
             inner,

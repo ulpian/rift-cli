@@ -18,7 +18,7 @@ default = ["doc"]
 doc = ["dep:anydoc"]
 
 [dependencies]
-rift-core = { version = "0.0.1", path = "../rift-core" }
+rift-core = { version = "1.0.0-alpha", path = "../rift-core" }
 thiserror = { workspace = true }
 # The two-process conversion protocol (`wire`): one JSON object between the
 # parent half of this crate and the child `rift` re-spawns. Not optional and

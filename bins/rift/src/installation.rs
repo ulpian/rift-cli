@@ -131,7 +131,10 @@ pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
         .output()?;
     if !readback.status.success()
         || String::from_utf8_lossy(&readback.stdout).trim()
-            != format!("rift {}", &updated.version[1..])
+            != format!(
+                "rift {}",
+                updated.version.strip_prefix('v').unwrap_or_default()
+            )
     {
         return Err(refusal(
             "updated executable failed independent version readback",
@@ -163,7 +166,7 @@ fn regular_file(path: &Path) -> Result<()> {
 fn digest(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65536];
+    let mut buffer = [0u8; 8192];
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {

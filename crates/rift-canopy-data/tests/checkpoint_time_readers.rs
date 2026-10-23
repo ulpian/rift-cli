@@ -87,17 +87,24 @@ struct Enumerated {
 /// sentinel.
 const SITES: &[Enumerated] = &[
     Enumerated {
-        file: "bus/project_read.rs",
+        file: "bus/projection_detail.rs",
+        quoted: 1,
+        from_sql: 2,
+        via_cte: 0,
+        via_gather: 0,
+        note: "capture counts are worktree-scoped and sentinel-blind row counts. \
+               Latest checkpoint time and ID are optional: any unknown timestamp \
+               suppresses both; a tied latest timestamp suppresses its ID. \
+               The sentinel never reaches the display model.",
+    },
+    Enumerated {
+        file: "scope.rs",
         quoted: 1,
         from_sql: 1,
         via_cte: 0,
         via_gather: 0,
-        note: "count(\"checkpoint\") is a row count and is sentinel-blind by \
-               construction (it never reads the time column). The SELECT fills \
-               CaptureSummary::last_checkpoint_at_ms and is OPEN: on this \
-               repository's projection it answers -1, a sentinel typed as an \
-               epoch-millisecond instant. Nothing renders that field today, \
-               which is the only reason a sentinel is not on screen.",
+        note: "checkpoint_worktree supplies attribution only; this prefix match \
+               reads no timestamp. Missing attribution never means main.",
     },
     Enumerated {
         file: "feeds/activity.rs",

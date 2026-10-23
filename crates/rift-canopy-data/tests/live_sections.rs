@@ -45,8 +45,81 @@ fn make_project(root: &Path, name: &str) -> String {
     proj.to_string_lossy().into_owned()
 }
 
+/// Explicit attribution for fixtures whose facts belong to the main checkout.
+fn seed_main_worktree(store: &SqliteStore, rt: &tokio::runtime::Runtime, session: &str) {
+    rt.block_on(rift_store::record_session_worktree(
+        store,
+        &rift_store::SessionWorktreeRow {
+            observation_id: format!("main-{session}"),
+            session_id: session.into(),
+            worktree_token: "0123456789ab".into(),
+            worktree_name: "main".into(),
+            is_linked: 0,
+            work_tree: "/fixture".into(),
+            branch: None,
+            head_oid: None,
+            subagent_id: None,
+            basis: "payload_cwd".into(),
+            first_observed_at: 1,
+            schema_version: 1,
+        },
+    ))
+    .unwrap();
+}
+
 fn seed_token_fact(root: &Path, path: &str, call_id: &str, t: i64, classes: (i64, i64, i64, i64)) {
     seed_token_fact_for_model(root, path, call_id, "claude-fable-5", t, classes);
+}
+
+fn seed_model_turn(
+    store: &SqliteStore,
+    rt: &tokio::runtime::Runtime,
+    call_id: &str,
+    model: &str,
+    t: i64,
+) -> String {
+    let session = format!("session-{call_id}");
+    let turn = format!("turn-{call_id}");
+    rt.block_on(store.insert(
+        "session",
+        &[
+            "session_id",
+            "agent",
+            "model_primary",
+            "repo_id",
+            "started_at",
+            "schema_version",
+        ],
+        &[
+            Value::text(&session),
+            Value::text("claude-code"),
+            Value::text(model),
+            Value::text("r"),
+            Value::Int(t),
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+    seed_main_worktree(store, rt, &session);
+    rt.block_on(store.insert(
+        "turn",
+        &[
+            "turn_id",
+            "session_id",
+            "ordinal",
+            "started_at",
+            "schema_version",
+        ],
+        &[
+            Value::text(&turn),
+            Value::text(&session),
+            Value::Int(1),
+            Value::Int(t),
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+    turn
 }
 
 fn seed_token_fact_for_model(
@@ -60,6 +133,7 @@ fn seed_token_fact_for_model(
     let repo = repo_id_for(Path::new(path)).unwrap();
     let store = SqliteStore::open(projection_db_under(root, &repo)).unwrap();
     let rt = runtime().unwrap();
+    let turn = seed_model_turn(&store, &rt, call_id, model, t);
     rt.block_on(store.insert(
         "model_call",
         &[
@@ -71,7 +145,7 @@ fn seed_token_fact_for_model(
         ],
         &[
             Value::text(call_id),
-            Value::text("t1"),
+            Value::text(turn),
             Value::text(model),
             Value::Int(t),
             Value::Int(1),
@@ -108,6 +182,7 @@ fn seed_session_row(root: &Path, path: &str, id: &str, started_at: i64) {
     let store = SqliteStore::open(projection_db_under(root, &repo)).unwrap();
     let rt = runtime().unwrap();
     let canonical = rift_core::capture_session_row_id("claude-code", id);
+    seed_main_worktree(&store, &rt, &canonical);
     rt.block_on(store.insert(
         "session",
         &[
@@ -212,6 +287,24 @@ fn seed_checkpoint(root: &Path, path: &str, id: &str, t: i64) {
             Value::Int(t),
             Value::text("root"),
             Value::Null,
+            Value::Int(1),
+        ],
+    ))
+    .unwrap();
+    rt.block_on(store.insert(
+        "checkpoint_worktree",
+        &[
+            "checkpoint_id",
+            "worktree_token",
+            "worktree_name",
+            "is_linked",
+            "schema_version",
+        ],
+        &[
+            Value::text(id),
+            Value::text("0123456789ab"),
+            Value::text("main"),
+            Value::Int(0),
             Value::Int(1),
         ],
     ))
@@ -428,7 +521,9 @@ fn assert_the_reducer_applied_both_feeds(vm: &ViewModel) {
 fn assert_both_live_sections_render(vm: &ViewModel) {
     let mut frame = Frame::new(vm.size);
     let mut ascii = AsciiBackend::new(Capabilities::empty());
-    rift_canopy::view::draw(vm, &mut ascii, &mut frame);
+    let mut tokens_vm = vm.clone();
+    tokens_vm.dashboard_tab = rift_canopy::dashboard::DashboardTab::Tokens;
+    rift_canopy::view::draw(&tokens_vm, &mut ascii, &mut frame);
     let text = frame_text(&frame);
     assert!(text.contains("token usage  Σ 8.1k"), "live total:\n{text}");
     assert!(!text.contains("no token activity yet"));
@@ -440,6 +535,10 @@ fn assert_both_live_sections_render(vm: &ViewModel) {
         text.contains("output 1.2k cache-write 100") && text.contains("read 88%"),
         "the second compact footer row and read fraction render:\n{text}"
     );
+    let mut models_vm = vm.clone();
+    models_vm.dashboard_tab = rift_canopy::dashboard::DashboardTab::Models;
+    rift_canopy::view::draw(&models_vm, &mut ascii, &mut frame);
+    let text = frame_text(&frame);
     assert!(
         text.contains("models · Σ 2 calls"),
         "the repository-scoped model total renders:\n{text}"
@@ -485,6 +584,7 @@ fn activity_projection_flows_through_reducer_into_thirty_day_heat_strips() {
         Size::new(120, 50),
     );
     state.app.splash.skip();
+    state.app.dashboard_tab = rift_canopy::dashboard::DashboardTab::Activity;
     let update = rift_canopy_data::feeds::compute_activity(root.path(), &path, NOW);
     let _ = rift_canopy::state::update(&mut state, Event::Feed(update));
 

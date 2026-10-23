@@ -11,8 +11,8 @@ description = "First-party Rift adapter for Claude Code: maps its native hook li
 workspace = true
 
 [dependencies]
-rift-core = { version = "0.0.1", path = "../rift-core" }
-rift-agent = { version = "0.0.1", path = "../rift-agent" }
+rift-core = { version = "1.0.0-alpha", path = "../rift-core" }
+rift-agent = { version = "1.0.0-alpha", path = "../rift-agent" }
 serde_json = { workspace = true }
 
 [dev-dependencies]

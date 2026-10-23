@@ -58,17 +58,23 @@ pub enum ViewerPane {
 }
 
 impl ViewerPane {
-    /// Cycle in the locked Projects → Checkpoints → Timeline → Command order.
+    /// Cycle visible Checkpoints → Timeline → Command panes; the drawer is separate.
     #[must_use]
     pub fn cycle(self, forward: bool) -> Self {
         let order = [Self::Checkpoints, Self::Timeline, Self::Command];
-        let index = order.iter().position(|pane| *pane == self).unwrap_or(0);
+        let Some(index) = order.iter().position(|pane| *pane == self) else {
+            return if forward {
+                Self::Checkpoints
+            } else {
+                Self::Command
+            };
+        };
         let next = if forward {
             (index + 1) % order.len()
         } else {
             (index + order.len() - 1) % order.len()
         };
-        order.get(next).copied().unwrap_or_default()
+        order.get(next).copied().unwrap_or(Self::Checkpoints)
     }
 }
 
@@ -110,7 +116,7 @@ mod tests {
     #[test]
     fn viewer_focus_order_wraps_both_directions() {
         assert_eq!(ViewerPane::Projects.cycle(true), ViewerPane::Checkpoints);
-        assert_eq!(ViewerPane::Command.cycle(true), ViewerPane::Projects);
+        assert_eq!(ViewerPane::Command.cycle(true), ViewerPane::Checkpoints);
         assert_eq!(ViewerPane::Projects.cycle(false), ViewerPane::Command);
     }
 }

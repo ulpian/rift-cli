@@ -1,20 +1,21 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
+assertion_line: 149
 expression: "render_at(36, 16)"
 ---
  RIFT  Canopy  *
-[Projects] Detail  Graphs
-╭─ projects  2 ────────────────────╮
-│># rift-cli                      *│
-│ # rift-site                     o│
-│                                  │
-│                                  │
-│                                  │
-│                                  │
-│                                  │
-│[+][^][v][x]                      │
-╰──────────────────────────────────╯
- j/k navigate  ·  ⏎ open  ·  a add
+[<]  [Home]  Models   Activity  < >
+ rift-cli · branch unknown · /r/rif
+ Local facts only; Recall: family
+[recall] rift-cli · runni [settings]
+
+
+
+ Recall setup required (Settings)
+╭─ recall ─────────────────────────#
+│recall off — open Project Settings|
+│                                  |
+← Projects  [/] tabs  s Settings  r
 ╭─ command ────────────────────────╮
 │/█                                │
 ╰──────────────────────────────────╯

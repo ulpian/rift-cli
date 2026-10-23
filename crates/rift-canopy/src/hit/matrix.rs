@@ -324,7 +324,7 @@ fn the_recall_viewer_exposes_every_pane_target() {
     assert_scanned(
         &mut viewer,
         &[
-            Target::ProjectRow(0),
+            Target::ProjectDrawer,
             Target::ViewerFilter,
             Target::ViewerLatest,
             Target::ViewerCheckpointRow(0),
@@ -335,12 +335,13 @@ fn the_recall_viewer_exposes_every_pane_target() {
             Target::Scrollbar(ScrollRegion::ViewerTimeline),
         ],
     );
+    crate::state::update(&mut viewer, crate::Event::Key(crate::CanopyKey::Left));
+    assert_scanned(&mut viewer, &[Target::ProjectRow(0)]);
 }
 
 #[test]
 fn each_single_column_viewer_pane_exposes_its_tab() {
     for pane in [
-        crate::recall_viewer::ViewerPane::Projects,
         crate::recall_viewer::ViewerPane::Checkpoints,
         crate::recall_viewer::ViewerPane::Timeline,
     ] {

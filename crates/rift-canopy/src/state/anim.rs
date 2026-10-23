@@ -323,6 +323,7 @@ mod tests {
     #[test]
     fn selection_change_arms_a_decaying_pulse() {
         let mut s = ready(vec![project("a"), project("b")]);
+        open_drawer(&mut s);
         update(&mut s, Event::Key(CanopyKey::Down)); // select b
         assert_eq!(s.select_pulse, 1.0, "a cursor move arms the pulse");
         assert!(s.anim_active());

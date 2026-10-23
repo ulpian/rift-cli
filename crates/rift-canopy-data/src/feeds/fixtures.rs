@@ -38,6 +38,28 @@ pub(super) fn open_proj(root: &Path, path: &str) -> SqliteStore {
     let repo = repo_id_for(Path::new(path)).unwrap();
     SqliteStore::open(projection_db_under(root, &repo)).unwrap()
 }
+/// Explicit attribution for fixtures whose facts belong to the main checkout.
+pub(super) fn seed_main_worktree(store: &SqliteStore, rt: &tokio::runtime::Runtime, session: &str) {
+    rt.block_on(rift_store::record_session_worktree(
+        store,
+        &rift_store::SessionWorktreeRow {
+            observation_id: format!("main-{session}"),
+            session_id: session.into(),
+            worktree_token: "0123456789ab".into(),
+            worktree_name: "main".into(),
+            is_linked: 0,
+            work_tree: "/fixture".into(),
+            branch: None,
+            head_oid: None,
+            subagent_id: None,
+            basis: "payload_cwd".into(),
+            first_observed_at: 1,
+            schema_version: 1,
+        },
+    ))
+    .unwrap();
+}
+
 /// Seed one `(model_call, token_usage)` pair — the fixture helper the feed
 /// tests (and the recall/nic feeds' tests) share.
 pub(super) fn seed_token_fact(

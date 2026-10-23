@@ -34,6 +34,12 @@ pub(super) fn ready(projects: Vec<Project>) -> AppState {
     s
 }
 
+pub(super) fn open_drawer(state: &mut AppState) {
+    if !state.app.projects_open {
+        update(state, Event::Key(CanopyKey::Left));
+    }
+}
+
 pub(super) fn project_settings_state(initialization: crate::ProjectInitialization) -> AppState {
     let mut s = ready(vec![project("a")]);
     let status = match initialization {
