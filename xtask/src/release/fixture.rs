@@ -42,6 +42,9 @@ impl Fixture {
         }
         for (key, value) in [
             ("RIFT_NO_KEYCHAIN", "1"),
+            // HOME is the operator's own: no fixture may register a PATH entry in
+            // their startup files or hand the terminal to a fresh shell.
+            ("RIFT_NO_MODIFY_PATH", "1"),
             ("GIT_CONFIG_GLOBAL", "/dev/null"),
             ("GIT_CONFIG_SYSTEM", "/dev/null"),
             ("GIT_CONFIG_NOSYSTEM", "1"),

@@ -1,7 +1,19 @@
 # Installs Rift for the current user. Project setup happens only when they run rift.
+# `irm | iex` evaluates this text in the caller's own session, so everything runs
+# inside one child scope: strict mode, the stop-on-error preference, the helper
+# functions and every variable end with the installer instead of staying behind
+# in the user's PowerShell window. Only PATH is meant to outlive it.
+& {
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 redraws a progress bar per chunk, which slows a download tenfold.
+$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# The setting is process-wide, so it is only ever widened. Zero means "follow the
+# operating system", which already allows TLS 1.2 and newer: leave that alone.
+$tls = [Net.ServicePointManager]::SecurityProtocol
+if ([int]$tls -ne 0 -and -not ([int]$tls -band [int][Net.SecurityProtocolType]::Tls12)) {
+    [Net.ServicePointManager]::SecurityProtocol = $tls -bor [Net.SecurityProtocolType]::Tls12
+}
 
 function Fetch-RiftFile([string]$Url, [string]$Destination) {
     $uri = $null
@@ -25,7 +37,42 @@ function Set-RiftPreferences {
     if ($env:RIFT_NONINTERACTIVE -ne '1' -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
         & $binary install
         if ($LASTEXITCODE -ne 0) { throw 'Binary installed; preferences incomplete. Run rift install to resume.' }
-    } else { Write-Output 'Run rift install in a terminal to choose default harnesses and features.' }
+    } else { Write-Output 'Run rift install in a terminal to choose default harnesses.' }
+}
+
+# The user PATH is read unexpanded: writing back an expanded value would freeze
+# every %VARIABLE% another program stored there. `irm | iex` runs in the caller's
+# session, so updating the process PATH makes rift resolve in this window at once.
+function Add-RiftToPath([string]$Directory) {
+    if ($env:RIFT_NO_MODIFY_PATH -eq '1' -or $Directory.Contains(';')) { return $false }
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { return $false }
+    try {
+        $stored = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $entries = @($stored -split ';' | Where-Object { $_ })
+        $wanted = $Directory.TrimEnd('\')
+        $listed = @($entries | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $wanted })
+        if ($listed.Length -eq 0) {
+            $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+            if ($stored) { $kind = $key.GetValueKind('Path') }
+            $key.SetValue('Path', ((@($Directory) + $entries) -join ';'), $kind)
+            # Setting then clearing a throwaway variable broadcasts the change to open applications.
+            $probe = 'RIFT_PATH_' + [Guid]::NewGuid().ToString('N')
+            [Environment]::SetEnvironmentVariable($probe, '1', 'User')
+            [Environment]::SetEnvironmentVariable($probe, [NullString]::Value, 'User')
+        }
+    } finally { $key.Close() }
+    if (@($env:PATH -split ';' | Where-Object { $_.TrimEnd('\') -ieq $wanted }).Length -eq 0) { $env:PATH = "$Directory;$env:PATH" }
+    return $true
+}
+function Complete-RiftInstall {
+    if ($env:RIFT_UPDATE -eq '1') { return }
+    $registered = $false
+    try { $registered = Add-RiftToPath $bin } catch { $registered = $false }
+    if ($registered) {
+        Write-Output "$bin is on your user PATH. Terminals that are already open need a restart."
+        Write-Output 'Run rift inside your project to choose harnesses and permissions.'
+    } else { Write-Output "Add $bin to your user PATH, then open a terminal and run rift inside your project." }
 }
 
 $bin = $env:RIFT_BIN_DIR
@@ -79,6 +126,7 @@ try {
     if ((Test-Path -LiteralPath $binary) -and $record[2] -eq $version) {
         Write-Output "Rift $version is already installed."
         Set-RiftPreferences
+        Complete-RiftInstall
         return
     }
     # The x64 build also runs on Windows ARM64 through Windows' x64 emulation.
@@ -150,11 +198,10 @@ if ((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInv
     Write-Output "  *--*--*  Binary installation complete"
     Write-Output "Installed Rift $version at $binary"
     Set-RiftPreferences
-    if (($env:PATH -split ';') -notcontains $bin) {
-        Write-Output "Add $bin to your user PATH, then open a terminal and run rift inside your project."
-    } else { Write-Output 'Run rift inside your project to choose harnesses and permissions.' }
+    Complete-RiftInstall
 } finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     $lock.Dispose()
     [IO.File]::Delete($lockPath)
+}
 }

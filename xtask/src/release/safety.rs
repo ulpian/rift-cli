@@ -130,11 +130,51 @@ fn corrupt_and_linked() -> Result<()> {
     )
 }
 
+/// The startup-file line is written once, on its own line, for the shell the
+/// user logs in with, and never when they opted out. HOME is the fixture root
+/// here, so nothing outside the disposable directory is touched.
+fn path_registration() -> Result<()> {
+    const MARK: &str = "# rift installer";
+    let (mut fixture, _) = prepare()?;
+    let home = fixture.root().to_path_buf();
+    fixture.set("HOME", home.as_os_str());
+    fixture.set("SHELL", "/bin/zsh");
+    write(&home.join(".zshrc"), "alias keep=1")?;
+    install(&fixture, true)?;
+    ensure(
+        !home.join(".profile").exists() && read(&home.join(".zshrc"))? == "alias keep=1",
+        "opted-out install edited a startup file",
+    )?;
+    fixture.set("RIFT_NO_MODIFY_PATH", "0");
+    install(&fixture, true)?;
+    install(&fixture, true)?;
+    let zshrc = read(&home.join(".zshrc"))?;
+    let entry =
+        "case \":$PATH:\" in *\":$HOME/bin:\"*) ;; *) export PATH=\"$HOME/bin:$PATH\" ;; esac";
+    ensure(
+        zshrc == format!("alias keep=1\n{entry} {MARK}\n"),
+        &format!("unexpected zsh startup file:\n{zshrc}"),
+    )?;
+    fixture.set("SHELL", "/bin/bash");
+    install(&fixture, true)?;
+    for name in [".bashrc", ".profile"] {
+        ensure(
+            read(&home.join(name))?.matches(MARK).count() == 1,
+            &format!("bash startup file {name} not registered exactly once"),
+        )?;
+    }
+    ensure(
+        read(&home.join(".zshrc"))? == zshrc,
+        "another shell's startup file was edited",
+    )
+}
+
 pub(super) fn check() -> Result<()> {
     versions()?;
     foreign()?;
     race()?;
     corrupt_and_linked()?;
-    println!("PASS offline installer safety: fresh/update, ownership, concurrent edits, checksum and symlink refusal");
+    path_registration()?;
+    println!("PASS offline installer safety: fresh/update, ownership, concurrent edits, checksum, symlink refusal and PATH registration");
     Ok(())
 }

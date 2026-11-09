@@ -1,6 +1,8 @@
 #!/bin/sh
 # Install an invited alpha, then choose per-user defaults without changing a project.
 set -eu
+# Staging and the receipt are private; the shell this may end in gets the user's own mask back.
+user_umask=$(umask)
 umask 077
 
 die() { printf 'rift: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +37,89 @@ preferences() {
     elif [ "${RIFT_NONINTERACTIVE:-0}" != 1 ] && [ -t 2 ]; then
         configure_terminal 3<&2
     else
-        printf 'Run rift install in a terminal to choose default harnesses and features.\n'
+        printf 'Run rift install in a terminal to choose default harnesses.\n'
+    fi
+}
+
+# A directory outside PATH is registered in the startup file the user's shell reads.
+# The line guards itself, so reinstalling or nesting shells never duplicates the
+# entry, and it ends in a marker that makes it easy to find and remove by hand.
+on_path() { case ":${PATH:-}:" in *":$bin_dir:"*) return 0 ;; esac; return 1; }
+append_line() {
+    [ ! -d "$1" ] || return 1
+    if [ -f "$1" ]; then
+        ! grep -Fqx -- "$2" "$1" || return 0
+        [ -z "$(tail -c 1 "$1" 2>/dev/null)" ] || { printf '\n' >>"$1"; } 2>/dev/null || return 1
+    else
+        mkdir -p "$(dirname "$1")" 2>/dev/null || return 1
+    fi
+    { printf '%s\n' "$2" >>"$1"; } 2>/dev/null
+}
+register_path() {
+    [ "${RIFT_NO_MODIFY_PATH:-0}" != 1 ] && [ -n "${HOME:-}" ] || return 1
+    case "$bin_dir" in
+        "$HOME"/*) checked=${bin_dir#"$HOME"/}; shown="\$HOME/$checked" ;;
+        *) checked=$bin_dir; shown=$bin_dir ;;
+    esac
+    # Another shell will evaluate this text: write only names that need no quoting.
+    case "$checked" in *[!A-Za-z0-9_./@+-]*) return 1 ;; esac
+    line="case \":\$PATH:\" in *\":$shown:\"*) ;; *) export PATH=\"$shown:\$PATH\" ;; esac # rift installer"
+    shell_name=${SHELL:-}
+    case "${shell_name##*/}" in
+        zsh) profile="${ZDOTDIR:-$HOME}/.zshrc"; append_line "$profile" "$line" ;;
+        bash)
+            profile="$HOME/.bashrc"
+            append_line "$profile" "$line" || return 1
+            # A login bash (every macOS terminal) reads the first of these, not .bashrc.
+            for login in .bash_profile .bash_login .profile; do
+                [ -e "$HOME/$login" ] || continue
+                append_line "$HOME/$login" "$line"
+                return
+            done
+            append_line "$HOME/.profile" "$line" ;;
+        fish)
+            profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/rift.fish"
+            append_line "$profile" "contains -- \"$shown\" \$PATH; or set -gx PATH \"$shown\" \$PATH # rift installer" ;;
+        *) profile="$HOME/.profile"; append_line "$profile" "$line" ;;
+    esac
+}
+# A child process cannot change its parent's PATH. On a terminal the installer
+# therefore ends by becoming the user's own shell with the directory exported,
+# so rift resolves at once; the startup file covers every later terminal.
+restart_shell() {
+    [ "${RIFT_NONINTERACTIVE:-0}" != 1 ] && [ "${RIFT_NO_SHELL_RESTART:-0}" != 1 ] && [ -t 1 ] || return 0
+    # Never for automation or root: a prompt would stall a pipeline, and a
+    # surprise root shell is worse than one extra command.
+    [ -z "${CI:-}" ] && [ "$(id -u 2>/dev/null || echo 0)" != 0 ] || return 0
+    # Only a shell whose startup file was just registered: this also keeps out
+    # nologin, false and anything else that is executable but not a shell.
+    case "${SHELL:-}" in
+        /*/zsh|/*/bash|/*/fish|/*/sh|/*/dash|/*/ksh) [ -x "$SHELL" ] || return 0 ;;
+        *) return 0 ;;
+    esac
+    # Inside the substitution fd 1 is a pipe; fd 3 still names the terminal.
+    terminal=$(tty <&3) || return 0
+    printf 'Starting a fresh %s so rift works in this terminal now; exit returns to the previous shell.\n' "${SHELL##*/}"
+    cleanup
+    trap - EXIT
+    umask "$user_umask"
+    unset RIFT_DOWNLOAD_MANIFEST
+    PATH="$bin_dir:${PATH:-}"
+    export PATH
+    exec "$SHELL" <"$terminal" 3<&-
+}
+finish() {
+    if on_path; then
+        printf 'Run rift inside your project to choose harnesses and permissions.\n'
+    elif [ "${RIFT_UPDATE:-0}" = 1 ]; then
+        :
+    elif register_path; then
+        printf '%s is registered on PATH in %s.\n' "$bin_dir" "$profile"
+        printf 'Run rift inside your project to choose harnesses and permissions.\n'
+        restart_shell 3<&1
+        printf 'Open a new terminal first: this one started before PATH changed.\n'
+    else
+        printf 'Add %s to PATH, then run rift inside your project.\n' "$bin_dir"
     fi
 }
 
@@ -43,7 +127,13 @@ command -v curl >/dev/null 2>&1 || die 'curl is required.'
 command -v tar >/dev/null 2>&1 || die 'tar is required.'
 case "$(uname -s)" in
     Darwin) platform=apple-darwin ;;
-    Linux) platform=unknown-linux-gnu ;;
+    Linux)
+        platform=unknown-linux-gnu
+        # The Linux builds link glibc. On a musl system the loader is absent and the
+        # failure would otherwise surface later as a wrong-version complaint.
+        if (ldd --version 2>&1 || :) | grep -qi musl; then
+            die 'This alpha needs a glibc-based Linux; musl systems such as Alpine are not supported yet.'
+        fi ;;
     *) die 'Use install.ps1 for native Windows. This installer supports macOS and Linux.' ;;
 esac
 case "$(uname -m)" in
@@ -113,6 +203,7 @@ recheck_installation
 if [ -f "$binary" ] && [ "$(sed -n '3p' "$receipt")" = "$version" ]; then
     printf 'Rift %s is already installed.\n' "$version"
     preferences
+    finish
     exit 0
 fi
 
@@ -124,7 +215,10 @@ progress "*--@--o  Step 2/3: Verify archive and executable"
 tar -xOzf "$stage/archive.tar.gz" rift > "$stage/rift"
 [ -s "$stage/rift" ] || die 'Empty executable in archive.'
 chmod 755 "$stage/rift"
-[ "$("$stage/rift" --version)" = "rift ${version#v}" ] || die 'Downloaded executable reports a different version.'
+# A binary that cannot start (an older glibc than it was built against, a noexec
+# mount) is a different fault from one that starts and names another version.
+reported=$("$stage/rift" --version 2>/dev/null) || die 'The downloaded executable cannot run on this system (on Linux it needs a recent glibc, and the installation directory must allow execution). Nothing was changed.'
+[ "$reported" = "rift ${version#v}" ] || die 'Downloaded executable reports a different version.'
 checksum=$(digest "$stage/rift")
 printf 'rift-install-v1\n%s\n%s\n' "$checksum" "$version" > "$stage/receipt"
 
@@ -140,7 +234,4 @@ fi
 progress "*--*--*  Binary installation complete"
 printf 'Installed Rift %s at %s\n' "$version" "$binary"
 preferences
-case ":${PATH:-}:" in
-    *":$bin_dir:"*) printf 'Run rift inside your project to choose harnesses and permissions.\n' ;;
-    *) printf 'Add %s to PATH, then run rift inside your project.\n' "$bin_dir" ;;
-esac
+finish

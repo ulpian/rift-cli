@@ -69,9 +69,12 @@ text and interaction, not screenshots or native Windows rendering. PTY and shell
 installer previews currently require macOS/Linux. Temporary assets are removed
 on normal exit or a handled flow failure. No cloud access is used.
 
-The native installer chooses default harnesses and features, shows the shimmering
-R and milestones, and saves reviewed preferences under
-`<config-root>/rift/defaults.toml`. Run `rift install` to change defaults later.
+The native installer chooses default harnesses, shows the shimmering R and
+milestones, and saves the reviewed choice under
+`<config-root>/rift/defaults.toml`. Run `rift install` to change it later.
+It has no feature page: every feature ships on, and each project switches its
+own off in Project Settings. The file's `features` table is still written so
+older builds keep reading it, but nothing reads it back.
 New project setup reviews permissions separately and preserves declared project
 policy. `curl | sh` obtains wizard input from the terminal device; unattended
 installs print the command for resuming preferences. Updates skip onboarding.
@@ -186,8 +189,24 @@ The short curl command uses a literal HTTPS URL without following redirects.
 The wrapper embeds the manifest URL. The bootstrap detects OS and CPU, selects
 exactly one target row, verifies archive and executable versions, installs under
 `~/.local/bin` (or `RIFT_BIN_DIR`), and opens native preferences. Windows users get
-a PowerShell command instead. Add the printed installation directory to PATH if
-needed. `rift uninstall --dry-run` previews removal; `rift uninstall` applies it.
+a PowerShell command instead. `rift uninstall --dry-run` previews removal;
+`rift uninstall` applies it.
+
+When the installation directory is not on PATH, the bootstrap registers it. On
+macOS and Linux it appends one self-guarding line, ending in `# rift installer`,
+to the startup file of the login shell (`.zshrc`; `.bashrc` plus the login
+profile bash reads; a fish `conf.d/rift.fish`; `.profile` otherwise), then hands
+the terminal to a fresh copy of that shell so `rift` resolves immediately:
+a child process cannot change the PATH of the shell that ran `curl | sh`.
+On Windows it prepends the directory to the user `Path` value, keeping
+`%VARIABLE%` references unexpanded, and updates the PowerShell session that ran
+`irm | iex`. A directory name that would need shell quoting is never written
+into a startup file; the manual instruction is printed instead. Updates never
+touch PATH. `RIFT_NO_MODIFY_PATH=1` opts out of both steps and
+`RIFT_NO_SHELL_RESTART=1` keeps the startup-file line but skips the fresh shell;
+unattended installs (`RIFT_NONINTERACTIVE=1`, `CI` set, root, or no terminal)
+never start one, and the fresh shell gets the caller's own umask back.
+Uninstalling leaves the marked line and the `Path` entry in place.
 
 Public links have no expiry and do not need renewal. To issue a new link, choose a
 new prefix and repeat plan/upload using the same verified archives. Old
