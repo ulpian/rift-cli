@@ -58,6 +58,7 @@ pub(super) fn warning_item(id: &str, title: &str, text: &str) -> ViewerTimelineI
         expanded_body: None,
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     }
 }
 

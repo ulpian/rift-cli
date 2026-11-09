@@ -20,8 +20,9 @@ mod snapshot_fixture;
 use snapshot_fixture::{
     col3_text, col3_with_data, dashboard_state, frame_text, full3d_caps, full3d_text,
     member_row_detail, member_row_frame, point_set_text, project_settings_state,
-    project_settings_state_with_codex_hooks, recall_text, recall_viewer_state, render_at,
-    render_state, render_state_with_caps, suggest_state, system_text, widget_text, WIDGET_SERIES,
+    project_settings_state_with_codex_hooks, recall_text, recall_viewer_conversation_state,
+    recall_viewer_state, render_at, render_state, render_state_with_caps, suggest_state,
+    system_text, widget_text, WIDGET_SERIES,
 };
 
 #[test]
@@ -160,6 +161,15 @@ fn golden_recall_viewer_full_unicode() {
     let mut state = recall_viewer_state(Size::new(120, 40), rift_canopy::ViewerPane::Timeline);
     insta::assert_snapshot!(
         "recall_viewer_full_unicode",
+        render_state_with_caps(&mut state, Capabilities::UNICODE)
+    );
+}
+
+#[test]
+fn golden_recall_viewer_conversation_unicode() {
+    let mut state = recall_viewer_conversation_state(Size::new(120, 32));
+    insta::assert_snapshot!(
+        "recall_viewer_conversation_unicode",
         render_state_with_caps(&mut state, Capabilities::UNICODE)
     );
 }

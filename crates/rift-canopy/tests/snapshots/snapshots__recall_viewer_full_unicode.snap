@@ -1,6 +1,5 @@
 ---
 source: crates/rift-canopy/tests/snapshots.rs
-assertion_line: 161
 expression: "render_state_with_caps(&mut state, Capabilities::UNICODE)"
 ---
  RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
@@ -39,7 +38,7 @@ expression: "render_state_with_caps(&mut state, Capabilities::UNICODE)"
 │                                      ││                                                                              │
 │                                      ││                                                                              │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full session · r Dashboard · / command
+Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full session · r Dashboard · / command · Right/Left unfold/fold
 ╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │/█                                                                                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

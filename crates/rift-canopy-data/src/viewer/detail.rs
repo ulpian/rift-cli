@@ -111,6 +111,7 @@ fn checkpoint_summary_segment(
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: rift_canopy::ViewerItemTone::Neutral,
         }],
     }
 }
@@ -207,6 +208,7 @@ fn recall_summary_segment(
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: rift_canopy::ViewerItemTone::Neutral,
         }],
     }
 }
@@ -368,6 +370,7 @@ fn shadow_context_segment(substrate: &GixSubstrate, anchor: Option<&str>) -> Vie
             expanded_body: None,
             collapsed: true,
             full_session_only: false,
+            tone: rift_canopy::ViewerItemTone::Neutral,
         });
     }
     if items.is_empty() {
@@ -383,6 +386,7 @@ fn shadow_context_segment(substrate: &GixSubstrate, anchor: Option<&str>) -> Vie
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: rift_canopy::ViewerItemTone::Neutral,
         });
     }
     ViewerTimelineSegment {
@@ -437,6 +441,7 @@ fn assembly_segment(
         expanded_body: None,
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     });
 
     match diff_items(project, projection_path, entry) {

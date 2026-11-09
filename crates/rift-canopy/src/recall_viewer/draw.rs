@@ -66,7 +66,7 @@ fn draw_hint(vm: &ViewModel, frame: &mut Frame, rect: Rect) {
     let text = if vm.viewer.filter_editing {
         "type filter · Enter apply · Esc cancel"
     } else {
-        "Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full session · r Dashboard · / command"
+        "Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full session · r Dashboard · / command · Right/Left unfold/fold"
     };
     put_clipped(frame, rect.x, rect.y, rect.w, text, vm.theme.dim());
 }
@@ -240,6 +240,7 @@ mod tests {
                             expanded_body: Some(lines.clone()),
                             collapsed: true,
                             full_session_only: false,
+                            tone: crate::recall_viewer::ViewerItemTone::Neutral,
                         },
                         ViewerTimelineItem {
                             id: "ordinary".to_owned(),
@@ -250,6 +251,7 @@ mod tests {
                             expanded_body: None,
                             collapsed: false,
                             full_session_only: false,
+                            tone: crate::recall_viewer::ViewerItemTone::Neutral,
                         },
                     ],
                 },
@@ -266,6 +268,7 @@ mod tests {
                         expanded_body: None,
                         collapsed: false,
                         full_session_only: true,
+                        tone: crate::recall_viewer::ViewerItemTone::Neutral,
                     }],
                 },
             ],

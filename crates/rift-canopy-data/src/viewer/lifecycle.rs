@@ -86,6 +86,7 @@ fn decision_item(entry: &CheckpointCatalogueEntry) -> ViewerTimelineItem {
         expanded_body: None,
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     }
 }
 
@@ -154,6 +155,7 @@ fn witness_item(row: &Row) -> Option<ViewerTimelineItem> {
         expanded_body: None,
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     })
 }
 

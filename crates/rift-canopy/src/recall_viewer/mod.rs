@@ -25,12 +25,12 @@ pub use geometry::{
     geometry, timeline_controls, ViewerGeometry, ViewerTimelineControls, CHECKPOINT_ROW_HEIGHT,
 };
 pub use model::{
-    SyntaxClass, ViewerCheckpointRow, ViewerDetail, ViewerFilterProgress, ViewerLine,
-    ViewerLineKind, ViewerOrigin, ViewerSpan, ViewerTimelineItem, ViewerTimelineSegment,
-    ViewerTimestampProvenance,
+    SyntaxClass, ViewerCheckpointRow, ViewerDetail, ViewerFilterProgress, ViewerItemTone,
+    ViewerLine, ViewerLineKind, ViewerOrigin, ViewerSpan, ViewerTimelineItem,
+    ViewerTimelineSegment, ViewerTimestampProvenance,
 };
 pub use state::RecallViewerState;
-pub use timeline::{timeline_item_at, timeline_line_count};
+pub use timeline::{timeline_fold_at, timeline_item_at, timeline_line_count, TimelineFold};
 pub use worker::{ViewerErrorArea, ViewerEvent, ViewerRequest};
 
 /// Top-level Canopy surface.

@@ -169,6 +169,30 @@ impl ViewerLine {
     }
 }
 
+/// What a timeline item is, so a transcript reads as a conversation: who
+/// spoke, what changed, what Rift served. The data plane decides it; drawing
+/// only picks a colour, so no caller parses a title to learn an item's role.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewerItemTone {
+    /// Facts and cards with no conversational role.
+    #[default]
+    Neutral,
+    /// Something the person typed.
+    Prompt,
+    /// The agent's own words.
+    Assistant,
+    /// A tool call that edits a file; its body is the change.
+    CodeChange,
+    /// Any other tool call.
+    Tool,
+    /// What a tool call returned.
+    ToolResult,
+    /// A Rift recall: a served delta, or the agent asking Rift for one.
+    Recall,
+    /// Harness or system text.
+    System,
+}
+
 /// One collapsible/expandable item inside a timeline segment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewerTimelineItem {
@@ -189,6 +213,8 @@ pub struct ViewerTimelineItem {
     /// This transcript record precedes `compact_transcript_start` and is shown
     /// only in Full session mode.
     pub full_session_only: bool,
+    /// The item's conversational role.
+    pub tone: ViewerItemTone,
 }
 
 /// A chronology-safe timeline segment. Ordering exists only inside each

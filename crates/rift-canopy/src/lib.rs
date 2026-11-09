@@ -107,9 +107,9 @@ pub use profile_menu::{MenuStage, ProfileMenuState};
 pub use project_settings_modal::{ProjectSettingsItem, ProjectSettingsModalState};
 pub use recall_viewer::{
     RecallViewerState, Surface, SyntaxClass, ViewerCheckpointRow, ViewerDetail, ViewerErrorArea,
-    ViewerEvent, ViewerFilterProgress, ViewerGeneration, ViewerLaunch, ViewerLine, ViewerLineKind,
-    ViewerLoadState, ViewerOrigin, ViewerPane, ViewerRequest, ViewerSpan, ViewerTimelineItem,
-    ViewerTimelineSegment, ViewerTimestampProvenance,
+    ViewerEvent, ViewerFilterProgress, ViewerGeneration, ViewerItemTone, ViewerLaunch, ViewerLine,
+    ViewerLineKind, ViewerLoadState, ViewerOrigin, ViewerPane, ViewerRequest, ViewerSpan,
+    ViewerTimelineItem, ViewerTimelineSegment, ViewerTimestampProvenance,
 };
 pub use render::{select_backend, AsciiBackend, Capabilities, Frame, RenderBackend};
 pub use splash::SplashState;

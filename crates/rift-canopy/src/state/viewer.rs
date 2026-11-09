@@ -9,8 +9,8 @@
 use crate::command::{Verb, MAX_INPUT_LEN};
 use crate::input::{on_key, Action, CanopyKey};
 use crate::recall_viewer::{
-    geometry, timeline_controls, timeline_item_at, timeline_line_count, Surface, ViewerErrorArea,
-    ViewerEvent, ViewerFilterProgress, ViewerLoadState, ViewerPane, ViewerRequest,
+    geometry, timeline_controls, timeline_fold_at, timeline_item_at, timeline_line_count, Surface,
+    ViewerErrorArea, ViewerEvent, ViewerFilterProgress, ViewerLoadState, ViewerPane, ViewerRequest,
     CHECKPOINT_ROW_HEIGHT,
 };
 use crate::render::frame::Size;
@@ -408,6 +408,7 @@ fn viewer_navigation_key(s: &mut AppState, key: CanopyKey) -> Flow {
         }
         CanopyKey::Char('L') => select_latest_checkpoint(s),
         CanopyKey::Char('R') => reload_catalogue(s),
+        CanopyKey::Left | CanopyKey::Right if fold_viewer_item(s, key) => Effects::default(),
         CanopyKey::Tab | CanopyKey::BackTab | CanopyKey::Left | CanopyKey::Right => {
             move_viewer_pane(s, key);
             Effects::default()
@@ -449,6 +450,43 @@ fn reload_catalogue(s: &mut AppState) -> Effects {
     Effects {
         data_requests: vec![request],
         ..Effects::default()
+    }
+}
+
+/// Whether Left has an unfolded timeline item to fold. Left otherwise opens
+/// the project drawer on every surface, so the dashboard's navigation asks
+/// this first and stands aside only while there is something to fold.
+pub(super) fn left_folds_a_timeline_item(app: &App) -> bool {
+    app.surface == Surface::RecallViewer
+        && app.mode == Mode::Normal
+        && app.overlay.is_none()
+        && app.viewer.pane == ViewerPane::Timeline
+        && !app.viewer.filter_editing
+        && timeline_fold_at(&app.viewer, app.viewer.timeline_cursor)
+            .is_some_and(|fold| fold.unfolded)
+}
+
+/// Right unfolds the timeline item under the cursor; Left folds it again and
+/// puts the cursor back on its headline. `false` means the key did nothing
+/// here and keeps its ordinary meaning.
+fn fold_viewer_item(s: &mut AppState, key: CanopyKey) -> bool {
+    if s.app.viewer.pane != ViewerPane::Timeline {
+        return false;
+    }
+    let Some(fold) = timeline_fold_at(&s.app.viewer, s.app.viewer.timeline_cursor) else {
+        return false;
+    };
+    match key {
+        CanopyKey::Right if !fold.unfolded => {
+            s.app.viewer.expanded.insert(fold.id);
+            true
+        }
+        CanopyKey::Left if fold.unfolded => {
+            s.app.viewer.expanded.remove(&fold.id);
+            s.app.viewer.timeline_cursor = fold.heading_line;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -775,6 +813,57 @@ mod tests {
     }
 
     /// The populated viewer and the project it has open.
+    #[test]
+    fn right_unfolds_the_item_under_the_cursor_and_left_folds_it_before_leaving_the_pane() {
+        use crate::recall_viewer::{ViewerItemTone, ViewerLine, ViewerLineKind};
+        let (mut state, _) = viewer_base();
+        let change = crate::recall_viewer::ViewerTimelineItem {
+            id: "change".to_owned(),
+            title: "edit src/lib.rs  +2 -0".to_owned(),
+            timestamp: None,
+            summary: Vec::new(),
+            body: vec![
+                ViewerLine::plain(ViewerLineKind::Addition, "one"),
+                ViewerLine::plain(ViewerLineKind::Addition, "two"),
+            ],
+            expanded_body: None,
+            collapsed: true,
+            full_session_only: false,
+            tone: ViewerItemTone::CodeChange,
+        };
+        state.app.viewer.detail = std::sync::Arc::new(crate::recall_viewer::ViewerDetail {
+            checkpoint_id: "cp".to_owned(),
+            segments: vec![crate::recall_viewer::ViewerTimelineSegment {
+                title: "Transcript".to_owned(),
+                boundary: None,
+                ordered_by_time: false,
+                items: vec![change],
+            }],
+            notice: None,
+        });
+        state.app.viewer.pane = ViewerPane::Timeline;
+        state.app.viewer.timeline_cursor = 1;
+        let folded = timeline_line_count(&state.app.viewer);
+
+        let _ = update(&mut state, Event::Key(CanopyKey::Right));
+        assert_eq!(timeline_line_count(&state.app.viewer), folded + 2);
+        let _ = update(&mut state, Event::Key(CanopyKey::Right));
+        assert_eq!(state.app.viewer.pane, ViewerPane::Timeline);
+
+        state.app.viewer.timeline_cursor = 3;
+        let _ = update(&mut state, Event::Key(CanopyKey::Left));
+        assert_eq!(timeline_line_count(&state.app.viewer), folded);
+        assert_eq!(state.app.viewer.timeline_cursor, 1, "back on the headline");
+        assert_eq!(state.app.viewer.pane, ViewerPane::Timeline);
+
+        assert!(!state.app.projects_open);
+        let _ = update(&mut state, Event::Key(CanopyKey::Left));
+        assert!(
+            state.app.projects_open,
+            "with nothing left to fold, Left is the project drawer's again"
+        );
+    }
+
     fn viewer_base() -> (AppState, String) {
         let base = populated_viewer_for_wheel(120, 40);
         let project = base.app.viewer.project.clone().expect("viewer project");

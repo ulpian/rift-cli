@@ -16,9 +16,9 @@ use rift_canopy::splash::mesh3d::{self, Resolution};
 use rift_canopy::splash::render2d::draw_tier;
 use rift_canopy::state::AppState;
 use rift_canopy::{
-    AsciiBackend, EntryKind, Project, ProjectStatus, ViewerCheckpointRow, ViewerDetail, ViewerLine,
-    ViewerLineKind, ViewerLoadState, ViewerOrigin, ViewerTimelineItem, ViewerTimelineSegment,
-    ViewerTimestampProvenance,
+    AsciiBackend, EntryKind, Project, ProjectStatus, ViewerCheckpointRow, ViewerDetail,
+    ViewerItemTone, ViewerLine, ViewerLineKind, ViewerLoadState, ViewerOrigin, ViewerTimelineItem,
+    ViewerTimelineSegment, ViewerTimestampProvenance,
 };
 
 // --- frames to golden text -------------------------------------------------
@@ -279,6 +279,88 @@ pub(crate) fn recall_viewer_state(size: Size, pane: rift_canopy::ViewerPane) -> 
     state
 }
 
+/// The viewer on a transcript that reads as a conversation: two prompts, the
+/// agent's words, one folded and one unfolded file change, a tool call with
+/// its result, and a Rift recall — every role the timeline colours.
+pub(crate) fn recall_viewer_conversation_state(size: Size) -> AppState {
+    let mut state = recall_viewer_state(size, rift_canopy::ViewerPane::Timeline);
+    state.app.viewer.detail = Arc::new(ViewerDetail {
+        checkpoint_id: "a1b2c3d4e5f6789012345678901234567890abcd".into(),
+        segments: vec![ViewerTimelineSegment {
+            title: "Transcript".into(),
+            boundary: Some("stored order".into()),
+            ordered_by_time: false,
+            items: conversation_items(),
+        }],
+        notice: None,
+    });
+    state.app.viewer.expanded.insert("t3".into());
+    state.app.viewer.timeline_cursor = 7;
+    state
+}
+
+fn conversation_items() -> Vec<ViewerTimelineItem> {
+    use ViewerItemTone::{Assistant, CodeChange, Prompt, Recall, Tool, ToolResult};
+    let text = |line: &str| vec![ViewerLine::plain(ViewerLineKind::Text, line)];
+    let change = vec![
+        ViewerLine::plain(ViewerLineKind::Removal, "    printf 'Add %s to PATH'"),
+        ViewerLine::plain(ViewerLineKind::Addition, "    register_path"),
+        ViewerLine::plain(ViewerLineKind::Addition, "    restart_shell"),
+    ];
+    let result = vec![ViewerLine::plain(
+        ViewerLineKind::Dim,
+        "test result: ok. 1 passed",
+    )];
+    [
+        (
+            "t0",
+            Prompt,
+            "prompt",
+            text("make the installer add rift to PATH"),
+        ),
+        (
+            "t1",
+            Recall,
+            "rift recall",
+            text("[rift] Read outlined: install.sh, 146 lines"),
+        ),
+        (
+            "t2",
+            Assistant,
+            "assistant",
+            text("The installer only prints a hint. I will register it."),
+        ),
+        ("t3", CodeChange, "edit install.sh  +2 -1", change.clone()),
+        ("t4", CodeChange, "write release/README.md  +14 -0", change),
+        (
+            "t5",
+            Tool,
+            "Bash cargo test -p xtask --test release_install",
+            Vec::new(),
+        ),
+        ("t6", ToolResult, "result", result),
+        (
+            "t7",
+            Prompt,
+            "prompt",
+            text("now do the same for PowerShell"),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, tone, title, body)| ViewerTimelineItem {
+        id: id.into(),
+        title: title.into(),
+        timestamp: None,
+        summary: Vec::new(),
+        collapsed: tone == CodeChange,
+        body,
+        expanded_body: None,
+        full_session_only: false,
+        tone,
+    })
+    .collect()
+}
+
 /// A checkpoint the projection has seen: a recorded timestamp, two origins in
 /// two dialects, a chain position, local branches and a recorded issue — the
 /// row where every optional field the catalogue can draw is present.
@@ -378,6 +460,7 @@ fn checkpoint_summary_segment() -> ViewerTimelineSegment {
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: ViewerItemTone::Neutral,
         }],
     }
 }
@@ -401,6 +484,7 @@ fn recall_summary_segment() -> ViewerTimelineSegment {
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: ViewerItemTone::Neutral,
         }],
     }
 }
@@ -424,6 +508,7 @@ fn transcript_segment() -> ViewerTimelineSegment {
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: ViewerItemTone::Neutral,
         }],
     }
 }
@@ -469,6 +554,7 @@ fn assembly_segment() -> ViewerTimelineSegment {
             expanded_body: None,
             collapsed: false,
             full_session_only: false,
+            tone: ViewerItemTone::Neutral,
         }],
     }
 }

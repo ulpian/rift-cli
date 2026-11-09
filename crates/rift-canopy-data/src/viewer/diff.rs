@@ -342,6 +342,7 @@ fn render_file_diff(
         )),
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     }
 }
 
@@ -394,6 +395,7 @@ fn metadata_only_diff(
         expanded_body: None,
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     }
 }
 

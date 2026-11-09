@@ -1,0 +1,36 @@
+---
+source: crates/rift-canopy/tests/snapshots.rs
+expression: "render_state_with_caps(&mut state, Capabilities::UNICODE)"
+---
+ RIFT  Canopy  *                                                                              ? Help  / Palette  q Quit
+[<]   Home   Models   Activity   Token usage  [Recall viewer]  Settings                                             < >
+╭─ checkpoints · 2 ────────────────────╮╭─ timeline · a1b2c3d4e5f6 ────────────────────────────────────────────────────╮
+│[ Filter ]                            ││[ Full session ]                                                 [ Dashboard ]│
+│> 2025-08-11T10:40Z · recorded        ││◆ Transcript                                                                  │
+│  Add read-only Recall Viewer fixtures││  ┆ stored order                                                              │
+│  cp a1b2c3d4e5f6 · commit 0123456789a││  • prompt                                                                    │
+│  rift/br refs/heads/rift/checkpoints/││  | make the installer add rift to PATH                                       │
+│  main +1 · compact · partial · !parse││  • rift recall                                                               │
+│  2025-08-10T06:53Z · commit          ││  | [rift] Read outlined: install.sh, 146 lines                               │
+│  … loading excerpt                   ││  • assistant                                                                 │
+│  cp 998877665544 · commit fedcba98765││  | The installer only prints a hint. I will register it.                     │
+│  legacy/br refs/heads/legacy/checkpoi││  ▼ edit install.sh  +2 -1                                                    │
+│  no containing branch · strategy ? · ││          -     printf 'Add %s to PATH'                                       │
+│                                      ││          +     register_path                                                 │
+│                                      ││          +     restart_shell                                                 │
+│                                      ││  ▶ write release/README.md  +14 -0                                           │
+│                                      ││  • Bash cargo test -p xtask --test release_install                           │
+│                                      ││  • result                                                                    │
+│                                      ││  | test result: ok. 1 passed                                                 │
+│                                      ││                                                                              │
+│                                      ││  • prompt                                                                    │
+│                                      ││  | now do the same for PowerShell                                            │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Tab pane · j/k move · PgUp/PgDn page · f Filter · F Full session · r Dashboard · / command · Right/Left unfold/fold
+╭─ command ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│/█                                                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

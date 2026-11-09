@@ -65,6 +65,7 @@ fn frontier_item(sessions: &Path, checkpoint_id: &str, f: &TurnFrontier) -> View
         expanded_body: None,
         collapsed: false,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     }
 }
 

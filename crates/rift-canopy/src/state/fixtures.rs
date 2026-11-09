@@ -319,6 +319,7 @@ pub(super) fn populated_viewer_for_wheel(w: u16, h: u16) -> AppState {
                     expanded_body: None,
                     collapsed: false,
                     full_session_only: false,
+                    tone: crate::recall_viewer::ViewerItemTone::Neutral,
                 })
                 .collect(),
         }],

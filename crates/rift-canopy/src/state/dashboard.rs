@@ -69,6 +69,17 @@ pub(super) fn toggle_drawer(s: &mut AppState) -> Flow {
     Flow::Continue(Effects::default())
 }
 
+/// Keys the dashboard's navigation leaves to the surface underneath: text
+/// being typed, and Left while the viewer has an unfolded timeline item to
+/// fold — the one case where Left is not the project drawer's.
+fn navigation_stands_aside(app: &crate::state::App, key: CanopyKey) -> bool {
+    app.mode == Mode::Command
+        || app.viewer.filter_editing
+        || (key == CanopyKey::Left
+            && !app.projects_open
+            && super::viewer::left_folds_a_timeline_item(app))
+}
+
 pub(super) fn on_navigation_key(s: &mut AppState, key: CanopyKey) -> Option<Flow> {
     let navigation_allowed = s.app.overlay.is_none()
         && !s.app.project_settings.running
@@ -97,7 +108,7 @@ pub(super) fn on_navigation_key(s: &mut AppState, key: CanopyKey) -> Option<Flow
             s.app.dashboard_tab.next(key == CanopyKey::Tab),
         ));
     }
-    if s.app.mode == Mode::Command || s.app.viewer.filter_editing {
+    if navigation_stands_aside(&s.app, key) {
         return None;
     }
     match key {

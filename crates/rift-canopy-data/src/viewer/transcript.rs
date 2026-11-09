@@ -10,6 +10,7 @@ use rift_recall_substrate::{CheckpointCatalogueEntry, SubstrateReader};
 use rift_recall_types::checkpoint::{CompactTranscriptRecord, TaskMetadata};
 
 use super::text::{bounded, compact_utc, fact_line, warning_item};
+use super::turns::{record_items, RecordPlace};
 
 type TranscriptBundle = (
     Vec<CompactTranscriptRecord>,
@@ -80,7 +81,12 @@ pub(super) fn transcript_segment(
     let mut attached_tasks = BTreeSet::new();
     let new_from = boundary.filter(|start| *start <= artifact_lines);
     for (index, record) in records.iter().enumerate() {
-        items.push(record_item(index, record, new_from));
+        let place = RecordPlace {
+            index,
+            timestamp: record_timestamp(record),
+            before_boundary: new_from.is_some_and(|start| record.artifact_line < start),
+        };
+        items.extend(record_items(&place, record));
         for tool_id in record_tool_ids(record) {
             if task_ids.contains(&tool_id) {
                 items.push(task_item(substrate, entry, &tool_id));
@@ -94,7 +100,7 @@ pub(super) fn transcript_segment(
     ViewerTimelineSegment {
         title: "Transcript".to_owned(),
         boundary: Some(
-            "artifact order only; Full session reveals records before compact_transcript_start"
+            "stored order; Right unfolds a change, Left folds it; Full session shows earlier records"
                 .to_owned(),
         ),
         ordered_by_time: false,
@@ -140,6 +146,7 @@ pub(super) fn task_item(
         expanded_body: None,
         collapsed: true,
         full_session_only: false,
+        tone: rift_canopy::ViewerItemTone::Neutral,
     }
 }
 
@@ -171,29 +178,6 @@ fn boundary_warnings(boundary: Option<usize>, artifact_lines: usize) -> Vec<View
             "no boundary was inferred; all valid records remain inspectable",
         )],
         Some(_) => Vec::new(),
-    }
-}
-
-fn record_item(
-    index: usize,
-    record: &CompactTranscriptRecord,
-    new_from: Option<usize>,
-) -> ViewerTimelineItem {
-    let role = record.record_type.as_deref().unwrap_or("unknown record");
-    let text =
-        record_text(record).unwrap_or_else(|| "structured record; no displayable text".to_owned());
-    ViewerTimelineItem {
-        id: format!("transcript:{index}"),
-        title: bounded(role),
-        timestamp: record_timestamp(record),
-        summary: Vec::new(),
-        body: text
-            .lines()
-            .map(|line| ViewerLine::plain(ViewerLineKind::Text, bounded(line)))
-            .collect(),
-        expanded_body: None,
-        collapsed: false,
-        full_session_only: new_from.is_some_and(|start| record.artifact_line < start),
     }
 }
 
