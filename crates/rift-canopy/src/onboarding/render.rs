@@ -42,6 +42,15 @@ impl Wizard {
                 .filter(|row| self.harness_selected(&row.agent))
                 .filter_map(|row| permission_row(row, true)),
         );
+        // The installer has no feature page: when every feature is on, which
+        // is how Rift ships, say so in one line and where to change it.
+        if self.purpose == Purpose::Installation && self.view.settings.iter().all(|row| row.enabled)
+        {
+            rows.push(Row::text(
+                "Features: all on (switch any off per project in Project Settings)".into(),
+            ));
+            return rows;
+        }
         rows.extend(self.view.settings.iter().map(|row| Row {
             checked: Some(row.enabled),
             ..Row::text(row.id.label().into())

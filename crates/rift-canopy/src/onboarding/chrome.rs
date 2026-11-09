@@ -23,16 +23,20 @@ impl Wizard {
         let width = size.w.saturating_sub(4);
         let top = header_top(size);
         let complete = self.progress.as_ref().is_some_and(|meter| meter.complete);
+        // The installer's first node is the binary it has already placed; the
+        // last node of either wizard is the work that follows confirmation.
+        let placed = usize::from(self.purpose == Purpose::Installation);
+        let total = placed + self.stages().len() + 1;
         let current = if self.progress.is_some() {
-            4
+            total - 1
         } else {
             self.stages()
                 .iter()
                 .position(|stage| *stage == self.stage)
                 .unwrap_or(0)
-                + usize::from(self.purpose == Purpose::Installation)
+                + placed
         };
-        draw_milestones(frame, top, current, 5, complete, unicode);
+        draw_milestones(frame, top, current, total, complete, unicode);
         let title = if self.progress.is_some() {
             if self.purpose == Purpose::Installation {
                 "Saving defaults"
@@ -41,7 +45,6 @@ impl Wizard {
             }
         } else {
             match (self.purpose, self.stage) {
-                (Purpose::Installation, Stage::Settings) => "Choose default features",
                 (Purpose::Installation, Stage::Review) => "Review installation defaults",
                 _ => self.stage.title(),
             }

@@ -441,14 +441,21 @@ fn confirmation_is_separated_and_inactive_review_is_gray() {
 
 #[test]
 fn installer_skips_project_permissions_and_requires_review_before_saving() {
-    let mut wizard = Wizard::installer(wizard(false).view);
+    let mut view = wizard(false).view;
+    // As shipped: every feature on, which is what the installer's view holds.
+    for row in &mut view.settings {
+        row.enabled = true;
+    }
+    let mut wizard = Wizard::installer(view);
     wizard.cursor = wizard.choices().len();
     wizard.key(CanopyKey::Enter);
-    assert_eq!(wizard.stage, Stage::Settings);
+    assert_eq!(
+        wizard.stage,
+        Stage::Review,
+        "the installer has no feature page between harnesses and review"
+    );
     wizard.key(CanopyKey::Esc);
     assert_eq!(wizard.stage, Stage::Harnesses);
-    wizard.cursor = wizard.choices().len();
-    wizard.key(CanopyKey::Enter);
     wizard.cursor = wizard.choices().len();
     wizard.key(CanopyKey::Enter);
     assert_eq!(wizard.stage, Stage::Review);
@@ -459,6 +466,10 @@ fn installer_skips_project_permissions_and_requires_review_before_saving() {
     let text: String = frame.cells().iter().map(|cell| cell.ch).collect();
     assert!(text.contains("Confirm defaults"));
     assert!(text.contains("No project is changed"));
+    assert!(
+        text.contains("Features: all on"),
+        "review names the default"
+    );
     let Action::Apply(action) = wizard.key(CanopyKey::Enter) else {
         panic!("save action")
     };
@@ -479,7 +490,7 @@ fn milestone_nodes_count_remaining_steps_and_intro_is_gray_in_both_wizards() {
         wizard.draw(&mut frame, 0.0, true);
         let text: String = frame.cells().iter().map(|cell| cell.ch).collect();
         assert!(text.contains(if installer {
-            "Step 2/5 · 3 left"
+            "Step 2/4 · 2 left"
         } else {
             "Step 1/5 · 4 left"
         }));
@@ -507,8 +518,13 @@ fn milestone_nodes_count_remaining_steps_and_intro_is_gray_in_both_wizards() {
         wizard.finish_setup(true);
         frame = Frame::new(frame.size());
         wizard.draw(&mut frame, f32::NAN, true);
-        for x in [2, 5, 8, 11, 14] {
-            assert_eq!(frame.get(x, top).unwrap().ch, '●');
+        let nodes: &[u16] = if installer {
+            &[2, 5, 8, 11]
+        } else {
+            &[2, 5, 8, 11, 14]
+        };
+        for x in nodes {
+            assert_eq!(frame.get(*x, top).unwrap().ch, '●');
         }
     }
 }

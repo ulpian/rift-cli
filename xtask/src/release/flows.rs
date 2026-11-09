@@ -99,12 +99,6 @@ fn save_defaults(fixture: &Fixture, binary: &Path, defaults: &Path) -> Result<()
         term.click(&label)?;
     }
     term.click("Codex")?;
-    term.advance("Choose default features")?;
-    for label in ["Total Recall", "Raw Transcripts"] {
-        if term.checked(label)? {
-            term.click(label)?;
-        }
-    }
     term.advance("Review installation defaults")?;
     ensure(!defaults.exists(), "defaults written before review")?;
     term.advance("Confirm defaults")?;
@@ -122,8 +116,8 @@ fn save_defaults(fixture: &Fixture, binary: &Path, defaults: &Path) -> Result<()
             data.get("features")
                 .and_then(|v| v.get(key))
                 .and_then(toml::Value::as_bool)
-                == Some(false),
-            "wrong saved feature defaults",
+                == Some(true),
+            "a feature was saved off although the installer has no feature page",
         )?;
     }
     Ok(())
@@ -208,10 +202,12 @@ fn project_choices(term: &mut Terminal) -> Result<()> {
     term.click("Codex")?;
     term.advance("Review harness permissions")?;
     term.advance("Choose project settings")?;
+    // Features are a per-project choice that starts on: nothing saved by the
+    // installer may arrive here switched off.
     for label in ["Total Recall", "Raw Transcripts"] {
         ensure(
-            !term.checked(label)?,
-            "saved feature defaults did not seed setup",
+            term.checked(label)?,
+            "a new project did not start with every feature on",
         )?;
     }
     Ok(())

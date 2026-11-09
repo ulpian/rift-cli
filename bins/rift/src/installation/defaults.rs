@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 pub(super) struct Defaults {
     schema_version: u8,
     harnesses: Vec<String>,
+    /// Written and validated so files from every alpha build keep loading,
+    /// but no longer read: features ship on and are switched per project, so
+    /// an old machine-wide "off" must not follow a user into new projects.
     features: BTreeMap<String, bool>,
 }
 
@@ -68,16 +71,6 @@ impl Defaults {
         }
         for row in &mut view.integrations {
             row.selected = row.alpha_supported && self.harnesses.contains(&row.agent);
-        }
-        if view.initialization != ProjectInitialization::NotInitialized
-            || view.policy.state != rift_canopy::ProjectPolicyState::Default
-        {
-            return;
-        }
-        for row in view.settings.iter_mut().filter(|row| row.actionable) {
-            if let Some(value) = self.features.get(row.id.token()) {
-                row.enabled = *value;
-            }
         }
     }
 }
@@ -253,7 +246,10 @@ mod tests {
         assert_eq!(loaded, defaults);
         let mut fresh = choices();
         loaded.seed(&mut fresh);
-        assert!(!fresh.settings.first().unwrap().enabled);
+        assert!(
+            fresh.settings.iter().all(|row| row.enabled),
+            "a feature switched off machine-wide by an older build stays on in a new project"
+        );
         for state in [
             ProjectInitialization::NotProvisioned,
             ProjectInitialization::SetupIncomplete,
@@ -269,6 +265,7 @@ mod tests {
         declared.policy.state = rift_canopy::ProjectPolicyState::Declared;
         loaded.seed(&mut declared);
         assert!(declared.settings.first().unwrap().enabled);
+        assert!(!loaded.features["total_recall"], "the file keeps its shape");
     }
 
     #[test]

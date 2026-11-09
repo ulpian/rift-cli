@@ -83,9 +83,12 @@ impl Wizard {
         }
     }
 
+    /// The installer asks only which harnesses to suggest. Every feature
+    /// ships on and is switched per project in Project Settings, so a
+    /// machine-wide feature page would be one more step with no decision in it.
     fn stages(&self) -> &'static [Stage] {
         if self.purpose == Purpose::Installation {
-            &[Stage::Harnesses, Stage::Settings, Stage::Review]
+            &[Stage::Harnesses, Stage::Review]
         } else {
             &Stage::ALL
         }
