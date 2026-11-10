@@ -682,7 +682,7 @@ fn import_refuses_to_run_from_a_hook_environment() {
     assert_eq!(out.status.code(), Some(4), "a typed refusal");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "{\n  \"env\": \"GIT_DIR\",\n  \"error\": \"refused_in_hook\",\n  \"verb\": \"import\"\n}\n",
+        "{\"env\":\"GIT_DIR\",\"error\":\"refused_in_hook\",\"verb\":\"import\"}\n",
         "the refusal document is locked"
     );
     assert!(checkpoint_shards(&repo).is_empty(), "nothing was imported");
@@ -718,7 +718,7 @@ fn attach_refuses_to_run_from_a_hook_environment() {
     assert_eq!(out.status.code(), Some(4), "a typed refusal");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "{\n  \"env\": \"GIT_DIR\",\n  \"error\": \"refused_in_hook\",\n  \"verb\": \"attach\"\n}\n",
+        "{\"env\":\"GIT_DIR\",\"error\":\"refused_in_hook\",\"verb\":\"attach\"}\n",
         "the refusal document is locked"
     );
     assert!(
@@ -743,8 +743,9 @@ fn attach_refuses_to_run_from_a_hook_environment() {
     .stderr(Stdio::null());
     let out = cmd.output().unwrap();
     assert_eq!(out.status.code(), Some(4), "{out:?}");
+    let printed = String::from_utf8_lossy(&out.stdout).replace(": ", ":");
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("\"env\": \"RIFT_HOOK\""),
-        "the rift worker marker is refused by name"
+        printed.contains("\"env\":\"RIFT_HOOK\""),
+        "the rift worker marker is refused by name: {printed}"
     );
 }

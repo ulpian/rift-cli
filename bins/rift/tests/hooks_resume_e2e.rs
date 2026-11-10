@@ -249,7 +249,7 @@ fn resume_refusals_are_typed_and_their_json_is_locked() {
     );
     assert_eq!(code, 4, "{out}");
     assert_eq!(
-        out, "{\n  \"branch\": \"no-such-branch\",\n  \"error\": \"unknown_branch\"\n}\n",
+        out, "{\"branch\":\"no-such-branch\",\"error\":\"unknown_branch\"}\n",
         "the unknown-branch document is locked"
     );
 
@@ -260,7 +260,7 @@ fn resume_refusals_are_typed_and_their_json_is_locked() {
     );
     assert_eq!(code, 4, "{out}");
     assert_eq!(
-        out, "{\n  \"branch\": \"rift-e2e-branch\",\n  \"error\": \"no_checkpoint\"\n}\n",
+        out, "{\"branch\":\"rift-e2e-branch\",\"error\":\"no_checkpoint\"}\n",
         "the checkpointless-branch document is locked"
     );
 
@@ -275,7 +275,7 @@ fn resume_refusals_are_typed_and_their_json_is_locked() {
     );
     assert_eq!(code, 4, "{out}");
     assert_eq!(
-        out, "{\n  \"error\": \"dirty_worktree\"\n}\n",
+        out, "{\"error\":\"dirty_worktree\"}\n",
         "the dirty-worktree document is locked"
     );
 }

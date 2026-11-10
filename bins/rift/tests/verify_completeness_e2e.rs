@@ -107,7 +107,7 @@ impl Fixture {
         let (code, out) = run_rift_capture_in(&self.repo, &["verify", "--json"], "", &self.env());
         // The loud run prints its repo and projection lines before the document.
         let at = out
-            .find("{\n")
+            .find("{\"")
             .unwrap_or_else(|| panic!("no json in {out}"));
         let json = &out[at..];
         let doc: serde_json::Value =

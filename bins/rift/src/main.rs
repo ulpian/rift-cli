@@ -429,13 +429,23 @@ fn provenance_why(root: &Path, a: &cli::WhyArgs) -> rift_core::Result<Outcome> {
     })
 }
 
+/// A JSON document as printed: indented for a person at a terminal, compact
+/// for anything else. Agents read `--json` through a pipe and pay for every
+/// byte; the indentation was a fifth or more of a typical pull answer.
+fn json_text(value: &serde_json::Value) -> String {
+    use std::io::IsTerminal as _;
+    let text = if std::io::stdout().is_terminal() {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
+    };
+    text.unwrap_or_else(|_| "{}".into())
+}
+
 /// Emit a command outcome per the output conventions and map it to an exit code.
 fn emit(cli: &Cli, outcome: &Outcome) -> ExitCode {
     if cli.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&outcome.json).unwrap_or_else(|_| "{}".into())
-        );
+        println!("{}", json_text(&outcome.json));
     } else if !cli.quiet && !outcome.human.is_empty() {
         if outcome.code == exit::OK {
             println!("{}", outcome.human);
