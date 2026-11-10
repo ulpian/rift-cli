@@ -776,13 +776,19 @@ mod tests {
         );
     }
 
-    /// The held-output substitution lever ships at `observe`, takes a
+    /// The held-output substitution lever ships acting, takes a
     /// family's own key over the repository's, and is never above the read
     /// lever, however either is written.
     #[test]
-    fn the_substitute_held_output_lever_ships_observing_per_family_and_capped() {
+    fn the_substitute_held_output_lever_ships_enforcing_per_family_and_capped() {
         let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
-        assert_eq!(shipped.substitute_held_output, Mode::Observe);
+        assert_eq!(shipped.substitute_held_output, Mode::Enforce);
+        assert_eq!(shipped.fold_command_output, Mode::Enforce);
+        assert_eq!(
+            resolve(&ServePolicy::default(), "codex", NO_CHANNEL).substitute_held_output,
+            Mode::Observe,
+            "a family whose channel no run confirmed stays observing"
+        );
         let (written, _d) = load_src(
             "[interception]\nsubstitute_held_output = \"enforce\"\n\n\
              [interception.agents.codex]\nsubstitute_held_output = \"off\"\n",
@@ -804,9 +810,9 @@ mod tests {
     /// confirmed, a repository at `off` and a value it does not know all hold
     /// it there or below.
     #[test]
-    fn the_output_match_lever_ships_observing_and_is_never_above_the_read_lever() {
+    fn the_output_match_lever_ships_enforcing_and_is_never_above_the_read_lever() {
         let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
-        assert_eq!(shipped.recognise_by_output, Mode::Observe);
+        assert_eq!(shipped.recognise_by_output, Mode::Enforce);
         let (written, _d) = load_src("[interception]\nrecognise_by_output = \"enforce\"\n");
         assert_eq!(
             resolve(&written.policy, "claude-code", FULL).recognise_by_output,
@@ -840,7 +846,11 @@ mod tests {
     #[test]
     fn the_inherited_by_name_lever_is_never_above_the_read_lever() {
         let shipped = resolve(&ServePolicy::default(), "claude-code", FULL);
-        assert_eq!(shipped.inherit_by_name, Mode::Enforce);
+        assert_eq!(
+            shipped.inherit_by_name,
+            Mode::Observe,
+            "a name in a brief is not the bytes: by-name inheritance only observes"
+        );
         assert_eq!(
             resolve(&ServePolicy::default(), "codex", NO_CHANNEL).inherit_by_name,
             Mode::Observe,

@@ -44,16 +44,58 @@ pub struct FoldPlan {
     pub folded_bytes: usize,
 }
 
+/// What folding each stream of one result would do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamsPlan {
+    /// The plan over standard output.
+    pub stdout: FoldPlan,
+    /// The plan over standard error.
+    pub stderr: FoldPlan,
+}
+
+impl StreamsPlan {
+    /// Whether neither stream has anything to fold.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.stdout.ranges.is_empty() && self.stderr.ranges.is_empty()
+    }
+
+    /// The bytes both plans fold.
+    #[must_use]
+    pub fn folded_bytes(&self) -> usize {
+        self.stdout.folded_bytes + self.stderr.folded_bytes
+    }
+}
+
 /// The fold plan for `stdout` of `command`; empty when nothing may fold.
 #[must_use]
 pub fn fold_plan(command: &str, stdout: &str) -> FoldPlan {
-    if piped_through_filter(command)
-        || stdout.len() < FOLD_FLOOR_BYTES
-        || stdout.len() > FOLD_CEILING_BYTES
-    {
-        return FoldPlan::default();
+    fold_streams(command, stdout, "").stdout
+}
+
+/// The fold plans for both streams of `command`'s result.
+///
+/// Build tools write their bulk to stderr (cargo and rustc print every
+/// `Compiling` line there), so a planner that read stdout alone missed most
+/// of a build. The floor and the ceiling weigh the two streams together:
+/// the client decides whether to spill on the whole result it would show,
+/// not on one stream of it. A chained command line (`a && b; c`) is one
+/// result like any other; only a filter the agent piped into is respected.
+#[must_use]
+pub fn fold_streams(command: &str, stdout: &str, stderr: &str) -> StreamsPlan {
+    let total = stdout.len().saturating_add(stderr.len());
+    if piped_through_filter(command) || !(FOLD_FLOOR_BYTES..=FOLD_CEILING_BYTES).contains(&total) {
+        return StreamsPlan::default();
     }
-    let lines: Vec<&str> = stdout.split('\n').collect();
+    StreamsPlan {
+        stdout: plan_text(stdout),
+        stderr: plan_text(stderr),
+    }
+}
+
+/// The runs of one stream, with its closing lines kept.
+fn plan_text(text: &str) -> FoldPlan {
+    let lines: Vec<&str> = text.split('\n').collect();
     let foldable = lines.len().saturating_sub(KEEP_TAIL_LINES);
     let mut plan = FoldPlan::default();
     let mut start = 0;
@@ -258,5 +300,42 @@ mod tests {
             assert!(fold_plan(command, &mid).ranges.is_empty(), "{command}");
         }
         assert!(!piped_through_filter("cargo test -- --nocapture"));
+    }
+
+    #[test]
+    fn a_build_that_writes_its_bulk_to_stderr_folds_there_and_keeps_its_errors() {
+        let mut stderr = String::new();
+        for crate_no in 0..200 {
+            let _ = writeln!(
+                stderr,
+                "   Compiling a-dependency-named-{crate_no} v0.{crate_no}.1"
+            );
+        }
+        stderr.push_str("error[E0308]: mismatched types\n  --> src/lib.rs:4:5\n");
+        let plan = fold_streams("cd crates && cargo build", "", &stderr);
+        assert!(plan.stdout.ranges.is_empty());
+        assert_eq!(
+            plan.stderr.ranges,
+            [(1, 183)],
+            "all but the first and the kept tail"
+        );
+        let kept = rendered(&stderr, &plan.stderr);
+        assert!(kept.iter().any(|line| line.starts_with("error[E0308]")));
+        assert!(kept.iter().any(|line| line.contains("--> src/lib.rs:4:5")));
+    }
+
+    #[test]
+    fn both_streams_count_toward_one_floor_and_one_ceiling() {
+        let half = numbered(150, "artifact-row-with-a-long-name", "alike");
+        assert!(half.len() < FOLD_FLOOR_BYTES);
+        assert!(fold_streams("make", &half, "").is_empty());
+        let both = fold_streams("make", &half, &half);
+        assert!(!both.stdout.ranges.is_empty() && !both.stderr.ranges.is_empty());
+        let big = numbered(500, "artifact-row-with-a-long-name", "alike");
+        assert!(big.len() < FOLD_CEILING_BYTES && 2 * big.len() > FOLD_CEILING_BYTES);
+        assert!(
+            fold_streams("make", &big, &big).is_empty(),
+            "over the ceiling together"
+        );
     }
 }

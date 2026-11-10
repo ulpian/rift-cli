@@ -173,7 +173,7 @@ fn terminal_output_phases(
     work_tree: &Path,
     effective: &rift_recall_policy::Effective,
 ) -> Option<serde_json::Value> {
-    let (_, held) = guarded_phase(t, "output_match", || {
+    let (matched, held) = guarded_phase(t, "output_match", || {
         output_match_step(registry, raw, git_dir, work_tree, effective)
     });
     let (_, folded) = guarded_phase(t, "fold_output", || {
@@ -182,7 +182,11 @@ fn terminal_output_phases(
             raw,
             git_dir,
             work_tree,
-            held_applied: held.is_some(),
+            // A result matched to a file stands the fold down too: its rows
+            // say the window now holds those lines verbatim, so folding any
+            // of them would let a later read be declined for lines the model
+            // was never shown.
+            held_applied: held.is_some() || matched,
         };
         fold_output::fold_output_step(&call, effective)
     });

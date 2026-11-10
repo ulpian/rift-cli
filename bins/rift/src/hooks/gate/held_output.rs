@@ -23,7 +23,7 @@ use rift_shadow::backend::rewrite::{LineRange, RewriteForm, Stream};
 use serde_json::Value;
 
 use super::file::GateFile;
-use super::rewrite_spool::{spool_rewrite, with_stdout, ResultCall};
+use super::rewrite_spool::{spool_rewrite, with_stdout, DeliveredStreams, ResultCall};
 use super::AUDIT_IDS;
 
 /// The form a held substitution is spooled and delivered in.
@@ -84,7 +84,16 @@ pub(super) fn held_output_record(
     // delivers the result as the tool wrote it, and every stretch is booked
     // as observed, since none reached the model.
     let ranges = original_ranges(&mut frames);
-    let spooled = !ranges.is_empty() && spool_rewrite(&call.result(), HELD, &ranges, &stdout);
+    let spooled = !ranges.is_empty()
+        && spool_rewrite(
+            &call.result(),
+            HELD,
+            &ranges,
+            &DeliveredStreams {
+                stdout: &stdout,
+                stderr: None,
+            },
+        );
     for (held, done) in &booked {
         enqueue_held(call, held, *done && spooled);
     }

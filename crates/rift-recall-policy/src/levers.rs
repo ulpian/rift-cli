@@ -90,8 +90,8 @@ impl DocChannel {
 pub const DEFAULT_MAX_SLICE_BYTES: u64 = 96 * 1024;
 /// The shortest slice a decision may act on, in lines. A decline replaces the
 /// range with a reason frame, and below some length the frame costs more than
-/// the read it replaces: **111 tokens of frame against about 4 tokens a line,
-/// so a decline starts paying at 28 lines**, and the floor sits exactly there.
+/// the read it replaces: **61 tokens of frame against about 4 tokens a line,
+/// so a decline starts paying at 16 lines**, and the floor sits exactly there.
 /// It is provisional — the observe window prices the pool it forgoes and
 /// confirms or moves it. A slice under the floor is still decided and recorded;
 /// it is only never acted on.
@@ -106,7 +106,7 @@ pub const DEFAULT_MAX_SLICE_BYTES: u64 = 96 * 1024;
 /// one crate that has both the sealed renderer and the real tokenizer), and a
 /// reword that grows the frame reds that test. A floor left behind a grown
 /// frame is a lever quietly declining the reads it makes more expensive.
-pub const DEFAULT_MIN_SLICE_LINES: u32 = 28;
+pub const DEFAULT_MIN_SLICE_LINES: u32 = 16;
 /// The fewest lines a file has for its first read to be answered with its
 /// outline. Provisional, as is [`DEFAULT_FIRST_CONTACT_MIN_BYTES`]: the observe
 /// histogram re-sets both.
@@ -338,15 +338,22 @@ impl Default for InterceptionPolicy {
             max_inline_hash_bytes: DEFAULT_MAX_INLINE_HASH_BYTES,
             recovery_budget: DEFAULT_RECOVERY_BUDGET,
             basis_ttl_days: DEFAULT_BASIS_TTL_DAYS,
-            inherit_by_name: Mode::Enforce,
+            // A name in a spawn brief is not the bytes: a subagent pointed at
+            // a file never held it, so this lever only sizes its pool until a
+            // repository opts in. It matches the window journal's own default.
+            inherit_by_name: Mode::Observe,
             first_contact: Mode::Enforce,
             narrow: Mode::Observe,
             first_contact_min_lines: DEFAULT_FIRST_CONTACT_MIN_LINES,
             first_contact_min_bytes: DEFAULT_FIRST_CONTACT_MIN_BYTES,
             decline_family_held: Mode::Enforce,
-            recognise_by_output: Mode::Observe,
-            substitute_held_output: Mode::Observe,
-            fold_command_output: Mode::Observe,
+            // Terminal output is the largest pool an agent pays for, larger
+            // than every file read together. Each lever acts per member of a
+            // command line, keeps the sealed original, and is capped by the
+            // family's read channel, so it ships acting.
+            recognise_by_output: Mode::Enforce,
+            substitute_held_output: Mode::Enforce,
+            fold_command_output: Mode::Enforce,
             agents: AgentModes::default(),
         }
     }

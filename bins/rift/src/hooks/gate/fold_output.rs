@@ -19,7 +19,7 @@ use std::path::Path;
 use rift_shadow::backend::rewrite::{render_folded, LineRange, ResultText, RewriteForm, Stream};
 use serde_json::Value;
 
-use super::rewrite_spool::{spool_rewrite, with_stdout, ResultCall};
+use super::rewrite_spool::{spool_rewrite, with_streams, DeliveredStreams, ResultCall};
 use super::AUDIT_IDS;
 
 /// The call a fold is decided for.
@@ -28,7 +28,9 @@ pub(super) struct FoldCall<'a> {
     pub(super) raw: &'a rift_shadow::hooks::RawHook,
     pub(super) git_dir: &'a Path,
     pub(super) work_tree: &'a Path,
-    /// Whether a held substitution already rewrote this result.
+    /// Whether a held substitution already rewrote this result, or its
+    /// output was booked as carrying a file's lines; either way it is not
+    /// folded.
     pub(super) held_applied: bool,
 }
 
@@ -74,20 +76,20 @@ pub(super) fn fold_output_step(
     let Some(result) = bash_result(call.registry, call.raw) else {
         return (false, None);
     };
-    let plan = rift_agent::fold::fold_plan(result.command, result.stdout);
-    if plan.ranges.is_empty() {
+    let plan = rift_agent::fold::fold_streams(result.command, result.stdout, result.stderr);
+    if plan.is_empty() {
         return (false, None);
     }
-    let frames: usize = plan
-        .ranges
+    let ranges = line_ranges(&plan);
+    let frames: usize = ranges
         .iter()
-        .map(|&(lo, hi)| rift_recall_serve::render_fold_frame(hi - lo).len() + 1)
+        .map(|r| rift_recall_serve::render_fold_frame(r.end - r.start).len() + 1)
         .sum();
-    let credit = plan.folded_bytes.saturating_sub(frames);
+    let credit = plan.folded_bytes().saturating_sub(frames);
     let enforce = super::gate_mode(effective.fold_command_output)
         == rift_agent::window_journal::Mode::Enforce;
     let folded = (enforce && !call.held_applied)
-        .then(|| fold_result(call, &result, &plan.ranges))
+        .then(|| fold_result(call, &result, &ranges))
         .flatten();
     let booked = enqueue_folded(call, credit, folded.is_some());
     (booked, folded)
@@ -98,21 +100,19 @@ pub(super) fn fold_output_step(
 fn fold_result(
     call: &FoldCall<'_>,
     result: &BashResult<'_>,
-    ranges: &[(u32, u32)],
+    ranges: &[LineRange],
 ) -> Option<Value> {
-    let ranges: Vec<LineRange> = ranges
-        .iter()
-        .map(|&(start, end)| LineRange {
-            stream: Stream::Stdout,
-            start,
-            end,
-        })
-        .collect();
     let original = ResultText {
         stdout: result.stdout,
         stderr: result.stderr,
     };
-    let (stdout, _) = render_folded(original, &ranges, rift_recall_serve::render_fold_frame)?;
+    let (stdout, stderr) = render_folded(original, ranges, rift_recall_serve::render_fold_frame)?;
+    // A stream nothing folded goes out as the tool wrote it, so a result
+    // whose fold touched stdout alone keeps its stderr field byte for byte.
+    let stderr = ranges
+        .iter()
+        .any(|r| r.stream == Stream::Stderr)
+        .then_some(stderr);
     let window = crate::window_journal::key(&call.raw.session, result.child.as_deref());
     let site = ResultCall {
         raw: call.raw,
@@ -120,14 +120,31 @@ fn fold_result(
         window: &window,
         agent: result.child.as_deref(),
     };
-    if !spool_rewrite(&site, RewriteForm::FoldedOutput, &ranges, &stdout) {
+    let delivered = DeliveredStreams {
+        stdout: &stdout,
+        stderr: stderr.as_deref(),
+    };
+    if !spool_rewrite(&site, RewriteForm::FoldedOutput, ranges, &delivered) {
         return None;
     }
-    with_stdout(call.raw, stdout)
+    with_streams(call.raw, stdout, stderr)
+}
+
+/// Both plans as the spool's line ranges, stdout first.
+fn line_ranges(plan: &rift_agent::fold::StreamsPlan) -> Vec<LineRange> {
+    let of = |stream, fold: &rift_agent::fold::FoldPlan| {
+        fold.ranges
+            .iter()
+            .map(move |&(start, end)| LineRange { stream, start, end })
+            .collect::<Vec<_>>()
+    };
+    let mut ranges = of(Stream::Stdout, &plan.stdout);
+    ranges.extend(of(Stream::Stderr, &plan.stderr));
+    ranges
 }
 
 /// The command and streams of a Claude Code `Bash` result in the tool's
-/// object shape; stdout is the stream folded, so the one sized.
+/// object shape; both streams are planned and sized.
 fn bash_result<'a>(
     registry: &rift_shadow::hooks::AdapterRegistry,
     raw: &'a rift_shadow::hooks::RawHook,

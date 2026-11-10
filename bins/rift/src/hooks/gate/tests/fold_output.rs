@@ -126,14 +126,27 @@ fn fold_step(
     Option<serde_json::Value>,
     Vec<crate::agent_queue::ServeAudit>,
 ) {
+    fold_streams_step(root, (stdout, ""), mode, held_applied)
+}
+
+/// [`fold_step`] over both streams of the result.
+fn fold_streams_step(
+    root: &std::path::Path,
+    (stdout, stderr): (&str, &str),
+    mode: rift_recall_policy::Mode,
+    held_applied: bool,
+) -> (
+    Option<serde_json::Value>,
+    Vec<crate::agent_queue::ServeAudit>,
+) {
     let mut effective = observing();
     effective.fold_command_output = mode;
     let payload = serde_json::json!({
         "tool_name": "Bash",
         "tool_use_id": CALL,
         "cwd": root.display().to_string(),
-        "tool_input": { "command": "ls -l snapshots" },
-        "tool_response": { "stdout": stdout, "stderr": "", "interrupted": false },
+        "tool_input": { "command": "cd crates && cargo build && ls -l snapshots" },
+        "tool_response": { "stdout": stdout, "stderr": stderr, "interrupted": false },
     });
     let raw = hook("claude-code", "PostToolUse", "s-fold", payload);
     let registry = AdapterRegistry::with_builtin();
@@ -222,4 +235,47 @@ fn fold_output_enforce_without_a_spooled_original_delivers_the_result_unchanged(
         rows.last().unwrap().decision,
         ServeAuditKind::ToolOutputFolded
     );
+}
+
+/// ★ A chained build whose bulk went to stderr folds there too: the error and
+/// its span are kept, stdout is delivered as written, and the spool checks
+/// both streams of the delivery against the original.
+#[test]
+fn fold_output_enforce_folds_a_build_written_to_stderr_and_keeps_its_error() {
+    use rift_shadow::backend::rewrite::{check_rendering, RenderCheck, ResultText};
+    let tmp = super::fixtures::minted(checkout());
+    let root = tmp.path();
+    let mut stderr = String::new();
+    for n in 0..300 {
+        let _ = writeln!(stderr, "   Compiling a-dependency-named-{n} v0.{n}.1");
+    }
+    stderr.push_str("error[E0308]: mismatched types\n  --> src/lib.rs:4:5\n");
+    let stdout = "built\n";
+    let (folded, rows) = fold_streams_step(
+        root,
+        (stdout, &stderr),
+        rift_recall_policy::Mode::Enforce,
+        false,
+    );
+    let folded = folded.expect("the stderr build log folds under enforce");
+    assert_eq!(folded["stdout"].as_str(), Some(stdout));
+    let delivered = folded["stderr"].as_str().unwrap();
+    assert!(delivered.len() < stderr.len() / 4);
+    assert!(delivered.contains("error[E0308]: mismatched types"));
+    assert!(delivered.contains("--> src/lib.rs:4:5"));
+    let (header, _) = super::fixtures::spooled(root, "s-fold", CALL);
+    let check = check_rendering(
+        header.form,
+        ResultText {
+            stdout,
+            stderr: &stderr,
+        },
+        ResultText {
+            stdout,
+            stderr: delivered,
+        },
+        &header.replaced,
+    );
+    assert_eq!(check, RenderCheck::Matches);
+    assert_eq!(rows[0].decision, ServeAuditKind::ToolOutputFoldApplied);
 }

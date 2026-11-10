@@ -33,15 +33,22 @@ pub(super) struct ResultCall<'a> {
     pub(super) agent: Option<&'a str>,
 }
 
-/// Check the delivered `stdout` against the result's original under `form`
+/// What a rewrite would deliver in place of the tool's streams. A `None`
+/// stream goes out as the tool wrote it.
+pub(super) struct DeliveredStreams<'a> {
+    pub(super) stdout: &'a str,
+    pub(super) stderr: Option<&'a str>,
+}
+
+/// Check the delivered streams against the result's original under `form`
 /// and spool the original; says whether the rewrite may be delivered.
 pub(super) fn spool_rewrite(
     call: &ResultCall<'_>,
     form: RewriteForm,
     replaced: &[LineRange],
-    delivered_stdout: &str,
+    delivered: &DeliveredStreams<'_>,
 ) -> bool {
-    spool_checked(call, form, replaced, delivered_stdout).is_some()
+    spool_checked(call, form, replaced, delivered).is_some()
 }
 
 /// [`spool_rewrite`], `None` at the first step that refuses.
@@ -49,7 +56,7 @@ fn spool_checked(
     call: &ResultCall<'_>,
     form: RewriteForm,
     replaced: &[LineRange],
-    delivered_stdout: &str,
+    delivered: &DeliveredStreams<'_>,
 ) -> Option<()> {
     let response = call.raw.payload.get("tool_response")?;
     let stdout = response.get("stdout")?.as_str()?;
@@ -59,8 +66,8 @@ fn spool_checked(
         .unwrap_or_default();
     let original = ResultText { stdout, stderr };
     let delivered = ResultText {
-        stdout: delivered_stdout,
-        stderr,
+        stdout: delivered.stdout,
+        stderr: delivered.stderr.unwrap_or(stderr),
     };
     // The rewrite is held to the record before anything is kept: a rewrite
     // verify would call a mismatch is one that never goes out.
@@ -104,5 +111,19 @@ fn spool_checked(
 pub(super) fn with_stdout(raw: &rift_shadow::hooks::RawHook, stdout: String) -> Option<Value> {
     let mut output = raw.payload.get("tool_response")?.clone();
     *output.get_mut("stdout")? = Value::from(stdout);
+    Some(output)
+}
+
+/// The result object with `stdout` replaced, and `stderr` too when one is
+/// given; a result with no `stderr` field gets none added.
+pub(super) fn with_streams(
+    raw: &rift_shadow::hooks::RawHook,
+    stdout: String,
+    stderr: Option<String>,
+) -> Option<Value> {
+    let mut output = with_stdout(raw, stdout)?;
+    if let Some(stderr) = stderr {
+        *output.get_mut("stderr")? = Value::from(stderr);
+    }
     Some(output)
 }
