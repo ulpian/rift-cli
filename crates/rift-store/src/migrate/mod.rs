@@ -283,7 +283,7 @@ pub fn open_migrated(
 /// [`open_migrated`] with the recall projection's migration set
 /// ([`recall_migrations`]) — the standard way to open `recall.db`. An open
 /// whose ledger already matches the code skips the planner (see
-/// [`apply_code_migrations`]).
+/// `apply_code_migrations`).
 ///
 /// # Errors
 /// See [`open_migrated`].

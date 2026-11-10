@@ -26,7 +26,7 @@ getrandom = { workspace = true }
 zeroize = { workspace = true }
 flate2 = "1"
 tar = "0.4"
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 portable-pty = "0.9"
 vt100 = "0.15"
 # `replay-savings` replays recorded transcripts through the SHIPPED recogniser

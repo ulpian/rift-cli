@@ -77,7 +77,7 @@ turso = "0.1"                  # (verify) BETA; deferred pending re-evaluation
 notify = "6.1"
 # Reference store for the testable vertical slice: SQLite-compatible, synchronous,
 # runs the SAME SQL/triggers Turso will. Production target stays `turso` behind the seam.
-rusqlite = { version = "0.32", features = ["bundled"] }   # (verify) needs a C compiler (bundled SQLite)
+rusqlite = { version = "0.41", features = ["bundled"] }   # (verify) needs a C compiler (bundled SQLite)
 # TUI / 3D render engine (first-party)
 # xRenderEngine (xre) 0.2 — depend on the terminal + 2D TUI layers directly, NOT the
 # `xre-rs` facade: the facade pulls xre-engine (ECS), xre-render (software 3D) and

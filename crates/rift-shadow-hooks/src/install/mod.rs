@@ -328,10 +328,10 @@ impl core::fmt::Display for RefusedBinary {
 /// `/tmp` binary and four days of silently skipped hooks.
 ///
 /// # Errors
-/// [`RiftError::Io`](rift_core::RiftError::Io) on a filesystem failure —
+/// [`RiftError::Io`] on a filesystem failure —
 /// including the never-clobber refusal when a user hook cannot be chained aside
 /// because its `.rift-chained` name is taken — and
-/// [`RiftError::Validity`](rift_core::RiftError::Validity) when `cfg.rift_bin`
+/// [`RiftError::Validity`] when `cfg.rift_bin`
 /// lies in the hooks directory itself, under every policy.
 pub fn install_hooks_with(
     cfg: &HookInstall,

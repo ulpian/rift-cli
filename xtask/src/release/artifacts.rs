@@ -205,7 +205,9 @@ fn member_digest(path: &Path, windows: bool) -> Result<String> {
         ensure(zip.len() == 1, "expected exactly one archive member")?;
         let mut entry = zip.by_index(0).map_err(|e| e.to_string())?;
         ensure(
-            entry.name() == "rift.exe" && entry.is_file() && !entry.is_symlink(),
+            entry.name().is_ok_and(|name| name == "rift.exe")
+                && entry.is_file()
+                && !entry.is_symlink(),
             "invalid ZIP member",
         )?;
         std::io::copy(&mut entry, &mut hash).map_err(|e| e.to_string())?;

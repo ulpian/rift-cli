@@ -29,7 +29,14 @@ yanked = "deny"
 # optional, default-off feature): RUSTSEC-2026-0183 / -0184 (`git2` unsound — a
 # build-dep of turso's `built`; unsound APIs never called) and RUSTSEC-2024-0436
 # (`paste` unmaintained — a `turso_core` proc-macro).
-ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2026-0192"]
+# RUSTSEC-2026-0367 / -0368 / -0369 / -0429 (`zip` 8.6.0): every one is a flaw in
+# `ZipArchive::extract` / `ZipStreamReader::extract` writing members to disk.
+# zip 8.x reaches the lockfile only through anydoc 0.2.4 (the latest release),
+# which requires `zip ^8.6` and reads OOXML/ODF members in memory via
+# `ZipArchive::by_name` -- it never calls `extract`. xtask, Rift's own zip user,
+# is on the patched 9.x line. Drop these when anydoc moves to zip >= 9.
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2026-0192",
+          "RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369", "RUSTSEC-2026-0429"]
 
 [bans]
 multiple-versions = "warn"
