@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rift_store::{projection_db_for_family_under, CanonicalStore, SqliteStore};
+use rift_store::{
+    projection_db_for_family_under, projection_file_stamp, CanonicalStore, SqliteStore,
+};
 
 use crate::feeds::project_family;
 use crate::store::runtime;
@@ -66,6 +68,13 @@ pub(super) struct WatermarkPoller {
     seen: BTreeMap<String, Option<Watermark>>,
     /// How many more fast-interval ticks remain before decaying to idle cadence.
     active_ticks: u8,
+    /// project path → its projection file, once its family has resolved. A
+    /// family is minted once and never re-minted automatically, so the
+    /// resolution (a git discovery plus a file read) need not run per tick.
+    dbs: BTreeMap<String, PathBuf>,
+    /// project path → the projection's stat stamp and the watermark read
+    /// under it. An unchanged stamp answers the tick without opening SQLite.
+    stamped: BTreeMap<String, (String, Option<Watermark>)>,
 }
 
 impl WatermarkPoller {
@@ -74,6 +83,8 @@ impl WatermarkPoller {
             root,
             seen: BTreeMap::new(),
             active_ticks: 0,
+            dbs: BTreeMap::new(),
+            stamped: BTreeMap::new(),
         }
     }
 
@@ -110,7 +121,7 @@ impl WatermarkPoller {
         let paths: Vec<String> = self.seen.keys().cloned().collect();
         for path in paths {
             let prev = self.seen.get(&path).copied().flatten();
-            let now = read_watermark_pair(&self.root, &path);
+            let now = self.read_stamped(&path);
             let kind = match (prev, now) {
                 (Some(p), Some(n)) if n.epoch != p.epoch => Some(ChangeKind::Rebuilt),
                 (Some(p), Some(n)) if n.cursor != p.cursor => Some(ChangeKind::Ingested),
@@ -134,19 +145,65 @@ impl WatermarkPoller {
         }
         out
     }
+
+    /// [`read_watermark_at`] behind the projection's stat stamp.
+    ///
+    /// The stamp is taken *before* the read, so a commit that lands while
+    /// SQLite is open leaves the cached stamp stale and the next tick reads
+    /// again: a change can be read twice, never missed. Only an exact match
+    /// skips the open.
+    fn read_stamped(&mut self, path: &str) -> Option<Watermark> {
+        let db = self.projection_db(path)?;
+        let stamp = projection_file_stamp(&db);
+        if let Some((seen, mark)) = self.stamped.get(path) {
+            if *seen == stamp {
+                return *mark;
+            }
+        }
+        let mark = read_watermark_at(&db);
+        self.stamped.insert(path.to_owned(), (stamp, mark));
+        mark
+    }
+
+    /// The project's projection file, resolving its family once. An
+    /// unresolved family is not remembered: it may be minted later.
+    fn projection_db(&mut self, path: &str) -> Option<PathBuf> {
+        if let Some(db) = self.dbs.get(path) {
+            return Some(db.clone());
+        }
+        let db = projection_db_of(&self.root, path)?;
+        self.dbs.insert(path.to_owned(), db.clone());
+        Some(db)
+    }
 }
 
 /// Read a project's `{cursor, epoch}` watermark, or `None` if the projection
-/// is missing/unreadable. The single tiny read the change observer polls;
-/// agrees with [`read_project`] on `None` (iff the projection is
-/// absent/unreadable).
+/// is missing/unreadable, with no stamp and no cache: what the poller's
+/// cached read must always agree with. Agrees with [`read_project`] on
+/// `None` (iff the projection is absent/unreadable).
+#[cfg(test)]
 pub(super) fn read_watermark_pair(root: &Path, path: &str) -> Option<Watermark> {
-    let dir = PathBuf::from(path);
-    let db = projection_db_for_family_under(root, &project_family(&dir)?);
+    read_watermark_at(&projection_db_of(root, path)?)
+}
+
+/// Where a project's projection lives, or `None` while its family is
+/// unresolved.
+fn projection_db_of(root: &Path, path: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    tests::FAMILY_RESOLUTIONS.with(|n| n.set(n.get() + 1));
+    let family = project_family(Path::new(path))?;
+    Some(projection_db_for_family_under(root, &family))
+}
+
+/// The watermark of the projection at `db`, or `None` if it is
+/// missing/unreadable.
+fn read_watermark_at(db: &Path) -> Option<Watermark> {
     if !db.exists() {
         return None;
     }
-    let store = SqliteStore::open(&db).ok()?;
+    #[cfg(test)]
+    tests::OPENS.with(|n| n.set(n.get() + 1));
+    let store = SqliteStore::open(db).ok()?;
     let rt = runtime().ok()?;
     let cursor = rt.block_on(store.read_watermark("captured_event")).ok()?;
     let epoch = rt.block_on(store.read_rebuild_epoch()).ok()?;
@@ -155,11 +212,24 @@ pub(super) fn read_watermark_pair(root: &Path, path: &str) -> Option<Watermark> 
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use rift_git::repo_id_for;
     use rift_store::projection_db_under;
 
     use super::super::fixtures::{append_events, make_project, path_of};
     use super::*;
+
+    thread_local! {
+        /// SQLite opens the watermark read made on this thread.
+        pub(super) static OPENS: Cell<u32> = const { Cell::new(0) };
+        /// Family resolutions made on this thread.
+        pub(super) static FAMILY_RESOLUTIONS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    fn counted(counter: &'static std::thread::LocalKey<Cell<u32>>) -> u32 {
+        counter.with(Cell::get)
+    }
 
     // --- the change observer -------------------------------------------------
 
@@ -426,5 +496,44 @@ mod tests {
             assert!(poller.poll_once().is_empty());
         }
         assert_eq!(poller.interval(), IDLE_INTERVAL);
+    }
+
+    #[test]
+    fn a_quiet_projection_is_answered_from_its_stamp_without_opening_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 2);
+        let mut poller = WatermarkPoller::new(root.path().to_path_buf());
+        poller.sync(&path_of(&proj), None);
+        assert_eq!(poller.poll_once().len(), 1, "the first read is real");
+        // The poller's own close may fold the log back once; let it settle.
+        assert!(poller.poll_once().is_empty());
+        let opens = counted(&OPENS);
+        for _ in 0..5 {
+            assert!(poller.poll_once().is_empty());
+        }
+        assert_eq!(counted(&OPENS), opens, "no tick opened a quiet projection");
+
+        append_events(root.path(), &proj, 2, 1);
+        assert_eq!(
+            poller.poll_once(),
+            vec![ChangeEvent {
+                project: path_of(&proj),
+                kind: ChangeKind::Ingested,
+            }]
+        );
+        assert!(counted(&OPENS) > opens, "a moved stamp is read");
+    }
+
+    #[test]
+    fn a_projects_family_is_resolved_once_across_ticks() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = make_project(root.path(), "p", 1);
+        let mut poller = WatermarkPoller::new(root.path().to_path_buf());
+        poller.sync(&path_of(&proj), None);
+        let before = counted(&FAMILY_RESOLUTIONS);
+        for _ in 0..4 {
+            let _ = poller.poll_once();
+        }
+        assert_eq!(counted(&FAMILY_RESOLUTIONS), before + 1);
     }
 }

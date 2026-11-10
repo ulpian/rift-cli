@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use rift_store::file_stamp;
+
 use super::baseline::{baseline_dir, baseline_ordinals};
 
 // Most turns have nothing to announce, and discovering that was the single
@@ -65,25 +67,14 @@ impl<'a> TurnStamp<'a> {
 }
 
 /// A cheap fingerprint of the recall projection: `recall.db` and its
-/// write-ahead log.
+/// write-ahead log, as [`rift_store::projection_file_stamp`] spells it.
 ///
 /// `None` means the projection could not even be located, which is the one
 /// state that must never be treated as "unchanged" — the full path would fail
 /// here too, and failing to *ask* is different from asking and hearing nothing.
-///
-/// The `-wal` file is stamped as well as the database, and must be:
-/// `rift-store` opens every writable projection in `journal_mode=WAL`, where a
-/// commit lands in the log and leaves the main file untouched until the next
-/// checkpoint. Stamping the database alone would turn this precondition from
-/// conservative into wrong.
 pub(in crate::hooks) fn projection_stamp(repo: &std::path::Path) -> Option<String> {
     let db = crate::family::recall_db(repo).ok()?;
-    let wal = {
-        let mut p = db.clone().into_os_string();
-        p.push("-wal");
-        PathBuf::from(p)
-    };
-    Some(format!("{},{}", file_stamp(&db), file_stamp(&wal)))
+    Some(rift_store::projection_file_stamp(&db))
 }
 
 /// The fingerprint of this session's baseline: the newest ordinal and that
@@ -148,19 +139,6 @@ pub(super) fn record_stamp(
 /// admits only `<ordinal>.json`) can never mistake it for a baseline.
 pub(super) fn stamp_path(repo: &std::path::Path, session_key: &str) -> PathBuf {
     baseline_dir(repo, session_key).join("projection.stamp")
-}
-
-/// `<len>:<mtime-nanos>` for one file, or `-` when it is not there.
-fn file_stamp(path: &std::path::Path) -> String {
-    let Ok(md) = std::fs::metadata(path) else {
-        return "-".to_owned();
-    };
-    let nanos = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    format!("{}:{nanos}", md.len())
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ pub mod rebuild;
 pub mod schema;
 pub mod sensitive;
 mod sqlite_store;
+pub mod stamp;
 pub mod store;
 // NOTE — the Turso engine is DEFERRED: a native-async `TursoStore` implements
 // the `store::Store` seam, but the `turso` dependency is intentionally not wired
@@ -145,6 +146,7 @@ pub use schema::{
 };
 pub use sensitive::{is_sensitive_column, sensitive_columns, SensitiveColumn};
 pub use sqlite_store::SqliteStore;
+pub use stamp::{file_stamp, projection_file_stamp};
 pub use store::{NotifyCap, Row, Store, StoreConn, StoreDescriptor, StoreTx, TxMode};
 pub use value::Value;
 pub use window::CREATED_AT_UNKNOWN;
