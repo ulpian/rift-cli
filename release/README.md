@@ -8,13 +8,17 @@ Google owns the SDK's interpreter dependency.
 
 ## Current publication status
 
-All five cross-built platform packages are in the ignored
-`tmp/rift-alpha/cross-builds/` directory. Only Intel macOS has been exercised
-natively. The other four packages remain unpublished pending native checks.
-GitHub Actions packaging is blocked by account billing; local tooling does not
-require Actions. The short download bucket is reserved, empty and private;
-no public installer is available. Its project, bucket and prefix are recorded
-in `public-storage.toml`.
+`v1.0.0-alpha` is published under prefix `a` and `v1.1.0-alpha` under
+prefix `v1.1.0-alpha` of the bucket in `public-storage.toml`. Each prefix holds the five
+archives, `SHA256SUMS`, `downloads.tsv`, `NOTES.md`, `VERIFICATION.json` and
+both installer wrappers. Only Intel macOS was exercised natively; the owner
+authorised publishing the other four cross-builds before native checks, and
+`VERIFICATION.json` records which checks ran. GitHub Actions packaging is
+blocked by account billing; local tooling does not require Actions.
+
+Cross-builds run from this Mac with the kit under `target/alpha-cross/`
+(`cargo-zigbuild` with Linux glibc pinned to 2.28, `cargo-xwin` with the
+static CRT for Windows), against a `git archive` of the tag.
 
 The existing private bucket in `storage.toml` is retained unchanged. Its public
 access prevention, uniform IAM and signing account belong to the earlier private
@@ -213,15 +217,15 @@ touch PATH. `RIFT_NO_MODIFY_PATH=1` opts out of both steps and
 `RIFT_NO_SHELL_RESTART=1` keeps the startup-file line but skips the fresh shell;
 unattended installs (`RIFT_NONINTERACTIVE=1`, `CI` set, root, or no terminal)
 never start one, and the fresh shell gets the caller's own umask back.
-Uninstalling leaves the marked line and the `Path` entry in place.
+Uninstalling removes the marked line, and on Windows the default `Path` entry.
 
 Public links have no expiry and do not need renewal. To issue a new link, choose a
 new prefix and repeat plan/upload using the same verified archives. Old
 links keep working until you remove their objects. An obscure URL can leak through
 logs and sharing; do not put secrets or user data in this bucket.
 
-The current packages are unsigned/unnotarized. The locally cross-built Linux x64
-binary requires glibc 2.35; ARM64 requires glibc 2.39. Windows is x64 MSVC with the
+The current packages are unsigned/unnotarized. From `v1.1.0-alpha` the Linux
+binaries are linked against glibc 2.28 (`v1.0.0-alpha` needed 2.35 / 2.39). Windows is x64 MSVC with the
 static CRT. These constraints must appear in the release review.
 
 ## Pre-push and GitHub
@@ -233,4 +237,4 @@ RPF is the remaining active development work.
 
 The packaging workflow now invokes Rust xtask commands, collects five archives
 and checksums, and never creates a GitHub Release. Once verified, create the
-prerelease for the approved tag using `notes/v1.0.0-alpha.md` as its description.
+prerelease for the approved tag using `notes/<tag>.md` as its description.

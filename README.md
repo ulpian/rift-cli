@@ -1,177 +1,195 @@
 # Rift
 
-**Rift is a Rust TUI + CLI for developers working with AI agents and coding
-assistants.** Typing `rift` opens **Canopy**, a terminal dashboard showing every
-project Rift watches, what each agent is doing, how much context and money is
-being burned, and how much **rift-total-recall** is saving by not re-feeding the
-model what it already knows.
+**A terminal dashboard and memory layer for AI coding agents.**
 
-Rift makes AI-assisted engineering **legible, recoverable, and cheaper**:
+Rift records every agent session in your repository as a tamper-evident,
+git-native history, and stops your agents paying again for context they already
+hold. When an agent re-reads a file it has already seen, or reruns a command
+whose output it already has, Rift hands back only what changed.
 
-- **rift-shadow** captures every agent session — prompts, tool calls, file edits,
-  token counts, checkpoints — as a git-native, tamper-evident, **immutable**
-  ledger. Secrets are redacted *before* anything durable is written. Capture,
-  condensation and archival are native Rust; pre-Rift checkpoint histories are
-  readable through `rift import --from-legacy`.
-- **rift-total-recall** projects a *memory-delta validity graph* over that ledger
-  and exposes it through native hook injection plus bounded `rift recall`
-  skills, so agents retrieve
-  **deltas** (what changed, what's still valid, what's stale) instead of
-  re-reading the world. At the tool call it declines once a read the window
-  already holds (the identical repeat always runs), answers a large file's
-  first read with its bound outline, and can stand in for a shell result's held
-  lines or repeated noise once the original is sealed, each lever set per
-  repository and per agent. It instruments `repeated_context_rate` *before* it
-  optimizes, so savings are your own measured numbers.
-- **rift-canopy** is the dashboard: a 3-column grid (projects · detail · live
-  graphs), a context-fullness "nic-gauge", and a slash-command palette. Project
-  policy and native agent wiring live in the Repository card's **Project
-  Settings** modal rather than separate dashboard panels.
+```text
+rift                      open the Canopy dashboard for this repository
+rift doctor               check that capture and recall are wired correctly
+rift recall status        see what Total Recall knows and what it has saved
+```
 
-> **Scope.** This repo is the **local toolchain**. Rift Cloud (encrypted sync,
-> web dashboard, forecasting) is a separately built surface — every
-> local decision is made *sync-ready* so Cloud is additive, never a rewrite.
+> **Alpha.** This is `v1.1.0-alpha`. Expect rough edges, and please
+> [send findings](#feedback): that is what this alpha is for.
 
-## Two non-negotiables
+---
 
-1. **Immutable by construction** — canonical data is append-only (no `UPDATE`/
-   `DELETE`); corrections supersede; tamper-evidence is hash chains + Merkle
-   roots, enforced at the type, SQL-trigger, and property-test layers.
-2. **Security per line** — the `RedactedBytes` type makes persisting un-redacted
-   bytes a *compile error*; untrusted output is never served raw; exact retrieval
-   is policy-gated and audited. See [SECURITY.md](SECURITY.md).
+## Install
 
-## Workspace layout
+**macOS and Linux**
 
-| Crate | Role |
+```sh
+curl -fsS https://storage.googleapis.com/rift-e59ea04337d9/v1.1.0-alpha/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm 'https://storage.googleapis.com/rift-e59ea04337d9/v1.1.0-alpha/install.ps1' | iex
+```
+
+The installer picks the build for your OS and CPU and checks its SHA-256. It
+installs `rift` in `~/.local/bin` (`%LOCALAPPDATA%\Rift\bin` on Windows), adds
+that folder to your `PATH`, and opens a short setup. You don't need Rust, and
+you don't need administrator rights.
+
+When it finishes, `rift` works in the same terminal. On macOS and Linux the
+installer opens a fresh shell for this. You can set these before running it:
+
+| Variable | Effect |
 |---|---|
-| `rift-core` | Shared: errors, ids (hash + ULID), local identity, time, `RedactedBytes`/`SecretBytes`, immutability markers. |
-| `rift-config` | Policy-as-code (`.rift/config.toml` and `.rift/policies/serve.toml`), safe comment-preserving edits, redactor packs, and a backtracking-free glob matcher. |
-| `rift-crypto` | ChaCha20-Poly1305 AEAD, HKDF envelope keys, zeroized secret types. |
-| `rift-hashchain` | SHA-256 leaves, Merkle roots, the checkpoint chain, inclusion proofs. |
-| `rift-store` | Append-only store (rusqlite reference impl; **Turso** is the production target), migration engine, integrity chain, bitemporal cost facts, column encryption. |
-| `rift-shadow*` | Capture: the native checkpoint archive, the two-pass redaction gate, hooks/canonical events + state machine, line attribution + confidence, the four-class cost model. |
-| `rift-recall-*` | Recall plane: handles + the four-state envelope, hash-bound validity, ledger metrics, task-aware ranking, the context-pack compiler, serving policy, `memd.*` events, the bounded hook/skill surface, the substrate reader. |
-| `rift-canopy` / `rift-canopy-data` | The dashboard behind a `RenderBackend` seam plus its policy, native-adapter, and status projections. |
-| `rift-agent*` | The native integration SDK and adapters for supported coding agents. |
-| `rift-nic-gauge` | Read-only context-window utilization data for Canopy; it is not a project setting. |
-| `rift-git` / `rift-registry` / `rift-tokens` | Native git plumbing and worktree discovery; the machine-global project registry; the one token-counting authority. |
-| `bins/rift`, `bins/rift-memd` | The `rift` entrypoint and the recall binary. |
+| `RIFT_BIN_DIR=/path` | Install somewhere other than the default folder. |
+| `RIFT_NO_MODIFY_PATH=1` | Leave your shell startup files and `PATH` alone. |
+| `RIFT_NO_SHELL_RESTART=1` | Keep the `PATH` line but don't start a new shell. |
+| `RIFT_NONINTERACTIVE=1` | Skip all prompts (CI, scripts). |
 
-## Build & run
+**Platforms:** macOS 11+ on Apple silicon and Intel; Linux x86-64 and ARM64
+(glibc 2.28 or newer, so not Alpine/musl); Windows 10+ x64.
 
-```bash
-cargo build --workspace
-cargo test  --workspace
-cargo run -p rift -- status      # CLI subcommand
-cargo run -p rift               # launch Canopy
-cargo run -p rift -- viewer      # read-only checkpoint/Recall inspection
-cargo run -p rift -- recall known-state --task "inspect Rift" --file README.md
-cargo run -p rift-memd -- status # inspect the recall projection
+## Quick start
+
+```sh
+cd your-project        # any git repository
+rift
 ```
 
-`rusqlite` is built `bundled`, so a C compiler is required.
+On the first run in a repository, Rift shows what it is about to set up: which
+agents it found, which hooks it will add, and your capture and privacy
+settings. Nothing is written until you confirm. After that, use your coding
+agent as you normally would. Rift captures each session in the background and
+answers repeat reads with only what changed.
 
-### Two binaries, one optional
+Every feature is on by default. To turn one off for a repository, open
+**Project Settings** in the dashboard (press `s`).
 
-`rift` is the whole product for daily use: capture, serving and Canopy run in
-that one process, and `rift recall` keeps the recall projection fresh on its
-own. `rift-memd` is the separate projection binary (`metrics`, `rebuild`,
-`status`, `doctor`, `eval`) — it reports the measured baseline and rebuilds the
-projection from git, so it must stay out of the hook-path binary (size cap; no
-network crate in the shipped graph).
+### Supported agents
 
-### Automatic Total Recall setup
+| Agent | Capture | Total Recall |
+|---|---|---|
+| Claude Code | ✅ | ✅ |
+| Codex | ✅ | ✅ |
+| Antigravity | ✅ | ✅ |
+| Gemini CLI, Cursor, Copilot CLI, OpenCode, Factory Droid, Ollama | detected, not yet wired | — |
 
-`rift init` also enables Recall and safely provisions validated native project
-wiring for detected agents. This alpha captures Claude Code, Codex and
-Antigravity. Gemini CLI, Cursor, Copilot CLI, OpenCode, Factory Droid and
-Ollama are not wired for capture, yet all nine stay in the shared adapter
-registry, so every integration keeps its row in listings and Project Settings.
-The reasons differ: five of the six declare verb surfaces the real agents never
-send, so an install that appeared to succeed would capture nothing; the sixth
-is outside this alpha's scope. Either way Rift refuses to enable them rather
-than half-wire them — a refusal is honest about what is recorded, a half-wired
-integration is not. The
-supported set is not prose: it is the `ALPHA_AGENTS` constant in
-`rift-shadow-hooks` that the refusal itself reads, so what this paragraph
-claims and what the code does are the same list. Use `rift init --no-recall`
-to opt out, or manage it later with `rift recall init`, `rift recall status`,
-and `rift recall disable`.
-Client trust, hook approval, authentication, upgrades, and restarts remain
-explicit user actions.
+Rift won't half-wire an agent. If it can't capture an agent reliably, it says
+so and leaves that agent's configuration untouched.
 
-In Canopy, select a repository and use `[ Project Settings ]`, press `s`, or run
-`/settings`. The modal controls Recall, per-turn delta injection, tool-call and
-token-usage capture, raw transcripts, and each native integration. Repository
-policy files are authoritative; edits are validated, conflict-checked, and
-atomically replaced while preserving comments and unrelated keys. Raw
-transcripts always require an explicit risk confirmation. Uninitialized or
-partially initialized repositories use the same modal as a resumable setup
-page.
+## What you get
 
-Use `[ Recall Viewer ]`, press `r`, run `/viewer [TARGET] [--repo PATH]`, or
-launch `rift viewer [TARGET] [--repo PATH]` to inspect durable checkpoints,
-redacted transcripts and tasks, metadata-only shadow state, Recall facts,
-recorded hunks, and verification evidence. The viewer is read-only: standalone
-launch skips ingest and write-capable Canopy startup, and an unregistered
-`--repo` remains session-only.
+**Canopy, the dashboard.** Type `rift` in a repository. It shows your
+projects and worktrees, what each agent is doing, how full each context window
+is, token usage and cost, and how much Recall has saved. In the session viewer
+(`r`), prompts, file edits (folded per file, with arrow keys to open and close
+them) and recalls are colour-coded.
 
-The Codex row distinguishes the standalone CLI from the Codex extension in VS
-Code and compatible editors; the extension's bundled runtime does not count as
-a CLI on `PATH`. It also reports the project capture descriptor and
-`.codex/hooks.json` separately. Enabling Codex merges fingerprinted Rift hook
-groups while preserving unrelated hooks, and disabling removes only those
-matching groups. Edited, malformed, or symlinked hook configuration is refused
-for repair instead of overwritten.
+**rift-shadow, the record.** Every session's prompts, tool calls, edits,
+token counts and checkpoints go into an append-only, hash-chained ledger
+stored in git. Secrets are redacted before anything reaches disk.
 
-## Develop
+**Total Recall, the savings.** Rift tracks what each agent's context window
+already holds. When the agent:
 
-Common tasks run through [`skills.sh`](skills.sh) (see [SKILLS.md](SKILLS.md)):
+- **re-reads a file it already has**, Rift returns only the lines that changed,
+  or a short note saying nothing did;
+- **reads a large file for the first time**, Rift gives it an outline first;
+- **runs shell commands**, Rift looks at the output of each command in a chain
+  like `cd x && cat a.rs && cargo test` separately. Lines the agent has already
+  seen are replaced with a reference to them. Long runs of repeated build noise
+  are folded, but errors, warnings and test summaries never are.
 
-```bash
-./skills.sh check      # pre-push gate: fmt-check + clippy -D warnings + test
-./skills.sh test
-./skills.sh run -- status
-./skills.sh list       # all tasks
+The original output is always saved before anything is changed. Savings are measured on your repository, not estimated:
+`rift recall status` shows them.
+
+## Everyday commands
+
+| Command | What it does |
+|---|---|
+| `rift` | Open the dashboard. |
+| `rift doctor` | Check this repository's setup and print fixes. |
+| `rift recall status` | Recall's state and measured savings. |
+| `rift viewer` | Read-only browser for checkpoints, transcripts and recalls. |
+| `rift install` | Change your default agents and preferences. |
+| `rift worktree status` | Check how a linked git worktree is wired. |
+| `rift --help` | Everything else. |
+
+**Update:** run the install command again. It replaces the binary and keeps your
+settings. An older alpha never replaces a newer one.
+
+**Uninstall:** `rift uninstall --dry-run` shows what would be removed, and
+`rift uninstall` removes it, including the `PATH` line the installer added. Your
+captured history is kept unless you add `--purge`.
+
+## Privacy and security
+
+- **Everything stays on your machine.** Rift has no telemetry and no account,
+  and the shipped binary doesn't include a networking library.
+- **Redaction happens before storage.** The type system makes writing
+  unredacted bytes to disk a compile error. Raw transcripts are opt-in and come
+  with a warning.
+- **History is append-only.** Corrections are added as new records, and hash
+  chains and Merkle roots make tampering visible.
+- **Downloads are pinned.** The installers and `rift update` only accept
+  release links from Rift's own bucket, and they verify every archive's
+  checksum.
+
+The alpha builds are not code-signed or notarised. See [SECURITY.md](SECURITY.md)
+for the threat model and how to report a vulnerability.
+
+## Feedback
+
+Found a bug or something confusing? In the affected repository, run:
+
+```sh
+rift doctor --report
 ```
 
-CI declares fifteen required jobs: the same gate across macOS/Linux/Windows,
-the release build, `cargo deny` and `cargo audit`, and the guards on the guards
-([chapter 16](docs/guide/16-development.md)).
+It prints a report you can paste into a bug report. The report contains counts,
+states and versions only: every path, name and message is replaced by its
+length, and nothing is sent anywhere. Add your OS, terminal and agent version,
+what you expected and what happened.
 
-## Worktrees
+---
 
-A linked `git worktree` is a **shadow member** of its repository family, not a
-second project. The family shares one identity minted in the git common dir:
-one projection, one recall store, one binary of record, one registry row.
-Every captured session and checkpoint records which member it happened in, and
-recall serves any member within branch containment — so savings compound
-across worktrees, including the temporary ones coding agents spin up for
-subagent work.
+## Build from source
 
-```bash
-rift worktree status     # this member's wiring, identity and observations
-rift worktree adopt      # wire a linked worktree into its family
-rift worktree prune      # report (or, with --yes, prune) departed members
-rift projects list --worktrees  # list members indented under their repository
+You need Rust 1.94 or newer (the toolchain is pinned in `rust-toolchain.toml`)
+and a C compiler, because SQLite is compiled in.
+
+```sh
+git clone <this repository> && cd rift-cli
+cargo build --release -p rift      # → target/release/rift
+cargo run -p rift                   # launch the dashboard from source
+./skills.sh check                   # the pre-push gate: fmt, clippy -D warnings, tests
 ```
 
-New worktrees are adopted automatically by the family's `post-checkout` hook;
-`adopt` is the explicit path for everything else. `rift doctor` reports a
-member whose wiring has drifted and prints the command — it never re-points
-hooks or re-mints an identity as a side effect.
+The repository is a Rust workspace:
 
-## For AI agents
+| Area | Crates |
+|---|---|
+| Entry point | `bins/rift` (dashboard + CLI), `bins/rift-memd` (projection maintenance) |
+| Capture | `rift-shadow*`, `rift-store`, `rift-hashchain`, `rift-crypto` |
+| Recall | `rift-recall-*`, `rift-tokens` |
+| Dashboard | `rift-canopy`, `rift-canopy-data`, `rift-nic-gauge` |
+| Agents | `rift-agent` (SDK) and one `rift-agent-*` adapter per agent |
+| Shared | `rift-core`, `rift-config`, `rift-git`, `rift-registry` |
 
-- [CLAUDE.md](CLAUDE.md) — full project guidance (Claude Code).
-- [AGENTS.md](AGENTS.md) — condensed cross-tool guidance; `.agents/` holds
-  per-agent overrides.
-- [SECURITY.md](SECURITY.md) — threat model + reporting.
-- [The guide](docs/guide/00-start-here.md) — what each plane does and why each
-  standing decision was made; [agent integrations](docs/guide/10-agent-integrations.md)
-  covers native hook and CLI-skill configuration for Claude Code, Codex, and
-  Antigravity.
+Two rules hold across the whole codebase. Canonical data is **immutable**:
+the type, SQL-trigger and property-test layers all forbid `UPDATE` and
+`DELETE`. And **security is a per-line property**: every durable write takes
+redacted bytes only.
+
+**Read next:**
+
+- [The guide](docs/guide/00-start-here.md): what each part does, and why.
+- [Agent integrations](docs/guide/10-agent-integrations.md): hook and skill
+  wiring for each agent.
+- [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md): guidance for AI agents
+  working in this repository.
+- [Release notes](release/notes/v1.1.0-alpha.md)
 
 ## License
 

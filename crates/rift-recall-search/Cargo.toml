@@ -11,14 +11,14 @@ description = "Native file search behind the SearchEngine seam: a per-member pat
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.0.0-alpha", path = "../rift-core" }
+rift-core = { version = "1.1.0-alpha", path = "../rift-core" }
 # The sensitive-path globs a walk must never index are the repository's own
 # policy, and this matches them with the repository's own matcher rather than a
 # second glob dialect that could disagree with it about `secrets/**`.
-rift-config = { version = "1.0.0-alpha", path = "../rift-config" }
+rift-config = { version = "1.1.0-alpha", path = "../rift-config" }
 # The window journal's row grammar. Frecency is a query over rows this crate
 # never writes, so it takes the parser and nothing else.
-rift-agent = { version = "1.0.0-alpha", path = "../rift-agent" }
+rift-agent = { version = "1.1.0-alpha", path = "../rift-agent" }
 thiserror = { workspace = true }
 # The four pure-Rust pieces. The finder's own umbrella crate is not pure Rust —
 # it takes a vendored libgit2, an LMDB binding and a filesystem watcher — so the
@@ -46,4 +46,4 @@ proptest = { workspace = true }
 # The one repository-fixture builder: a `.git` gix will open has to be the
 # `.git` git itself writes, and the workspace has exactly one place that knows
 # what those bytes are.
-rift-git = { version = "1.0.0-alpha", path = "../rift-git", features = ["test-support"] }
+rift-git = { version = "1.1.0-alpha", path = "../rift-git", features = ["test-support"] }

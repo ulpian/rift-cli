@@ -11,7 +11,7 @@ description = "Loads the committed .rift/ config & policies into typed, validate
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.0.0-alpha", path = "../rift-core" }
+rift-core = { version = "1.1.0-alpha", path = "../rift-core" }
 serde = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
