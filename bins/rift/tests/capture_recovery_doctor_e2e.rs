@@ -1,6 +1,10 @@
 //! End-to-end of the doctor's capture-recovery leg through the real binary on
 //! a fixture repository: report-only, it names a held recovery and its age,
 //! and leaves the hold and the cache exactly as it found them.
+// Capture recovery pins tickets by hard link and descriptor identity, which
+// only the unix build implements; elsewhere the doctor reports "capture
+// recovery runs on unix only" and there is nothing for these suites to drive.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

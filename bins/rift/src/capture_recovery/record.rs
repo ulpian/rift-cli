@@ -66,13 +66,7 @@ pub(super) fn publish_private_record(
     file.write_all(bytes).map_err(|_| RecordError::Failed)?;
     observe(Step::Written).map_err(|()| RecordError::Resource)?;
     file.sync_all().map_err(|_| RecordError::Failed)?;
-    private
-        .dir
-        .try_clone()
-        .map_err(|_| RecordError::Failed)?
-        .into_std_file()
-        .sync_all()
-        .map_err(|_| RecordError::Failed)?;
+    private.sync().map_err(|_| RecordError::Failed)?;
     observe(Step::Synced).map_err(|()| RecordError::Resource)?;
     if read_private_record(private, name, cap)? != bytes {
         return Err(RecordError::Failed);

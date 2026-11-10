@@ -538,14 +538,7 @@ mod platform {
             return Err(PinError);
         }
         original_fd.sync_all().map_err(|_| PinError)?;
-        scopes
-            .private
-            .dir
-            .try_clone()
-            .map_err(|_| PinError)?
-            .into_std_file()
-            .sync_all()
-            .map_err(|_| PinError)?;
+        scopes.private.sync()?;
         let live = LivePin {
             frozen,
             scopes: Rc::clone(scopes),
