@@ -494,7 +494,7 @@ fn milestone_nodes_count_remaining_steps_and_intro_is_gray_in_both_wizards() {
         } else {
             "Step 1/5 · 4 left"
         }));
-        assert!(text.contains("Rift v1.0.0-alpha"));
+        assert!(text.contains(concat!("Rift v", env!("CARGO_PKG_VERSION"))));
         assert!(text.contains("Capture agent sessions."));
         assert!(text.contains(if installer {
             "rift update --from"

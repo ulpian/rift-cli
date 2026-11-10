@@ -85,7 +85,12 @@ fn previews_skip_a_stale_default_and_keep_explicit_binary_selection_strict() {
         stale.display().to_string(),
     ];
     let error = Options(&args).preview_binary().unwrap_err();
-    assert!(error.contains("0.9.0") && error.contains("expected rift 1.0.0-alpha"));
+    let release = artifacts::version().unwrap();
+    let expected = format!("expected rift {}", release.trim_start_matches('v'));
+    assert!(
+        error.contains("0.9.0") && error.contains(&expected),
+        "{error}"
+    );
     let error = preview::select_binary(&[stale], "v1.0.0-alpha").unwrap_err();
     assert!(error.contains("cargo build --release -p rift"));
 }

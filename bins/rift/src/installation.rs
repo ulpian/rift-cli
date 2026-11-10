@@ -190,11 +190,33 @@ pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
     ))
 }
 
+/// A release tag this installer understands: `vMAJOR.MINOR.PATCH-alpha`,
+/// optionally followed by `.N`. Each number is one to six digits, so a
+/// lookalike (`v1.0.0-alphaevil`, a path suffix) is refused.
 fn valid_version(version: &str) -> bool {
-    version == "v1.0.0-alpha"
-        || version
-            .strip_prefix("v1.0.0-alpha.")
-            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_digit()))
+    alpha_key(version).is_some()
+}
+
+/// `[major, minor, patch, n]` of an alpha tag, which orders tags as semver
+/// does within the alpha channel (a plain `-alpha` is `n = 0`).
+fn alpha_key(version: &str) -> Option<[u32; 4]> {
+    let number = |text: &str| {
+        (!text.is_empty() && text.len() <= 6 && text.bytes().all(|c| c.is_ascii_digit()))
+            .then(|| text.parse().ok())
+            .flatten()
+    };
+    let (core, rest) = version.strip_prefix('v')?.split_once("-alpha")?;
+    let mut parts = core.split('.');
+    let key = [
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        match rest {
+            "" => 0,
+            _ => number(rest.strip_prefix('.')?)?,
+        },
+    ];
+    parts.next().is_none().then_some(key)
 }
 
 fn regular_file(path: &Path) -> Result<()> {
@@ -271,10 +293,22 @@ mod tests {
     }
     #[test]
     fn receipts_reject_lookalike_versions_and_changed_receipt_identity() {
-        for invalid in ["v1.0.0-alphaevil", "v1.0.0-alpha.", "v1.0.0-alpha.2/other"] {
-            assert!(!valid_version(invalid));
+        for invalid in [
+            "v1.0.0-alphaevil",
+            "v1.0.0-alpha.",
+            "v1.0.0-alpha.2/other",
+            "v1.0-alpha",
+            "v1.0.0.0-alpha",
+            "v1.1.0",
+            "1.1.0-alpha",
+            "v1234567.0.0-alpha",
+        ] {
+            assert!(!valid_version(invalid), "{invalid}");
         }
         assert!(valid_version("v1.0.0-alpha.2"));
+        assert!(valid_version("v1.1.0-alpha"));
+        assert!(alpha_key("v1.1.0-alpha") > alpha_key("v1.0.0-alpha.9"));
+        assert!(alpha_key("v1.0.0-alpha.2") > alpha_key("v1.0.0-alpha"));
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("rift");
         std::fs::write(&binary, b"fixture").unwrap();

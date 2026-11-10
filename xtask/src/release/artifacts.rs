@@ -20,14 +20,15 @@ pub(super) const TARGETS: [&str; 5] = [
 pub(super) fn version() -> Result<String> {
     let root = crate::workspace_root();
     let tag = read(&root.join("release/alpha-version"))?.trim().to_owned();
-    let suffix = tag
-        .strip_prefix("v1.0.0-alpha")
+    let (core, suffix) = tag
+        .strip_prefix('v')
+        .and_then(|rest| rest.split_once("-alpha"))
         .ok_or("invalid alpha version")?;
+    let digits = |s: &str| !s.is_empty() && s.len() <= 6 && s.bytes().all(|b| b.is_ascii_digit());
     ensure(
-        suffix.is_empty()
-            || suffix
-                .strip_prefix('.')
-                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())),
+        core.split('.').count() == 3
+            && core.split('.').all(digits)
+            && (suffix.is_empty() || suffix.strip_prefix('.').is_some_and(digits)),
         "invalid alpha version",
     )?;
     let workspace = crate::read_toml(&root.join("Cargo.toml"))?;

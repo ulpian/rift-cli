@@ -138,12 +138,16 @@ finish() {
     fi
 }
 
-# The alpha ordinal of a version: v1.0.0-alpha is 0, v1.0.0-alpha.N is N.
-alpha_ordinal() {
-    case "$1" in
-        v1.0.0-alpha) echo 0 ;;
-        *) echo "${1#v1.0.0-alpha.}" ;;
-    esac
+# Release tags this installer understands: vMAJOR.MINOR.PATCH-alpha[.N],
+# each number one to six digits.
+alpha_tag='^v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}-alpha(\.[0-9]{1,6})?$'
+# Whether alpha tag $1 is newer than alpha tag $2: major, minor, patch, then N
+# (a plain -alpha is N = 0), compared as fixed-width numbers.
+alpha_newer() {
+    awk -v a="$1" -v b="$2" 'function key(v, p, n) {
+        n = split(substr(v, 2), p, /[.-]/)
+        return sprintf("%06d%06d%06d%06d", p[1], p[2], p[3], n >= 5 ? p[5] : 0)
+    } BEGIN { exit !(key(a) > key(b)) }'
 }
 
 command -v curl >/dev/null 2>&1 || die 'curl is required.'
@@ -214,7 +218,7 @@ recheck_installation() {
 progress "@--o--o  Step 1/3: Download invitation and binary"
 fetch "$RIFT_DOWNLOAD_MANIFEST" "$stage/manifest" 1048576
 version=$(awk -F '\t' 'NR == 1 && NF == 2 && $1 == "rift-download-v1" {print $2}' "$stage/manifest")
-printf '%s\n' "$version" | LC_ALL=C grep -Eq '^v1\.0\.0-alpha(\.[0-9]+)?$' || die 'Invalid or incompatible alpha invitation.'
+printf '%s\n' "$version" | LC_ALL=C grep -Eq "$alpha_tag" || die 'Invalid or incompatible alpha invitation.'
 target="$arch-$platform"
 manifest_value() {
     awk -F '\t' -v target="$target" -v column="$1" '
@@ -228,9 +232,9 @@ printf '%s\n' "$expected" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || die 'Invalid a
 recheck_installation
 if [ -f "$binary" ] && [ "${RIFT_ALLOW_DOWNGRADE:-0}" != 1 ]; then
     installed=$(sed -n '3p' "$receipt")
-    # Compared only when the receipt names an alpha too, so both ordinals are digits.
-    if printf '%s\n' "$installed" | LC_ALL=C grep -Eq '^v1\.0\.0-alpha(\.[0-9]+)?$' &&
-        [ "$(alpha_ordinal "$installed")" -gt "$(alpha_ordinal "$version")" ]; then
+    # Compared only when the receipt names an alpha tag too, so both parse.
+    if printf '%s\n' "$installed" | LC_ALL=C grep -Eq "$alpha_tag" &&
+        alpha_newer "$installed" "$version"; then
         die "Rift $installed is newer than $version; nothing was changed. Set RIFT_ALLOW_DOWNGRADE=1 to install the older build."
     fi
 fi

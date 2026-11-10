@@ -29,12 +29,15 @@ function Fetch-RiftFile([string]$Url, [string]$Destination) {
     try { Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 120 }
     catch { throw 'Download unavailable or invitation expired. Request a fresh link.' }
 }
-# The alpha ordinal of a version: v1.0.0-alpha is 0, v1.0.0-alpha.N is N.
-function Get-RiftAlphaOrdinal([string]$Version) {
-    $ordinal = [decimal]0
-    # An ordinal too long to parse compares as the first alpha, never as an error.
-    if ($Version -ne 'v1.0.0-alpha') { [void][decimal]::TryParse($Version.Substring('v1.0.0-alpha.'.Length), [ref]$ordinal) }
-    return $ordinal
+# Release tags this installer understands: vMAJOR.MINOR.PATCH-alpha[.N],
+# each number one to six digits.
+$RiftAlphaTag = '^v([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})-alpha(?:\.([0-9]{1,6}))?$'
+# A fixed-width key ordering alpha tags: major, minor, patch, then N (a plain
+# -alpha is N = 0). Call only on a tag that matched $RiftAlphaTag.
+function Get-RiftAlphaKey([string]$Version) {
+    $m = [regex]::Match($Version, $RiftAlphaTag)
+    $n = if ($m.Groups[4].Success) { [int]$m.Groups[4].Value } else { 0 }
+    return '{0:D6}{1:D6}{2:D6}{3:D6}' -f [int]$m.Groups[1].Value, [int]$m.Groups[2].Value, [int]$m.Groups[3].Value, $n
 }
 function Assert-RiftRegular([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
@@ -130,15 +133,15 @@ try {
     $header = $manifestLines[0] -split "`t"
     if ($header.Length -ne 2 -or $header[0] -ne 'rift-download-v1') { throw 'Invalid invitation.' }
     $version = $header[1]
-    if ($version -notmatch '^v1\.0\.0-alpha(\.[0-9]+)?$') { throw 'Invalid or incompatible alpha invitation.' }
+    if ($version -notmatch $RiftAlphaTag) { throw 'Invalid or incompatible alpha invitation.' }
     $rows = @($manifestLines | Select-Object -Skip 1 | Where-Object { ($_ -split "`t")[0] -eq 'x86_64-pc-windows-msvc' })
     if ($rows.Length -ne 1) { throw 'Invitation has no unique Windows download.' }
     $fields = $rows[0] -split "`t"
     if ($fields.Length -ne 3 -or $fields[2] -notmatch '^[0-9a-f]{64}$') { throw 'Invalid archive checksum in invitation.' }
     $archiveUrl = $fields[1]
     $expected = $fields[2]
-    if ((Test-Path -LiteralPath $binary) -and $env:RIFT_ALLOW_DOWNGRADE -ne '1' -and $record[2] -match '^v1\.0\.0-alpha(\.[0-9]+)?$' -and
-        (Get-RiftAlphaOrdinal $record[2]) -gt (Get-RiftAlphaOrdinal $version)) {
+    if ((Test-Path -LiteralPath $binary) -and $env:RIFT_ALLOW_DOWNGRADE -ne '1' -and $record[2] -match $RiftAlphaTag -and
+        [string]::CompareOrdinal((Get-RiftAlphaKey $record[2]), (Get-RiftAlphaKey $version)) -gt 0) {
         throw "Rift $($record[2]) is newer than $version; nothing was changed. Set RIFT_ALLOW_DOWNGRADE=1 to install the older build."
     }
     if ((Test-Path -LiteralPath $binary) -and $record[2] -eq $version) {

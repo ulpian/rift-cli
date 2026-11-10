@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: ['release/**']
-    tags: ['v1.0.0-alpha*']
+    tags: ['v*-alpha*']
 
 permissions:
   contents: read
