@@ -82,6 +82,33 @@ fn a_read_only_open_sees_commits_still_in_a_live_writers_log() {
 }
 
 #[test]
+fn a_read_only_open_refuses_writes_and_leaves_no_sidecars_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("projection.db");
+    drop(open_capture_projection(&db).unwrap());
+    assert!(!sidecar(&db, "-wal").exists());
+
+    let reader = SqliteStore::open_read_only(&db).unwrap();
+    assert_eq!(pragma(&reader, "journal_mode"), "wal");
+    let refused = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            reader
+                .conn()
+                .await
+                .unwrap()
+                .execute_batch("CREATE TABLE refused (n INTEGER)")
+                .await
+        });
+    assert!(refused.is_err(), "a read-only handle runs no write");
+    drop(reader);
+    for suffix in ["-wal", "-shm"] {
+        assert!(!sidecar(&db, suffix).exists(), "{suffix} left behind");
+    }
+}
+
+#[test]
 fn a_passive_checkpoint_folds_the_log_into_the_database_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("projection.db");

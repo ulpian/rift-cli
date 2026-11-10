@@ -79,9 +79,7 @@ impl SqliteStore {
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let lease = ProjectionLease::read_only(path.as_ref())?;
         let display = lease.path().display().to_string();
-        let conn =
-            Connection::open_with_flags(lease.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(map_sql)?;
+        let conn = query_only_connection(lease.path())?;
         Self::init(conn, display, Some(lease), Journal::AsFound)
     }
 
@@ -394,6 +392,27 @@ fn enter_wal(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.pragma_update(None, "synchronous", "NORMAL")
+}
+
+/// A connection to a live projection that runs no write statement.
+///
+/// Under WAL a reader creates the `-wal` and `-shm` sidecars when they are
+/// absent, and only a connection that may write removes them when it closes
+/// last; a `SQLITE_OPEN_READ_ONLY` handle leaves them behind, so a read-only
+/// command such as `rift doctor` would leave files it never meant to make.
+/// The handle therefore opens read-write without `CREATE` (a missing file is
+/// still an error) and sets `query_only`, which refuses every statement that
+/// would change the database. A file the process cannot open for writing
+/// falls back to a plain read-only handle.
+fn query_only_connection(path: &std::path::Path) -> Result<Connection> {
+    let read_write = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE;
+    let Ok(conn) = Connection::open_with_flags(path, read_write) else {
+        return Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(map_sql);
+    };
+    conn.pragma_update(None, "query_only", true)
+        .map_err(map_sql)?;
+    Ok(conn)
 }
 
 /// A read-only connection to a historical source, which may sit in a
