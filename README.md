@@ -116,8 +116,11 @@ The original output is always saved before anything is changed. Savings are meas
 | `rift worktree status` | Check how a linked git worktree is wired. |
 | `rift --help` | Everything else. |
 
-**Update:** run the install command again. It replaces the binary and keeps your
-settings. An older alpha never replaces a newer one.
+**Update:** `rift update` installs the newest release and keeps your settings.
+You don't need to remember to run it: once a day, `rift` and `rift init`
+check for a newer release and ask before installing it. Set
+`RIFT_NO_UPDATE_CHECK=1` to turn the check off. An older release never
+replaces a newer one.
 
 **Uninstall:** `rift uninstall --dry-run` shows what would be removed, and
 `rift uninstall` removes it, including the `PATH` line the installer added. Your
@@ -132,9 +135,11 @@ captured history is kept unless you add `--purge`.
   with a warning.
 - **History is append-only.** Corrections are added as new records, and hash
   chains and Merkle roots make tampering visible.
-- **Downloads are pinned.** The installers and `rift update` only accept
-  release links from Rift's own bucket, and they verify every archive's
-  checksum.
+- **Downloads are pinned and signed.** The installers and `rift update` only
+  accept release links from Rift's own bucket and verify every archive's
+  checksum. `rift update` and the daily update check also verify the release
+  manifest's Ed25519 signature against a key built into `rift`, so a
+  tampered bucket can't push an update.
 
 The alpha builds are not code-signed or notarised. See [SECURITY.md](SECURITY.md)
 for the threat model and how to report a vulnerability.

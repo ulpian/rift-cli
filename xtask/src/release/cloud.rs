@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{artifacts, ensure, fixture::quote, process, write, Options, Result};
+use super::{artifacts, ensure, fixture::quote, process, signing, write, Options, Result};
 
 const PUBLIC_READ_ROLE: &str = "roles/storage.legacyObjectReader";
 
@@ -131,10 +131,14 @@ fn prepare(
         shell.contains("RIFT_DOWNLOAD_MANIFEST") && powershell.contains("RIFT_DOWNLOAD_MANIFEST"),
         "tag has no manifest-aware installers",
     )?;
+    let manifest = manifest(destination, tag, entries)?;
+    // Installed binaries verify this signature before trusting the checksums
+    // the manifest carries (`rift update`, the update prompt).
     write(
-        &stage.join("downloads.tsv"),
-        manifest(destination, tag, entries)?,
+        &stage.join("downloads.tsv.sig"),
+        format!("{}\n", signing::sign(manifest.as_bytes())?),
     )?;
+    write(&stage.join("downloads.tsv"), manifest)?;
     write(
         &stage.join("install.sh"),
         format!(
@@ -175,6 +179,24 @@ fn instructions(destination: &Destination, tag: &str) -> String {
         ```sh\nrift update --from {}\nrift uninstall --dry-run\nrift uninstall\n```\n\n\
         [Release notes]({})\n", destination.url("install.sh"), destination.url("install.ps1"),
         quote(&destination.url("downloads.tsv")), destination.url("NOTES.md"))
+}
+
+/// Point `latest/` at this release: the signed manifest that `rift update`
+/// and the update prompt read. Unlike a release prefix it is overwritten each
+/// time, with a short cache life. The signature is written first; a client
+/// that reads the pair mid-swap fails verification and simply retries later.
+fn point_latest(destination: &Destination, stage: &Path) -> Result<()> {
+    for name in ["downloads.tsv.sig", "downloads.tsv"] {
+        let object = format!("gs://{}/latest/{name}", destination.bucket);
+        gcloud(&[
+            "storage",
+            "cp",
+            "--cache-control=public,max-age=60",
+            &stage.join(name).to_string_lossy(),
+            &object,
+        ])?;
+    }
+    Ok(())
 }
 
 fn gcloud(args: &[&str]) -> Result<String> {
@@ -294,7 +316,13 @@ fn upload(
         .collect();
     files.push((dist.join("SHA256SUMS"), "SHA256SUMS".to_owned()));
     // Publish installer entrypoints last, after archives and manifest are ready.
-    for name in ["NOTES.md", "downloads.tsv", "install.ps1", "install.sh"] {
+    for name in [
+        "NOTES.md",
+        "downloads.tsv.sig",
+        "downloads.tsv",
+        "install.ps1",
+        "install.sh",
+    ] {
         files.push((stage.join(name), name.to_owned()));
     }
     let scratch = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -352,7 +380,7 @@ fn upload(
         )?;
         std::fs::remove_file(&readback).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    point_latest(destination, stage)
 }
 
 #[cfg(test)]

@@ -20,7 +20,9 @@ pub(crate) fn preferences(ascii: bool) -> Result<Outcome> {
 }
 
 mod path_entry;
+mod release_feed;
 mod uninstall;
+pub(crate) mod update_check;
 
 use crate::cli::{Outcome, UninstallArgs, UpdateArgs};
 use rift_core::{Result, RiftError};
@@ -115,26 +117,71 @@ fn in_release_bucket(link: &str) -> bool {
 }
 
 pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
+    // With no link, the newest release: `latest/` in the release bucket.
     let link = args
         .from
         .clone()
         .or_else(|| std::env::var("RIFT_DOWNLOAD_MANIFEST").ok())
         .filter(|link| !link.trim().is_empty())
-        .ok_or_else(|| {
-            refusal(
-                "Use `rift update --from <fresh update link>` from your latest invitation email.",
-            )
-        })?;
-    if !in_release_bucket(link.trim()) {
+        .unwrap_or_else(release_feed::latest_link);
+    let link = link.trim();
+    if !in_release_bucket(link) {
         return Err(refusal(
-            "This link is not from the Rift release bucket. Use the update link from your invitation.",
+            "This link is not from the Rift release bucket; run `rift update` without --from.",
         ));
     }
     let install = Installation::current()?;
+    let signed = release_feed::fetch_signed(link, std::time::Duration::from_mins(1))?;
+    let downgrade = std::env::var("RIFT_ALLOW_DOWNGRADE").is_ok_and(|v| v == "1");
+    if alpha_key(&signed.version) <= alpha_key(&install.version) && !downgrade {
+        return Ok(Outcome::ok(
+            format!("Rift {} is up to date.", install.version),
+            serde_json::json!({ "operation": "update", "version": install.version, "latest": signed.version, "status": "up_to_date" }),
+        ));
+    }
     let parent = install
         .binary
         .parent()
         .ok_or_else(|| refusal("installation directory unavailable"))?;
+    let verified = VerifiedManifest::write(parent, &signed.bytes)?;
+    run_installer(&install, parent, link, &verified.path)
+}
+
+/// The verified manifest, written beside the binary for the installer to copy
+/// and removed when the update ends however it ends.
+struct VerifiedManifest {
+    path: PathBuf,
+}
+
+impl VerifiedManifest {
+    fn write(dir: &Path, bytes: &[u8]) -> Result<Self> {
+        use std::io::Write as _;
+        let path = dir.join(format!(".rift-update-manifest-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let guard = Self { path };
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(guard)
+    }
+}
+
+impl Drop for VerifiedManifest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Run the installer compiled into this binary over the verified manifest,
+/// then read the new executable's version back independently.
+fn run_installer(
+    install: &Installation,
+    parent: &Path,
+    link: &str,
+    manifest: &Path,
+) -> Result<Outcome> {
     #[cfg(not(windows))]
     let mut command = {
         let mut command = std::process::Command::new("sh");
@@ -157,6 +204,7 @@ pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
         .env("RIFT_BIN_DIR", parent)
         .env("RIFT_UPDATE", "1")
         .env("RIFT_DOWNLOAD_MANIFEST", link)
+        .env("RIFT_VERIFIED_MANIFEST", manifest)
         .env("RIFT_DOWNLOAD_BUCKET", RELEASE_BUCKET)
         .env("RIFT_UPDATE_PID", std::process::id().to_string())
         .env("RIFT_UPDATE_SHA", &install.checksum)

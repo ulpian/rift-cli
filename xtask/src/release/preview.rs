@@ -95,12 +95,19 @@ pub(super) fn lifecycle(binary: &Path) -> Result<()> {
         !fixture.root().join(".rift").exists(),
         "installer started project setup",
     )?;
-    println!("3/5 Same-version managed update");
-    process::must(
-        fixture
-            .command(&installed, fixture.root())
-            .args(["update", "--from", MANIFEST]),
-        120,
+    let installed_digest = artifacts::digest(&installed)?;
+    // The preview transport serves an unsigned manifest from a stand-in
+    // bucket, so a real update cannot succeed here: `rift update` trusts only
+    // the release bucket and the release key. What is checked is the refusal.
+    println!("3/5 Update refuses a link outside the release bucket");
+    let refused = fixture
+        .command(&installed, fixture.root())
+        .args(["update", "--from", MANIFEST])
+        .output()
+        .map_err(|e| e.to_string())?;
+    ensure(
+        !refused.status.success() && artifacts::digest(&installed)? == installed_digest,
+        "update accepted a manifest outside the release bucket",
     )?;
     println!("4/5 Uninstall dry-run");
     process::must(

@@ -214,7 +214,7 @@ pub(crate) enum Command {
 /// Update from the expiring link supplied with a release invitation.
 #[derive(Args, Debug)]
 pub(crate) struct UpdateArgs {
-    /// Fresh update link from the invitation email.
+    /// A specific release manifest link; by default, the newest release.
     #[arg(long = "from", value_name = "UPDATE_LINK")]
     pub(crate) from: Option<String>,
 }

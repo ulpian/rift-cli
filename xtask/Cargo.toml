@@ -20,6 +20,10 @@ toml_edit = { workspace = true }
 # Owner-only release tooling; none of these enter the shipped CLI graph.
 tempfile = { workspace = true }
 sha2 = { workspace = true }
+# Signs download manifests; the shipped binary only verifies (rift-crypto).
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
 flate2 = "1"
 tar = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }

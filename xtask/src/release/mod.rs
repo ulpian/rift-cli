@@ -7,6 +7,7 @@ mod flows;
 mod preview;
 mod process;
 mod safety;
+mod signing;
 mod terminal;
 
 #[cfg(test)]
@@ -24,7 +25,9 @@ const HELP: &str = "cargo rift COMMAND [OPTIONS]
   plan --dist DIR --bucket NAME --prefix PATH
                                           Generate public installers locally
   upload --dist DIR --bucket NAME --prefix PATH --evidence DIR
-                                          Verify native evidence; publish/read back
+                                          Verify native evidence; publish/read back,
+                                          then point latest/ at this release
+  signing-key create                      Create the manifest signing key (once)
   preview install|setup|dashboard [--binary PATH]
                                           Interactive disposable preview
   check-install [--binary PATH]            Real install/update/uninstall locally
@@ -32,6 +35,7 @@ const HELP: &str = "cargo rift COMMAND [OPTIONS]
   check-safety                            Offline installer refusal/rollback checks
   Previews select a matching native release build under CARGO_TARGET_DIR or target.
   --binary PATH selects one explicitly; no automatic fallback for an explicit path.
+  Plan signs the manifest with the key in Secret Manager.
   No command commits, pushes, creates a bucket, or sends messages.";
 
 struct Options<'a>(&'a [String]);
@@ -149,6 +153,11 @@ pub fn run(args: &[String]) -> Result<()> {
             )
         }
         "plan" | "upload" => cloud::run(command, &opts),
+        "signing-key" => {
+            opts.validate(2, &[])?;
+            ensure(operand()? == "create", HELP)?;
+            signing::create()
+        }
         "preview" => {
             opts.validate(2, &["--binary"])?;
             preview::interactive(&opts.preview_binary()?, operand()?)

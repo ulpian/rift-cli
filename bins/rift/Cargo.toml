@@ -108,3 +108,4 @@ rift-git = { version = "1.1.0-alpha", path = "../../crates/rift-git", features =
 # through the same envelopes rift-memd emits.
 rift-recall-events = { version = "1.1.0-alpha", path = "../../crates/rift-recall-events" }
 tempfile = { workspace = true }
+ed25519-dalek = { workspace = true }

@@ -126,7 +126,9 @@ try {
     if (-not $env:RIFT_DOWNLOAD_MANIFEST) { throw 'A fresh invitation link is required. Use the install command from your invitation email.' }
     $manifestPath = Join-Path $stage 'manifest'
     Write-Output "  @--o--o  Step 1/3: Download invitation and binary"
-    Fetch-RiftFile $env:RIFT_DOWNLOAD_MANIFEST $manifestPath
+    # `rift update` verified this manifest's signature and hands over that copy.
+    if ($env:RIFT_UPDATE -eq '1' -and $env:RIFT_VERIFIED_MANIFEST) { Copy-Item -LiteralPath $env:RIFT_VERIFIED_MANIFEST -Destination $manifestPath }
+    else { Fetch-RiftFile $env:RIFT_DOWNLOAD_MANIFEST $manifestPath }
     if ((Get-Item -LiteralPath $manifestPath).Length -gt 1048576) { throw 'Invitation manifest is too large.' }
     $manifestLines = [IO.File]::ReadAllLines($manifestPath)
     if ($manifestLines.Length -lt 2) { throw 'Invalid invitation.' }

@@ -161,6 +161,33 @@ from the committed tooling checkout, allowing reviewed documentation corrections
 without moving the binary tag. Plan URLs become usable only
 after upload. A plan is not publication.
 
+## Manifest signing and `latest/`
+
+Every `downloads.tsv` is signed with an Ed25519 key. The private half is the
+Secret Manager secret `rift-release-manifest-key` in the release project; it
+was created once with `cargo rift signing-key create`, which pipes a fresh
+seed straight into the secret and prints the public half. That public key is
+`manifest_public_key` in `public-storage.toml` and `MANIFEST_PUBLIC_KEY` in
+`bins/rift/src/installation/release_feed.rs` (a test keeps them equal).
+`cargo rift plan` reads the secret through `gcloud` and writes
+`downloads.tsv.sig` next to the manifest; it refuses a secret whose public half
+differs from the recorded one. `RIFT_RELEASE_SIGNING_KEY_FILE` (64 hex digits)
+signs without cloud access. Never replace the secret: installed binaries trust
+only the recorded key, so a new key needs a release that carries it first.
+
+`upload` publishes each release under its own prefix, never overwriting, and
+then points `latest/downloads.tsv` and `latest/downloads.tsv.sig` at it (cache
+life 60 seconds). `rift update` with no link reads `latest/`, verifies the
+signature, and hands the installer that exact copy. `rift` and `rift init` do
+the same check at most once a day and offer the update. Binaries from
+`v1.1.0-alpha` and earlier do not check signatures and have no default link;
+they update with `rift update --from
+https://storage.googleapis.com/rift-e59ea04337d9/latest/downloads.tsv`.
+
+The first `curl | sh` install does not verify the signature: the installer
+script comes from the same bucket, so a check inside it would add nothing.
+Signing protects every update after the first install.
+
 ## Upload after native verification and review
 
 ```sh

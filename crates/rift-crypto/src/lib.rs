@@ -11,6 +11,9 @@
 //! `serde_json::to_string(&key)` simply do not compile. [`RiftError::Crypto`]
 //! carries a content-free category — never key or plaintext bytes.
 //!
+//! Release integrity: [`verify_ed25519`] checks a detached Ed25519 signature.
+//! The shipped binary only verifies; signing lives in the release tooling.
+//!
 //! Nonce discipline: 96-bit nonces, unique per `(key, message)`. [`Nonce::random`]
 //! draws from the OS CSPRNG; a fixed nonce is catastrophic for ChaCha20-Poly1305
 //! and the API never encourages one.
@@ -24,6 +27,10 @@
         clippy::indexing_slicing
     )
 )]
+
+mod signature;
+
+pub use signature::{verify_ed25519, ED25519_PUBLIC_KEY_LEN, ED25519_SIGNATURE_LEN};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce as CcNonce};

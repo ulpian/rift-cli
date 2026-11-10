@@ -216,7 +216,14 @@ recheck_installation() {
 
 [ -n "${RIFT_DOWNLOAD_MANIFEST:-}" ] || die 'A fresh invitation link is required. Use the install command from your invitation email.'
 progress "@--o--o  Step 1/3: Download invitation and binary"
-fetch "$RIFT_DOWNLOAD_MANIFEST" "$stage/manifest" 1048576
+# `rift update` fetches the manifest itself, checks its signature against the
+# key compiled into the binary, and hands over that exact copy, so nothing
+# unverified is fetched between the check and the install.
+if [ "${RIFT_UPDATE:-0}" = 1 ] && [ -n "${RIFT_VERIFIED_MANIFEST:-}" ]; then
+    cp "$RIFT_VERIFIED_MANIFEST" "$stage/manifest" || die 'The verified release manifest could not be read.'
+else
+    fetch "$RIFT_DOWNLOAD_MANIFEST" "$stage/manifest" 1048576
+fi
 version=$(awk -F '\t' 'NR == 1 && NF == 2 && $1 == "rift-download-v1" {print $2}' "$stage/manifest")
 printf '%s\n' "$version" | LC_ALL=C grep -Eq "$alpha_tag" || die 'Invalid or incompatible alpha invitation.'
 target="$arch-$platform"

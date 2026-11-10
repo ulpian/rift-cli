@@ -172,6 +172,7 @@ regex-syntax = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 secrecy = "0.10"
 chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 hkdf = "0.12"                  # envelope-key derivation (HKDF-SHA256)
 getrandom = "0.2"             # OS CSPRNG for keys/nonces (no rand_core version dance)
 # OS keychain (optional `keyring` feature in rift-store). Native backends only

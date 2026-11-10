@@ -120,6 +120,9 @@ fn main() -> ExitCode {
 
     // Bare `rift`: launch Canopy (TTY) or print a status-style frame (non-TTY).
     let Some(cmd) = cli.cmd.as_ref() else {
+        if offered_update() {
+            return ExitCode::SUCCESS;
+        }
         return match launch_canopy(&cli) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -158,6 +161,9 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if matches!(cmd, Command::Init(_)) && offered_update() {
+        return ExitCode::SUCCESS;
+    }
     match route(&cli, cmd, &root) {
         Ok(outcome) => emit(&cli, &outcome),
         Err(e) => {
@@ -172,6 +178,15 @@ fn main() -> ExitCode {
             ExitCode::from(u8::try_from(code).unwrap_or(1))
         }
     }
+}
+
+/// Whether `rift` was just updated in answer to the start-up offer, in which
+/// case this (old) process stops and the person runs the command again.
+fn offered_update() -> bool {
+    matches!(
+        installation::update_check::offer(),
+        installation::update_check::Offer::Updated
+    )
 }
 
 /// Route a parsed subcommand to its handler, producing a typed [`Outcome`].
