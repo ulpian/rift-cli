@@ -30,25 +30,20 @@ knows the bytes' provenance, and untrusted bytes never arrive raw
 
 ## 7.2 Tier one: the session pointer
 
-The first time a context window is spoken to — a session's first prompt, or the
-opening of a subagent's window — Rift injects:
+The first time a context window is spoken to — a session's first prompt, or a
+window no coordinator opened — Rift injects:
 
 ```
-Rift is capturing this repository and knows what changed since the state you
-already hold. Ask it before re-reading files:
-  rift agent-help                 the map of the recall surface
-  rift recall known-state --task <goal> --file <path> --json
-  rift recall diff-since --known-hash <sha256> --json
-  rift why <path>:<line> --json    who wrote a line, its prompt and cost
-Every delta carries that provenance already: when, who, what it cost.
-Answers are budgeted and audited, and say what they omitted.
+Rift knows what changed in this repository since you last read it. Before
+re-reading a file, ask: rift recall known-state --task <goal> --file <path> --json
+Full map: rift agent-help
 ```
 
-A pointer is spend every session, so a test holds it under 150 tokens (it
-measures 124) and it hands off to `rift agent-help`, which costs nothing unless
-run and is rendered from this build's command tree, so it cannot name a dead
-verb. The provenance line is there because without it an agent treats `rift why`
-as a separate errand rather than as the rest of what a delta already tells it.
+A pointer is spend in every window, and the record shows agents rarely pull
+what it names, so a test holds it under 50 tokens. It shows one call and hands
+off to `rift agent-help`, which costs nothing unless run and is rendered from
+this build's command tree, so it cannot name a dead verb. A subagent's window
+opens with its coordinator section alone, and with nothing when that is empty.
 
 **Once per context window.** The right to inject is an exclusive create of a
 marker under `.rift/state/injection/`, named by the hash of the session id and

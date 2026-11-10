@@ -389,10 +389,11 @@ pub(crate) fn skill_body() -> String {
         .to_owned()
 }
 
-/// The once-per-session pointer injected through a family's context channel.
-/// Around a hundred tokens: this is spend the agent did not
-/// ask for, so it says only that the plane exists, names the one command that
-/// explains it, and shows the single call worth making first.
+/// The once-per-window pointer injected through a family's context channel.
+/// About fifty tokens: this is spend the agent did not ask for, paid by every
+/// window, and the field record shows agents rarely pull what it advertises.
+/// So it says only that the plane exists, shows the single call worth making
+/// first, and names the command that explains the rest.
 ///
 /// Assembled from the dispatcher's verb spellings for the same reason the
 /// skill body is: an injected pointer that names a dead command would be worse
@@ -401,16 +402,10 @@ pub(crate) fn skill_body() -> String {
 pub(crate) fn session_pointer() -> String {
     use rift_recall_serve::ToolName as T;
     format!(
-        "Rift is capturing this repository and knows what changed since the state you\n\
-         already hold. Ask it before re-reading files:\n\
-         \x20 rift agent-help                 the map of the recall surface\n\
-         \x20 rift recall {ks} --task <goal> --file <path> --json\n\
-         \x20 rift recall {ds} --known-hash <sha256> --json\n\
-         \x20 rift why <path>:<line> --json    who wrote a line, its prompt and cost\n\
-         Every delta carries that provenance already: when, who, what it cost.\n\
-         Answers are budgeted and audited, and say what they omitted.",
+        "Rift knows what changed in this repository since you last read it. Before\n\
+         re-reading a file, ask: rift recall {ks} --task <goal> --file <path> --json\n\
+         Full map: rift agent-help",
         ks = T::KnownState.verb_name(),
-        ds = T::DiffSince.verb_name(),
     )
 }
 
@@ -719,7 +714,7 @@ mod tests {
     /// pointer's).
     #[test]
     fn the_session_pointer_stays_within_its_token_budget() {
-        const POINTER_CAP: u32 = 150;
+        const POINTER_CAP: u32 = 50;
         let tokens = rift_tokens::count(&session_pointer());
         assert!(
             tokens <= POINTER_CAP,
@@ -836,7 +831,7 @@ mod tests {
         // maps and must teach several commands, while the manifest hint is one
         // line inside a budgeted manifest and is meant to be exactly one.
         for (surface, text, least) in [
-            ("the session pointer", session_pointer(), 3),
+            ("the session pointer", session_pointer(), 2),
             ("the skill body", skill_body(), 2),
             ("the manifest hint", manifest_pull_hint(SRC, HASH), 1),
             (
@@ -1124,12 +1119,7 @@ mod tests {
     /// `rift agent-help`, which since this commit carries them both with their
     /// flags. Adding them here is a budget decision; this test makes it one
     /// instead of letting it happen by edit.
-    const POINTER_COMMANDS: &[&str] = &[
-        "agent-help",
-        "recall known-state",
-        "recall diff-since",
-        "why",
-    ];
+    const POINTER_COMMANDS: &[&str] = &["recall known-state", "agent-help"];
 
     #[test]
     fn the_session_pointer_names_exactly_the_commands_its_budget_bought() {

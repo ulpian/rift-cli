@@ -397,11 +397,11 @@ fn a_subagent_window_opens_once_with_its_coordinators_reads() {
 
     let text = session_pointer_in(repo.path(), &CC, "SubagentStart", body.as_bytes())
         .expect("the window is introduced");
-    let pointer = crate::agent_help::session_pointer();
-    let section = text
-        .strip_prefix(pointer.as_str())
-        .and_then(|rest| rest.strip_prefix('\n'))
-        .expect("the pointer, then the section on a line of its own");
+    assert!(
+        !text.contains(&crate::agent_help::session_pointer()),
+        "a subagent's opening is its coordinator section alone: {text}"
+    );
+    let section = text.as_str();
     assert!(
         section.contains(&format!("src/briefed.rs@{}", short(4))),
         "{section}"

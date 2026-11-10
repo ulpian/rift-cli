@@ -161,27 +161,23 @@ fn a_subagents_window_is_introduced_once_at_the_verb_that_opens_it() {
         "the pointer names the surface it points at: {parent}"
     );
 
-    // …and a subagent at the only one it has, under the same session id.
-    let child = additional_context(
-        &subagent_start(&repo, session, "a0e79504", 2, &env),
-        "SubagentStart",
-    );
-    assert_eq!(
-        child, parent,
-        "the same sealed pointer, on the channel this window's own row pins"
+    // …and a subagent at the only one it has, under the same session id. Its
+    // coordinator held nothing, so it is handed nothing: it works to a brief
+    // from a window already shown the map. The window is still claimed.
+    let child = subagent_start(&repo, session, "a0e79504", 2, &env);
+    assert!(
+        child.trim().is_empty(),
+        "a subagent whose coordinator held nothing is told nothing: {child:?}"
     );
     let repeat = subagent_start(&repo, session, "a0e79504", 2, &env);
     assert!(
         repeat.trim().is_empty(),
-        "one window, one pointer — and no manifest behind it: {repeat:?}"
+        "one window, one claim — and no manifest behind it: {repeat:?}"
     );
-    let sibling = additional_context(
-        &subagent_start(&repo, session, "a2f52a50", 2, &env),
-        "SubagentStart",
-    );
-    assert_eq!(
-        sibling, parent,
-        "a second subagent of the same turn is a second window"
+    let sibling = subagent_start(&repo, session, "a2f52a50", 2, &env);
+    assert!(
+        sibling.trim().is_empty(),
+        "a second subagent of the same turn is a second window, told nothing either: {sibling:?}"
     );
 
     // Three windows, three markers, each named by the key the window journal

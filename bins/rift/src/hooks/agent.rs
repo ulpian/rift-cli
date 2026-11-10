@@ -678,7 +678,7 @@ fn claimed_pointer(
     window: Option<&str>,
 ) -> Option<rift_recall_types::ContextCandidate> {
     let claim = claim_injection(repo, session, window)?;
-    let text = opening_text(repo, agent, verb, session, window);
+    let text = opening_text(repo, agent, verb, session, window)?;
     // The pointer is spend: measure it with the real tokenizer and record
     // it against the same savings ledger the serves land in, keyed by the
     // session that paid for it, so the estimate stays honest about what
@@ -703,22 +703,25 @@ fn claimed_pointer(
     })
 }
 
-/// The pointer, and after it, at the boundary that opens a subagent's window,
-/// the section naming what its coordinator held at that instant.
+/// The pointer, or, at the boundary that opens a subagent's window, only the
+/// section naming what its coordinator held at that instant — and nothing
+/// when it held nothing.
 ///
-/// Only there: the main thread's window has no coordinator, and every later
-/// boundary of a subagent's window is the manifest's, which speaks about what
-/// that window has read itself.
+/// A subagent works to a brief its coordinator wrote: the pointer would be
+/// spend in every spawned window for a map its coordinator was already shown.
+/// The main thread's window has no coordinator, and every later boundary of a
+/// subagent's window is the manifest's, which speaks about what that window
+/// has read itself.
 fn opening_text(
     repo: &Path,
     agent: &rift_core::AgentId,
     verb: &str,
     session: &str,
     window: Option<&str>,
-) -> String {
+) -> Option<String> {
     let pointer = crate::agent_help::session_pointer();
     let (true, Some(window)) = (window_opens_here(agent, verb), window) else {
-        return pointer;
+        return Some(pointer);
     };
     let opening = Opening {
         repo,
@@ -727,10 +730,7 @@ fn opening_text(
         session,
         window,
     };
-    match coordinator_section(&opening, &pointer) {
-        Some(section) => format!("{pointer}\n{section}"),
-        None => pointer,
-    }
+    coordinator_section(&opening, "")
 }
 
 /// Whether this boundary is the one that **opens** a context window rather than

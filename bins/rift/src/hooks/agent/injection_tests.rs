@@ -471,13 +471,13 @@ fn delivered_first_pointer(
 }
 
 /// The window a subagent gets, through the same chain: the verb that opens
-/// it is a boundary, the pointer is what it carries, and the parent's own
-/// introduction is untouched by it.
+/// it is a boundary, its coordinator section is all it may carry (here the
+/// coordinator held nothing, so nothing), and the parent's own introduction
+/// is untouched by it.
 ///
 /// The last assertion is the one that could not be made before: the two
 /// windows share a session id, so a claim keyed by the session alone would
-/// make this pair of calls one pointer and one silence — in whichever
-/// order they happened to arrive.
+/// let a subagent's opening take the main thread's pointer.
 #[test]
 fn a_subagents_window_is_introduced_at_the_verb_that_opens_it() {
     let (repo, db) = recall_repo();
@@ -489,16 +489,15 @@ fn a_subagents_window_is_introduced_at_the_verb_that_opens_it() {
         "agent_type": "general-purpose",
     })
     .to_string();
-    let pointer = session_pointer_in(repo.path(), &CC, "SubagentStart", started.as_bytes())
-        .expect("the verb that opens a window introduces it");
-    assert!(
-        pointer.contains("rift recall"),
-        "a subagent is handed the same sealed pointer: {pointer}"
+    assert_eq!(
+        session_pointer_in(repo.path(), &CC, "SubagentStart", started.as_bytes()),
+        None,
+        "a subagent is not handed the map its coordinator was shown"
     );
     assert_eq!(
         session_pointer_in(repo.path(), &CC, "SubagentStart", started.as_bytes()),
         None,
-        "the same window twice is one pointer, and no manifest follows it"
+        "the same window twice says nothing, and no manifest follows it"
     );
     // A second subagent of the same turn is a second window.
     let sibling = serde_json::json!({
@@ -508,9 +507,10 @@ fn a_subagents_window_is_introduced_at_the_verb_that_opens_it() {
         "agent_type": "general-purpose",
     })
     .to_string();
-    assert!(
-        session_pointer_in(repo.path(), &CC, "SubagentStart", sibling.as_bytes()).is_some(),
-        "a sibling window is introduced too"
+    assert_eq!(
+        session_pointer_in(repo.path(), &CC, "SubagentStart", sibling.as_bytes()),
+        None,
+        "a sibling window is not handed the pointer either"
     );
     // …and the parent has not been introduced by any of it.
     assert!(

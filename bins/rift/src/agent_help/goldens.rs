@@ -12,14 +12,9 @@ use super::{session_pointer, skill_body};
 
 /// The once-per-session pointer, byte for byte.
 const POINTER_GOLDEN: &str = "\
-Rift is capturing this repository and knows what changed since the state you
-already hold. Ask it before re-reading files:
-  rift agent-help                 the map of the recall surface
-  rift recall known-state --task <goal> --file <path> --json
-  rift recall diff-since --known-hash <sha256> --json
-  rift why <path>:<line> --json    who wrote a line, its prompt and cost
-Every delta carries that provenance already: when, who, what it cost.
-Answers are budgeted and audited, and say what they omitted.";
+Rift knows what changed in this repository since you last read it. Before
+re-reading a file, ask: rift recall known-state --task <goal> --file <path> --json
+Full map: rift agent-help";
 
 /// The managed skill body, byte for byte.
 const SKILL_BODY_GOLDEN: &str = "\
