@@ -47,7 +47,14 @@ pub(super) fn latest_link() -> String {
 /// signature verifies and it names a valid release tag.
 pub(super) fn fetch_signed(link: &str, timeout: Duration) -> Result<SignedManifest> {
     let bytes = fetch(link, MAX_MANIFEST_BYTES, timeout)?;
-    let signature = fetch(&format!("{link}.sig"), 1024, timeout)?;
+    // Releases before v1.2.0-alpha published no signature; say so rather than
+    // surfacing curl's exit code, and point at the one way past it.
+    let signature = fetch(&format!("{link}.sig"), 1024, timeout).map_err(|_| {
+        refusal(
+            "this release manifest is not signed (releases before v1.2.0-alpha were not), so \
+             nothing was downloaded or changed; run plain `rift update` for the newest release",
+        )
+    })?;
     accept(&MANIFEST_PUBLIC_KEY, bytes, &signature)
 }
 

@@ -137,7 +137,9 @@ token) in `README.md`, the release notes and the release tooling; the owner
 asked for those commands to be printed for users to copy. A bucket name is
 product configuration, so these hits stay unclassified and are still redacted
 in captured text; one redundant mention in `release/README.md` was shed. The
-ceiling is frozen again at 90; the shed-only policy is unchanged.
+ceiling is frozen again at 90; the shed-only policy is unchanged. Ratified by
+the owner 2026-11-10: exempting URLs from the entropy layer was rejected,
+because a credential in a URL path or query must stay masked.
 
 ```fp-baseline
 entropy.high = 90
