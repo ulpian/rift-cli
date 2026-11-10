@@ -565,8 +565,8 @@ fn assert_the_sealed_frame(reason: &str) {
         "the way out stays open in the text as well as in the journal: {reason}"
     );
     assert!(
-        reason.contains("rift recall changed-hunks") && reason.contains("--known-hash"),
-        "and the cheaper command that exists: {reason}"
+        !reason.contains("rift recall changed-hunks"),
+        "no pull against a hash the range is unchanged at: it would be empty: {reason}"
     );
     assert!(
         !reason.contains("line 12"),

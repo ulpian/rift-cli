@@ -184,7 +184,7 @@ A decline needs every clause, and each closes something:
   (a page range or a notebook cell is a field it does not name);
 - the file is text and at most 1 MiB, so it is hashed inline and nothing waits on
   I/O;
-- the slice is at most **96 KiB** and at least **28 lines**;
+- the slice is at most **96 KiB** and at least **16 lines**;
 - the range is **wholly inside** coverage at the file's *current* hash
   ([§6.12](06-recall.md#612-what-a-context-window-already-holds));
 - the window was not declined for that exact key since its last eviction.
@@ -194,9 +194,9 @@ Anything else allows — an unknown span, an unpinned family, an unreadable poli
 
 **The 96 KiB ceiling** is the measured point at which a read result truncates in
 place (25,000 tokens), so a decision never covers more than the context was going
-to keep. **The 28-line floor** is the reason frame's break-even: the plain frame
-costs **111 tokens** at about 4 tokens a line, so a decline pays from
-111 / 4 + 1 = 28 lines. A test in the one crate holding both the sealed renderer
+to keep. **The 16-line floor** is the reason frame's break-even: the plain frame
+costs **61 tokens** at about 4 tokens a line, so a decline pays from
+61 / 4 + 1 = 16 lines. A test in the one crate holding both the sealed renderer
 and the real tokenizer measures it, so a reword that grows the frame fails the
 build. A slice under the floor is decided and recorded, never acted on.
 
@@ -297,11 +297,11 @@ through the allowlist of [§7.8](#78-what-may-appear-in-anything-rift-pushes):
 ```
 [rift] Read skipped: docs/guide/06-recall.md@sha256:8099723c1f5a lines 1-40
 are unchanged since your read in turn 1 and are already in your context.
-Repeat this exact call if you still need it (it is allowed once). To see only
-what changed since then: rift recall changed-hunks docs/guide/06-recall.md
---known-hash 8099723c1f5ada80 --json Provenance: rift why
-docs/guide/06-recall.md:1 --json
+Repeat this exact call if you still need it (it is allowed once).
 ```
+
+It names no pull: the range is covered at the file's current hash, so a
+diff against it is empty. The delta frame keeps the pull and `rift why`.
 
 It offers no summary (nobody pulls one), never claims an earlier result echoed
 the content (no family was measured doing so reliably), and uses no error word.

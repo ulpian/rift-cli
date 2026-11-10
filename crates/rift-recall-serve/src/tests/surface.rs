@@ -424,7 +424,7 @@ fn the_reason_frame_pays_for_itself_at_the_floor() {
 
     let plain = rift_tokens::count(&render_deny_frame(PATH, HASH, 1, 40, Some(3)));
     assert_eq!(
-        plain, 111,
+        plain, 61,
         "the plain frame measured on the canonical fixture; both floor doc \n         comments quote it"
     );
     // The delta frame is the more expensive of the two and is measured beside
@@ -439,7 +439,7 @@ fn the_reason_frame_pays_for_itself_at_the_floor() {
     // frame. Integer arithmetic, so it is the same figure the prose states.
     let break_even = plain / TOKENS_PER_LINE + 1;
     assert_eq!(
-        break_even, 28,
+        break_even, 16,
         "frame {plain} tokens at {TOKENS_PER_LINE} a line, delta frame {delta}"
     );
     {

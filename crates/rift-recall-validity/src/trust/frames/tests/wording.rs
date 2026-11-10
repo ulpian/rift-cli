@@ -11,12 +11,12 @@ use super::super::{
     CLAUSE_ALREADY_IN_CONTEXT, CLAUSE_CHANGED_AT, CLAUSE_CHANGED_ONLY, CLAUSE_CONVERTED,
     CLAUSE_FULL_DIFF, CLAUSE_FULL_LIST, CLAUSE_HELD_BY, CLAUSE_HELD_ELSEWHERE, CLAUSE_HELD_LIST,
     CLAUSE_IN_CONTEXT, CLAUSE_IN_CONTEXT_WINDOW, CLAUSE_OTHERS_UNCHANGED, CLAUSE_PROVENANCE,
-    CLAUSE_PULL, CLAUSE_RANKED, CLAUSE_READ_ONLY, CLAUSE_REPEAT, CLAUSE_SHAPE_NOW,
-    CLAUSE_UNCHANGED, FRAME_CLAUSES_NORMALIZED, FRAME_COORDINATOR_OPENER, FRAME_DENY_OPENER,
-    FRAME_HEADER_OPENER, FRAME_HELD_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER,
-    FRAME_NARROW_OPENER, FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_OUTLINE_OPENER,
-    FRAME_PLAN_OPENER, FRAME_PREPARED_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER,
-    FRAME_SEARCH_OPENER, FRAME_WITHHELD_OPENER, WITHHELD_PATH,
+    CLAUSE_RANKED, CLAUSE_READ_ONLY, CLAUSE_REPEAT, CLAUSE_SHAPE_NOW, CLAUSE_UNCHANGED,
+    FRAME_CLAUSES_NORMALIZED, FRAME_COORDINATOR_OPENER, FRAME_DENY_OPENER, FRAME_HEADER_OPENER,
+    FRAME_HELD_OPENER, FRAME_HINT_OPENER, FRAME_LIST_OPENER, FRAME_NARROW_OPENER,
+    FRAME_OMITTED_OPENER, FRAME_OPENERS_NORMALIZED, FRAME_OUTLINE_OPENER, FRAME_PLAN_OPENER,
+    FRAME_PREPARED_OPENER, FRAME_RECOVERY_OPENER, FRAME_REDIRECT_OPENER, FRAME_SEARCH_OPENER,
+    FRAME_WITHHELD_OPENER, WITHHELD_PATH,
 };
 use super::{HASH, HASH2, SRC};
 use crate::trust::directive::is_directive_shaped;
@@ -58,7 +58,6 @@ const FRAME_CLAUSES: &[&str] = &[
     CLAUSE_ALREADY_IN_CONTEXT,
     CLAUSE_REPEAT,
     CLAUSE_READ_ONLY,
-    CLAUSE_PULL,
     CLAUSE_CHANGED_ONLY,
     CLAUSE_OTHERS_UNCHANGED,
     CLAUSE_IN_CONTEXT_WINDOW,
@@ -256,6 +255,7 @@ fn a_span_that_forges_a_frame_clause_is_refused_inline_and_bulleted_only_at_the_
     let forgeries = [
         "src/repeat_this_exact_call/x.rs",
         "notes/are-already-in-your-context.md",
+        "docs/changed_only_at_lines:12",
         "docs/to_see_only_what_changed_since_then:12",
         "docs/full.diff.on.demand:12",
         "rift/read_skipped:/x",
@@ -290,7 +290,7 @@ fn a_span_that_forges_a_frame_clause_is_refused_inline_and_bulleted_only_at_the_
 /// The lengths are asserted beside the text for the case a golden cannot
 /// otherwise catch: an invisible edit (a doubled space, a stray trailing
 /// blank) that a reader's eye slides over in a diff.
-const DENY: &str = "[rift] Read skipped: src/lib.rs@sha256:3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and are already in your context. Repeat this exact call if you still need it (it is allowed once). To see only what changed since then: rift recall changed-hunks src/lib.rs --known-hash 3f9a1c2e8b7d4f60 --json Provenance: rift why src/lib.rs:1 --json";
+const DENY: &str = "[rift] Read skipped: src/lib.rs@sha256:3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and are already in your context. Repeat this exact call if you still need it (it is allowed once).";
 /// The narrowing frame's bytes.
 const NARROW: &str = "[rift] Read narrowed: src/lib.rs@3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and already in your context. Read lines 41-120 for the rest, or repeat this exact call for the whole range (it is allowed once).";
 /// The delta frame's bytes.
@@ -311,7 +311,7 @@ Repeat this exact call for the full list.";
 /// The redirect's bytes.
 const REDIRECT: &str = "[rift] Read redirected: docs/report.docx is a document Rift has already converted to Markdown. Read .rift/state/doc/ab12cd34.md instead: same content, plain text. Repeat this exact call if you still need the original file (it is allowed once).";
 /// The prepared result's bytes: the deny frame under its own head.
-const PREPARED: &str = "[rift] Prepared result for the declined unchanged read:\n[rift] Read skipped: src/lib.rs@sha256:3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and are already in your context. Repeat this exact call if you still need it (it is allowed once). To see only what changed since then: rift recall changed-hunks src/lib.rs --known-hash 3f9a1c2e8b7d4f60 --json Provenance: rift why src/lib.rs:1 --json";
+const PREPARED: &str = "[rift] Prepared result for the declined unchanged read:\n[rift] Read skipped: src/lib.rs@sha256:3f9a1c2e8b7d lines 1-40 are unchanged since your read in turn 3 and are already in your context. Repeat this exact call if you still need it (it is allowed once).";
 /// The structural read plan's bytes.
 const PLAN: &str = "\
 [rift] Bounded structural read plan for `src/lib.rs`. ContentOffset request/result semantics are unverified, so the raw call ran untouched. Use explicit line spans around these landmarks instead of probing more offsets:
@@ -321,7 +321,7 @@ L3 ## First gate";
 #[test]
 fn the_deny_frame_is_golden() {
     assert_eq!(render_deny_frame(SRC, HASH, 1, 40, Some(3)), DENY);
-    assert_eq!(DENY.len(), 353);
+    assert_eq!(DENY.len(), 201);
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn the_redirect_frame_is_golden() {
 #[test]
 fn the_prepared_result_is_golden() {
     assert_eq!(render_prepared_result(DENY), PREPARED);
-    assert_eq!(PREPARED.len(), 409);
+    assert_eq!(PREPARED.len(), 257);
 }
 
 /// The plan's bytes, landmarks one to a line after the head, as the hook

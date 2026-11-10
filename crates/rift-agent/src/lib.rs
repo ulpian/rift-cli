@@ -67,22 +67,22 @@ pub const DEFAULT_MAX_SLICE_BYTES: usize = 96 * 1024;
 ///
 /// A decline is not free: the model reads a reason frame instead of the range,
 /// and below some length that frame costs more than the read it replaces.
-/// A plain frame measures **111 tokens** against about 4 tokens a line, so a
-/// decline starts paying for itself at 28 lines and the floor sits exactly
+/// A plain frame measures **61 tokens** against about 4 tokens a line, so a
+/// decline starts paying for itself at 16 lines and the floor sits exactly
 /// there; a slice under it is still decided and recorded, so the pool the floor
 /// forgoes is a figure rather than a guess.
 ///
 /// It is a **default**, not a limit: the value in force is a policy setting,
 /// sized by the window that watched the lever record without acting.
 ///
-/// It moved from 24 when the frame grew the provenance handle — and when the
-/// frame was measured on the renderer's own golden fixture rather than quoted
-/// from a cheap one. The floor is the frame's break-even, so it follows the
+/// It moved from 24 to 28 when the frame grew the provenance handle, and from
+/// 28 to 16 when the plain frame dropped the pull and provenance hints, which
+/// pointed at a diff that is empty by construction. The floor is the frame's break-even, so it follows the
 /// frame's measured cost;
 /// `the_reason_frame_pays_for_itself_at_the_floor` in `rift-recall-serve` is
 /// where the arithmetic runs, because that crate has both the sealed renderer
 /// and the real tokenizer and this one has neither.
-pub const DEFAULT_MIN_SLICE_LINES: u32 = 28;
+pub const DEFAULT_MIN_SLICE_LINES: u32 = 16;
 
 /// Where a read request's last line comes from — the difference between a
 /// range a tool's own contract bounds and one nothing bounds.

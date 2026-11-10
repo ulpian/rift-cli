@@ -7,11 +7,11 @@ condition: intercepted
 thresholds: v1 (P50 token >= 15.0%, P50 cost >= 15.0%, latency <= 16 steps)
 
 task                                baseline    delta  saved% steps  ok       claim  reconciled
-intercepted_served_n10_changed1_pos0      3329     1329  60.08%     4  yes       2014  within
-intercepted_served_n20_changed2_pos1      4434     1432  67.70%     5  yes       3016  within
-intercepted_served_n40_changed2_pos0      4434     1434  67.66%     5  yes       3014  within
-intercepted_served_n15_changed3_pos2      5539     1531  72.36%     6  yes       4022  within
+intercepted_served_n10_changed1_pos0      3329     1281  61.52%     4  yes       2062  within
+intercepted_served_n20_changed2_pos1      4434     1340  69.78%     5  yes       3108  within
+intercepted_served_n40_changed2_pos0      4434     1339  69.80%     5  yes       3109  within
+intercepted_served_n15_changed3_pos2      5539     1394  74.83%     6  yes       4159  within
 
-token savings percentiles: P10 62.35% | P50 67.68% | P90 70.96%
+token savings percentiles: P10 64.00% | P50 69.79% | P90 73.32%
 reconciliation: 4/4 within ±5% | 0 over-estimate(s)
 verdict: GO

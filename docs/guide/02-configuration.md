@@ -198,16 +198,18 @@ The lever that declines a re-read of lines a context window already holds
 |---|---|---|
 | `mode` | `enforce` | `off` never consults the lever; `observe` records the decision while the call runs as written; `enforce` declines once, with a reason. |
 | `max_slice_bytes` | `98304` | Largest slice one decision may cover. |
-| `min_slice_lines` | `28` | Shortest slice one decision may act on. |
+| `min_slice_lines` | `16` | Shortest slice one decision may act on. |
 | `max_inline_hash_bytes` | `1048576` | Largest file hashed on the gate path. |
 | `recovery_budget` | `800` | Tokens a post-compaction recovery map may cost. |
 | `basis_ttl_days` | `30` | How long `rift clean` keeps a basis snapshot. |
-| `inherit_by_name` | `enforce` | Decline on lines a subagent inherited because its prompt named the path. |
+| `inherit_by_name` | `observe` | Decline on lines a subagent inherited because its prompt named the path. Observes by default: a name in a brief is not the bytes. |
 | `first_contact` | `enforce` | Answer a window's first read of a large file once with its bound outline. |
 | `first_contact_min_lines` / `_min_bytes` | `400` / `16384` | "Large": either floor is enough. |
 | `narrow` | `observe` | Decline the held part of a read that overlaps lines this window holds, asking for the unheld range only. |
 | `decline_family_held` | `enforce` | Decline once a read of bytes another live window holds, offering a cheaper route. |
-| `recognise_by_output` | `observe` | Book the lines a Claude Code shell result showed the window, whatever the command line was; never above the read lever. |
+| `recognise_by_output` | `enforce` | Book the lines a Claude Code shell result showed the window, member by member of a chained command line, so a later read of them is declined; never above the read lever. |
+| `substitute_held_output` | `enforce` | Replace the lines of one member's output that this window already read at the same revision with a frame naming them; every other member's output is delivered as written. |
+| `fold_command_output` | `enforce` | Fold runs of alike lines in an 8–30 KB shell result, stdout and stderr both, to one line with a count. Errors, warnings, panics, failures, spans, test summaries and the last 20 lines of each stream are never folded; the original is spooled first. |
 | `[interception.agents]` | absent | Per family, in registry order (`claude-code`, `codex`, `gemini`, `antigravity`, `cursor`, `copilot-cli`, `opencode`, `factory-droid`, `ollama`): one mode, or a table of per-lever modes. |
 
 The levers above are never above `mode` or the family's cap.
@@ -232,7 +234,7 @@ in a family's table and an unknown value each fail the load. `enforce` is the de
 confirmed; an explicit `off` or `observe` stays
 ([10](10-agent-integrations.md)).
 
-The slice ceiling (96 KiB) and floor (28 lines, from a 111-token reason frame) are
+The slice ceiling (96 KiB) and floor (16 lines, from a 61-token reason frame) are
 measurements; [07 §7.4](07-serving-and-injection.md#74-tier-three-the-decision-at-the-read)
 gives their reasons. The 1 MiB hash ceiling also bounds a basis snapshot: past it
 nothing is diffed, so keeping the bytes would buy no answer.

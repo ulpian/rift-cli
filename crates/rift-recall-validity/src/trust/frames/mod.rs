@@ -240,8 +240,6 @@ const CLAUSE_ALREADY_IN_CONTEXT: &str = "already in your context";
 const CLAUSE_REPEAT: &str = "Repeat this exact call";
 /// The outline frame's cheaper route: the lines of one definition.
 const CLAUSE_READ_ONLY: &str = "Read only the lines you need";
-/// The cheaper route, named in the plain frame.
-const CLAUSE_PULL: &str = "To see only what changed since then:";
 /// The delta frame's fact: the file changed, and Rift knows exactly where.
 const CLAUSE_CHANGED_ONLY: &str = "changed only at lines";
 /// The other half of that fact, which is what makes the read skippable.
@@ -308,6 +306,18 @@ pub(super) const FRAME_OPENERS_NORMALIZED: &[&str] = &[
     "detailondemand:",
 ];
 
+/// Clauses earlier builds wrote and no frame writes any more, in normal form.
+///
+/// Still refused inside a span: a session or a sealed transcript can carry a
+/// frame an older build wrote, so a path spelling one would read as Rift's
+/// own words beside it. Kept apart from [`FRAME_CLAUSES_NORMALIZED`] so that
+/// list stays an exact description of what is written today.
+const RETIRED_CLAUSES_NORMALIZED: &[&str] = &[
+    // The plain decline's pull hint, dropped because a pull against the hash
+    // the decline names is empty by construction.
+    "toseeonlywhatchangedsincethen:",
+];
+
 /// Every fixed phrase a frame writes **inside** a line, in the form a span is
 /// judged in: projected onto the pushed alphabet and normalized.
 ///
@@ -327,7 +337,6 @@ const FRAME_CLAUSES_NORMALIZED: &[&str] = &[
     "alreadyinyourcontext",
     "repeatthisexactcall",
     "readonlythelinesyouneed",
-    "toseeonlywhatchangedsincethen:",
     "changedonlyatlines",
     "everyotherlineisunchanged",
     "toseethechangeincontext",
@@ -513,17 +522,14 @@ pub fn render_deny_frame(path: &str, hash: &str, lo: u32, hi: u32, turn: Option<
         || "earlier in this session".to_owned(),
         |t| format!("in turn {t}"),
     );
-    let mut out = format!(
+    // No pull hint and no provenance hint: a plain decline covers the range
+    // at the file's current hash, so `changed-hunks` against that hash is
+    // empty by construction, and every token here is paid on each decline.
+    // The delta frame, where something did change, keeps both.
+    format!(
         "{FRAME_DENY_OPENER} {shown}{at_hash} lines {lo}-{hi} are {CLAUSE_UNCHANGED} {since} \
          and {CLAUSE_IN_CONTEXT}. {CLAUSE_REPEAT} if you still need it (it is allowed once)."
-    );
-    if let Some(hint) = pull_hint(path, hash) {
-        let _ = write!(out, " {CLAUSE_PULL} {hint}");
-    }
-    if let Some(why) = why_hint(path, lo) {
-        let _ = write!(out, " {why}");
-    }
-    out
+    )
 }
 
 /// The one line that stands in a terminal result for lines `lo`-`hi` of
@@ -1101,6 +1107,7 @@ pub fn neutral_inline_span(raw: &str) -> Option<String> {
     let forges_a_clause = FRAME_OPENERS_NORMALIZED
         .iter()
         .chain(FRAME_CLAUSES_NORMALIZED.iter())
+        .chain(RETIRED_CLAUSES_NORMALIZED.iter())
         .any(|p| n.contains(p));
     (!forges_a_clause).then_some(span)
 }

@@ -629,11 +629,16 @@ mod tests {
         // command nobody can run is the same defect wherever it is rendered.
         // So the frame's own text is parsed here too — the sentence a model
         // reads is the thing under test, not a spelling this file controls.
-        // A frame now ends with TWO commands — the pull, and the provenance
-        // handle that answers why the file moved — so both are parsed. A
-        // handle an agent cannot run is exactly the defect this test exists
-        // for, and it would otherwise hide behind the pull in front of it.
-        let frame = rift_recall_serve::render_deny_frame(SRC, HASH, 1, 40, Some(3));
+        // The delta frame ends with TWO commands — the pull, and the
+        // provenance handle that answers why the file moved — so both are
+        // parsed. A handle an agent cannot run is exactly the defect this test
+        // exists for, and it would otherwise hide behind the pull in front of
+        // it. The plain frame names neither: its range is unchanged, so its
+        // pull would be empty by construction.
+        let plain = rift_recall_serve::render_deny_frame(SRC, HASH, 1, 40, Some(3));
+        assert!(!plain.contains("rift recall") && !plain.contains("rift why"));
+        let frame = rift_recall_serve::render_delta_frame(SRC, HASH, &[(1, 4)], 1, 40, 3, Some(3))
+            .expect("one exact site is a delta frame");
         let (pull, why) = frame
             .rsplit_once("rift recall ")
             .map(|(_, rest)| format!("rift recall {rest}"))

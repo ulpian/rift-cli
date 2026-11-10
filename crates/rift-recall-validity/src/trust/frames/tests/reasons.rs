@@ -14,7 +14,7 @@ use super::{HASH, SRC};
 /// fact the model can check, the escape hatch, and the cheaper route that
 /// exists — with the hash in both forms it is used in.
 #[test]
-fn a_deny_frame_states_the_fact_the_escape_hatch_and_the_pull() {
+fn a_deny_frame_states_the_fact_and_the_escape_hatch_and_no_dead_route() {
     let text = render_deny_frame(SRC, HASH, 1, 40, Some(3));
     assert!(text.starts_with(FRAME_DENY_OPENER), "{text}");
     assert!(
@@ -23,10 +23,10 @@ fn a_deny_frame_states_the_fact_the_escape_hatch_and_the_pull() {
     );
     assert!(text.contains("in turn 3"), "{text}");
     assert!(text.contains(CLAUSE_REPEAT), "{text}");
-    assert!(
-        text.contains("rift recall changed-hunks src/lib.rs --known-hash 3f9a1c2e8b7d4f60 --json"),
-        "{text}"
-    );
+    // The range is covered at the file's current hash, so a changed-hunks
+    // pull against it returns nothing: the frame never advertises one.
+    assert!(!text.contains("changed-hunks"), "{text}");
+    assert!(!text.contains("rift why"), "{text}");
     // One line, one position: a reason frame is a tool result, not a page.
     assert_eq!(text.lines().count(), 1, "{text}");
     // Never an error word, never a summary offer, never a claim about an
