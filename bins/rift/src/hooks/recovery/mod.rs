@@ -382,7 +382,7 @@ mod tests {
 
         // What it cost is booked, in the relation the honesty gate nets.
         let db = crate::family::recall_db(&repo).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -455,7 +455,7 @@ mod tests {
         recovery_map(&repo, &cfg, &CC, START, &compacted(session)).expect("a map");
 
         let db = crate::family::recall_db(&repo).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

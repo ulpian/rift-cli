@@ -1362,7 +1362,7 @@ mod projection_replacement_tests {
 
     fn seed_condense_serves(root: &Path, rt: &tokio::runtime::Runtime) -> PathBuf {
         let db = crate::family::recall_db(root).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let attribution = rift_recall_ledger::attribution::ServeAttribution {
             session_id: "s-busy".into(),
             window_key: None,
@@ -1427,7 +1427,7 @@ mod projection_replacement_tests {
             .unwrap()
             .success());
         let db = crate::family::recall_db(checkout.path()).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

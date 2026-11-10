@@ -97,7 +97,7 @@ pub(super) fn record_recovery_injection(
     let attribution = serve_attribution(audit.session.as_deref(), audit.window.as_deref());
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+        let store = rift_store::open_recall_projection(&db)?;
         let at_ms = now_ms();
         let event = serve_audit_event(repo, &audit);
         let (audited, called) = serve_audit_envelopes(&event, &audit, at_ms);

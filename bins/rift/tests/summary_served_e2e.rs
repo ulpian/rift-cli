@@ -104,7 +104,7 @@ impl Fixture {
     fn store(&self) -> SqliteStore {
         let db = rift_store::recall_db_for_family_under(&self.home.join("cache"), &self.family());
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap()
+        rift_store::open_recall_projection(&db).unwrap()
     }
 }
 

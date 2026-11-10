@@ -226,7 +226,7 @@ fn member_sessions(repo: &Path) -> Result<PathBuf> {
 
 /// Open (creating + migrating) the recall.db projection for `repo`.
 pub(crate) fn open_recall_db(db: &Path) -> Result<SqliteStore> {
-    rift_store::open_migrated(db, &recall_migrations())
+    rift_store::open_recall_projection(db)
 }
 
 /// The production ingest pass, shared by `metrics` and `rebuild`: the ONE

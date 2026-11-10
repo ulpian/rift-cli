@@ -125,8 +125,8 @@ pub use keychain_os::OsKeychain;
 pub use migrate::{
     apply_migrations, apply_migrations_on, canopy_canonical_schema_sql, canopy_migrations,
     default_migrations, open_capture_projection, open_existing_migrated, open_migrated,
-    open_replacement_migrated, recall_canonical_schema_sql, recall_migrations, Migration,
-    MigrationOutcome,
+    open_recall_projection, open_replacement_migrated, recall_canonical_schema_sql,
+    recall_migrations, Migration, MigrationOutcome,
 };
 pub use paths::{
     canopy_ui_db_from, canopy_ui_db_under, capture_projection_db_for_repo, capture_repo_id,

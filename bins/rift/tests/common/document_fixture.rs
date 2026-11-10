@@ -1031,7 +1031,7 @@ fn rows(repo: &Path, cache: &Path, sql: &str) -> Vec<Vec<String>> {
         panic!("the session above should have minted the family");
     };
     let db = rift_store::recall_db_under(cache, &family.recall_id);
-    let store = rift_store::open_migrated(db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(db).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

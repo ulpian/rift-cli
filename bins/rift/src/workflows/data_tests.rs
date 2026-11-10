@@ -364,7 +364,7 @@ async fn seed_tool_calls(s: &SqliteStore) {
 /// The seeded recall ledger, written to `dir/recall.db`.
 async fn recall(dir: &Path) -> std::path::PathBuf {
     let db = dir.join("recall.db");
-    let s = rift_store::open_migrated(&db, &rift_store::recall_migrations()).expect("recall db");
+    let s = rift_store::open_recall_projection(&db).expect("recall db");
     for (id, verb, returned, avoided, at) in [
         ("a1", "memd.manifest_served", 120, 900, 1_600),
         ("a2", "memd.manifest_served", 30, 100, 6_200),

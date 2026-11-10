@@ -858,7 +858,7 @@ mod tests {
 
         // The sibling lands a checkpoint, exactly as its own archive would.
         let db = crate::family::recall_db(&linked).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()

@@ -295,7 +295,7 @@ fn ingested_reads(repo: &Path, strict_read_only: bool) -> Option<i64> {
     let store = if strict_read_only {
         rift_store::SqliteStore::open_read_only(&db).ok()?
     } else {
-        rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok()?
+        rift_store::open_recall_projection(&db).ok()?
     };
     let rt = runtime().ok()?;
     rt.block_on(store.query("SELECT COUNT(*) FROM n_file_read", &[]))

@@ -655,10 +655,12 @@ const TABLES: &[CanonicalTable] = &[
         unique: NO_UNIQUE,
     },
     // --- capture v5 additive (projection meta): past the v4 set ---------------
-    // Key/value projection facts; today exactly one key ('rebuild_epoch'). The
-    // row is written once per projection lifetime — `rift_store::rebuild`
-    // recreates the file and inserts old-epoch+1 — so the append-only guards
-    // hold without any UPDATE. An absent row reads as epoch 0.
+    // Key/value projection facts: 'rebuild_epoch' and
+    // 'session_identity_backfill_covered'. Each row is written at most once
+    // per projection lifetime — `rift_store::rebuild` recreates the file and
+    // inserts old-epoch+1; the open that first sees full identity coverage
+    // inserts the marker — so the append-only guards hold without any
+    // UPDATE. An absent epoch row reads as epoch 0.
     CanonicalTable {
         name: "projection_meta",
         columns: PROJECTION_META_COLUMNS,

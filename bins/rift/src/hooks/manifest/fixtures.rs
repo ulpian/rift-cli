@@ -90,7 +90,7 @@ impl ProjectionSeeder {
     fn open_at(repo: &std::path::Path) -> Self {
         let db = crate::family::recall_db(repo).unwrap();
         set_up_here(repo);
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -304,7 +304,7 @@ pub(super) fn stamp_as_it_stands(repo: &std::path::Path, key: &str) -> String {
 pub(super) fn scoped_stamp_as_it_stands(repo: &std::path::Path) -> Option<String> {
     let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
     let db = crate::family::recall_db(repo).ok()?;
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok()?;
+    let store = rift_store::open_recall_projection(&db).ok()?;
     let family = crate::family::try_at(repo)?;
     let (scope, ancestry) = crate::memory::serving_scope(&family, repo).ok()?;
     rt.block_on(rift_recall_ledger::scope_query::scoped_stamp(

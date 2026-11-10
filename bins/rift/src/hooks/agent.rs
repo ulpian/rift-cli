@@ -882,7 +882,7 @@ fn record_injection_spend(
     let envelope = rift_recall_serve::injection_audit_envelope(tokens, occurrence);
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+        let store = rift_store::open_recall_projection(&db)?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(rift_core::RiftError::from)?;
@@ -957,7 +957,7 @@ fn record_context_delivery_in(
     };
     let _ = (|| -> Result<()> {
         let db = crate::family::recall_db(repo)?;
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+        let store = rift_store::open_recall_projection(&db)?;
         let call_id = AUDIT_IDS.next_ulid().to_hex();
         let at = now_ms();
         let event = rift_recall_serve::MemdEvent::ManifestInjected {

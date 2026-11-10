@@ -77,7 +77,7 @@ fn fixture_with(prevented: i64) -> Fixture {
 
     let recall_db = rift_store::recall_db_for_family_under(&cache, &family);
     std::fs::create_dir_all(recall_db.parent().unwrap()).unwrap();
-    let recall = rift_store::open_migrated(&recall_db, &rift_store::recall_migrations()).unwrap();
+    let recall = rift_store::open_recall_projection(&recall_db).unwrap();
     let rt = rt();
     for (i, (family_name, avoided)) in [("claude-code", AVOIDED_CLAUDE), ("codex", AVOIDED_CODEX)]
         .iter()

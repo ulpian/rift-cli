@@ -132,7 +132,7 @@ async fn real_process_serve_calls_persist_serve_events_with_distinct_ids_and_no_
     let repo_id = rift_store::recall_repo_id(&repo).unwrap();
     let db = rift_store::recall_db_under(&cache, &repo_id);
     assert!(db.is_file(), "the process must have created recall.db");
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(&db).unwrap();
 
     two_serve_calls_are_distinct_and_carry_no_argument(&store).await;
     one_session_row_per_channel(&store).await;
@@ -244,7 +244,7 @@ async fn the_plain_audit_twin_carries_no_argument(store: &SqliteStore) {
 fn recall_store(repo: &Path, cache: &Path) -> SqliteStore {
     let repo_id = rift_store::recall_repo_id(repo).unwrap();
     let db = rift_store::recall_db_under(cache, &repo_id);
-    rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap()
+    rift_store::open_recall_projection(&db).unwrap()
 }
 
 /// `(serve key, relation, window key)` of every serve the projection

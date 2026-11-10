@@ -95,7 +95,7 @@ pub(super) fn recovery_map_entries(
     let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
     let basis = crate::family::recall_db(repo)
         .ok()
-        .and_then(|db| rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok())
+        .and_then(|db| rift_store::open_recall_projection(&db).ok())
         .zip(rift_recall_substrate::GixSubstrate::open(repo).ok());
     // The ladder's second rung: the revisions a read recorded, kept by the
     // detached worker. A window that read a file and then edited it holds a
@@ -374,7 +374,7 @@ mod tests {
             .build()
             .unwrap();
         let db = crate::family::recall_db(&repo).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         rt.block_on(rift_recall_ledger::blob_map::persist_blob_oid_map(
             &store,
             &[rift_recall_substrate::worktree::WorktreeBlob {
@@ -480,7 +480,7 @@ mod tests {
             refuses_path: &|_| false,
         };
         let db = crate::family::recall_db(repo).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

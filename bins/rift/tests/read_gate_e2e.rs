@@ -50,8 +50,7 @@ fn recall_db(repo: &Path, cache: &Path) -> PathBuf {
 
 /// Rows out of the family's recall projection, as text, in the order asked.
 fn rows(repo: &Path, cache: &Path, sql: &str) -> Vec<Vec<String>> {
-    let store = rift_store::open_migrated(recall_db(repo, cache), &rift_store::recall_migrations())
-        .unwrap();
+    let store = rift_store::open_recall_projection(recall_db(repo, cache)).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

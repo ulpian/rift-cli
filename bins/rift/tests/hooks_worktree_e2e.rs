@@ -211,7 +211,7 @@ async fn the_memd_audit_sink_writes_the_family_recall_db_from_a_subdirectory() {
     // file the recall id has always named, adopted in place.
     let family_db =
         rift_store::recall_db_under(&cache, &rift_store::recall_repo_id(&main).unwrap());
-    let store = rift_store::open_migrated(&family_db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(&family_db).unwrap();
     let rows = rift_store::CanonicalStore::query(
         &store,
         "SELECT audit_id FROM memd_audit_event ORDER BY audit_id",

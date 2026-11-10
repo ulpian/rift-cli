@@ -178,7 +178,7 @@ impl OpenProjection {
     fn open_at_repo(repo: &std::path::Path) -> Option<Self> {
         let rt = tokio::runtime::Builder::new_current_thread().build().ok()?;
         let db = crate::family::recall_db(repo).ok()?;
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok()?;
+        let store = rift_store::open_recall_projection(&db).ok()?;
         let family = crate::family::try_at(repo)?;
         // The injector's scope, built exactly as the eight verbs build theirs,
         // and NEVER granted — there is no argument here that could widen it.
@@ -396,7 +396,7 @@ mod tests {
             .expect("the same delta injects again");
         assert_eq!(first, second, "the collision case needs identical text");
 
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rows = rt
             .block_on(store.query(
                 "SELECT audit_id, tokens_returned, tokens_avoided FROM memd_audit_event \
@@ -473,7 +473,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rows = rt
             .block_on(store.query("SELECT tokens_returned FROM memd_audit_event", &[]))
             .unwrap();
@@ -807,7 +807,7 @@ mod tests {
             .build()
             .unwrap();
         let db = crate::family::recall_db(&repo).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         rt.block_on(rift_recall_ledger::blob_map::persist_blob_oid_map(
             &store,
             &[rift_recall_substrate::worktree::WorktreeBlob {

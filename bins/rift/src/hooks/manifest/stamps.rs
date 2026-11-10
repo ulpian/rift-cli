@@ -274,7 +274,7 @@ mod tests {
         );
 
         {
-            let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+            let store = rift_store::open_recall_projection(&db).unwrap();
             rt.block_on(append_memd_audit(
                 &store,
                 rift_recall_serve::injection_audit_envelope(7, "elsewhere").as_bytes(),

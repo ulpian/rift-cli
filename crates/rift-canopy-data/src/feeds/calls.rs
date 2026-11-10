@@ -165,7 +165,7 @@ mod tests {
         let repo = recall_repo_id(Path::new(path)).unwrap();
         let db = recall_db_under(root, &repo);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = runtime().unwrap();
         for (call_id, channel, recorded_at) in events {
             rt.block_on(store.insert(
@@ -201,7 +201,7 @@ mod tests {
         let repo = recall_repo_id(Path::new(&proj)).unwrap();
         let db = recall_db_under(root.path(), &repo);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = runtime().unwrap();
         rt.block_on(store.insert(
             "memd_audit_event",

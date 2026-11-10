@@ -329,7 +329,7 @@ fn seed_family_recall(f: &Family, verb: &str, at: i64) -> PathBuf {
     let recall_id = rift_store::recall_repo_id(&f.main).unwrap();
     let db = rift_store::recall_db_under(&f.cache, &recall_id);
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(&db).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

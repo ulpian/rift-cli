@@ -20,6 +20,7 @@ mod fixtures;
 mod recall;
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use rift_core::{Result, RiftError, Timestamp};
 use sha2::{Digest, Sha256};
@@ -83,16 +84,66 @@ pub struct MigrationOutcome {
     pub high_water: u32,
 }
 
+/// A production migration set, generated and fingerprinted once per process.
+///
+/// Every agent hook opens the capture projection, and a long-lived process
+/// (Canopy, the worker) opens it again and again. Planning each open meant
+/// regenerating every migration's SQL, running the additive guard over all of
+/// it and hashing it. The fingerprint is over exactly what the planner
+/// compares — each `(version, checksum)` — so a projection whose `_migrations`
+/// ledger hashes to the same value is one the full plan would have found
+/// complete and untampered, and its open can skip the plan.
+struct CodeMigrations {
+    migrations: Vec<Migration>,
+    fingerprint: String,
+}
+
+impl CodeMigrations {
+    fn of(migrations: Vec<Migration>) -> Self {
+        let fingerprint = ledger_fingerprint(
+            migrations
+                .iter()
+                .map(|m| (m.version, checksum_hex(&m.sql)))
+                .collect(),
+        );
+        Self {
+            migrations,
+            fingerprint,
+        }
+    }
+}
+
+static CAPTURE_MIGRATIONS: LazyLock<CodeMigrations> =
+    LazyLock::new(|| CodeMigrations::of(default_migrations()));
+
+static RECALL_MIGRATIONS: LazyLock<CodeMigrations> =
+    LazyLock::new(|| CodeMigrations::of(recall_migrations()));
+
 fn checksum_hex(sql: &str) -> String {
     let mut h = Sha256::new();
     h.update(sql.as_bytes());
-    let out = h.finalize();
-    let mut s = String::with_capacity(out.len() * 2);
+    hex(&h.finalize())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
     use core::fmt::Write as _;
-    for b in out {
+    for b in bytes {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// One digest over a `(version, checksum)` ledger in version order. The line
+/// form `version:checksum\n` is unambiguous, so equal digests mean equal
+/// ledgers.
+fn ledger_fingerprint(mut ledger: Vec<(u32, String)>) -> String {
+    ledger.sort_by_key(|(version, _)| *version);
+    let mut h = Sha256::new();
+    for (version, checksum) in ledger {
+        h.update(format!("{version}:{checksum}\n").as_bytes());
+    }
+    hex(&h.finalize())
 }
 
 /// Strip SQL comments (`--` and `/* */`) and single-quoted string literals so
@@ -224,15 +275,62 @@ pub fn open_migrated(
     path: impl AsRef<std::path::Path>,
     migrations: &[Migration],
 ) -> Result<SqliteStore> {
-    let p = path.as_ref();
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let store = SqliteStore::open(p)?;
-    // Owner-only dir + file (the local-disk-reader mitigation).
-    crate::paths::harden_projection_permissions(p)?;
+    let store = open_hardened(path.as_ref())?;
     apply_migrations(&store, migrations)?;
     Ok(store)
+}
+
+/// [`open_migrated`] with the recall projection's migration set
+/// ([`recall_migrations`]) — the standard way to open `recall.db`. An open
+/// whose ledger already matches the code skips the planner (see
+/// [`apply_code_migrations`]).
+///
+/// # Errors
+/// See [`open_migrated`].
+pub fn open_recall_projection(path: impl AsRef<std::path::Path>) -> Result<SqliteStore> {
+    let store = open_hardened(path.as_ref())?;
+    apply_code_migrations(&store, &RECALL_MIGRATIONS)?;
+    Ok(store)
+}
+
+/// Create the parent, open the store, and make both owner-only (the
+/// local-disk-reader mitigation).
+fn open_hardened(path: &std::path::Path) -> Result<SqliteStore> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let store = SqliteStore::open(path)?;
+    crate::paths::harden_projection_permissions(path)?;
+    Ok(store)
+}
+
+/// Bring `store` to a production set, skipping the planner when its applied
+/// ledger is exactly the code's.
+///
+/// The skip keeps the tamper lock whole: it compares the projection's own
+/// `_migrations` rows, read on every open, against the code. An edited
+/// migration, an edited ledger row, a missing version or a pending one all
+/// change the digest and fall through to [`apply_migrations`], which plans,
+/// refuses tampering and applies what is owed exactly as before. The only
+/// thing skipped is work whose answer is already known: "nothing to apply".
+fn apply_code_migrations(store: &SqliteStore, set: &CodeMigrations) -> Result<MigrationOutcome> {
+    if let Some(outcome) = ledger_matches(store, set) {
+        return Ok(outcome);
+    }
+    apply_migrations(store, &set.migrations)
+}
+
+/// The no-op outcome when `store`'s ledger hashes to `set`'s fingerprint.
+/// Any read failure — a fresh file has no `_migrations` yet — is a miss.
+fn ledger_matches(store: &SqliteStore, set: &CodeMigrations) -> Option<MigrationOutcome> {
+    let ledger = store.applied_migrations().ok()?;
+    let high_water = ledger.iter().map(|(version, _)| *version).max()?;
+    let skipped = ledger.len();
+    (ledger_fingerprint(ledger) == set.fingerprint).then_some(MigrationOutcome {
+        applied: 0,
+        skipped,
+        high_water,
+    })
 }
 
 /// Open only an existing projection after acquiring its shared lifetime guard.
@@ -274,7 +372,8 @@ pub fn open_replacement_migrated(
 /// # Errors
 /// See [`open_migrated`].
 pub fn open_capture_projection(path: impl AsRef<std::path::Path>) -> Result<SqliteStore> {
-    let store = open_migrated(path, &default_migrations())?;
+    let store = open_hardened(path.as_ref())?;
+    apply_code_migrations(&store, &CAPTURE_MIGRATIONS)?;
     backfill_capture_session_identities(&store)?;
     Ok(store)
 }
@@ -674,5 +773,136 @@ mod tests {
             })
             .unwrap();
         assert!(n >= 1, "expected per-table schema_version rows, got {n}");
+    }
+
+    fn capture_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("projection.db");
+        (dir, db)
+    }
+
+    #[test]
+    fn a_projection_whose_ledger_matches_the_code_skips_the_plan() {
+        let (_dir, db) = capture_db();
+        let store = open_capture_projection(&db).unwrap();
+        let outcome = ledger_matches(&store, &CAPTURE_MIGRATIONS).unwrap();
+        assert_eq!(
+            outcome,
+            MigrationOutcome {
+                applied: 0,
+                skipped: 22,
+                high_water: 22
+            }
+        );
+        // The skip answers what the full plan would have: nothing owed.
+        assert_eq!(
+            apply_migrations(&store, &default_migrations()).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn the_code_fingerprint_is_over_the_planners_own_ledger() {
+        let s = store();
+        apply_migrations(&s, &default_migrations()).unwrap();
+        let ledger = s.applied_migrations().unwrap();
+        assert_eq!(ledger_fingerprint(ledger), CAPTURE_MIGRATIONS.fingerprint);
+        let r = store();
+        apply_migrations(&r, &recall_migrations()).unwrap();
+        assert!(ledger_matches(&r, &RECALL_MIGRATIONS).is_some());
+        assert!(ledger_matches(&r, &CAPTURE_MIGRATIONS).is_none());
+    }
+
+    #[test]
+    fn a_projection_owed_a_migration_misses_and_is_brought_current() {
+        let (_dir, db) = capture_db();
+        let old = open_migrated(&db, &default_migrations()[..21]).unwrap();
+        assert!(ledger_matches(&old, &CAPTURE_MIGRATIONS).is_none());
+        drop(old);
+        let store = open_capture_projection(&db).unwrap();
+        assert!(ledger_matches(&store, &CAPTURE_MIGRATIONS).is_some());
+    }
+
+    #[test]
+    fn a_fresh_file_with_no_ledger_misses() {
+        let s = store();
+        assert!(ledger_matches(&s, &CAPTURE_MIGRATIONS).is_none());
+    }
+
+    #[test]
+    fn a_tampered_ledger_row_misses_and_the_plan_refuses_it() {
+        let (_dir, db) = capture_db();
+        let store = open_capture_projection(&db).unwrap();
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE _migrations SET checksum = 'x' WHERE version = 3",
+                    [],
+                )
+            })
+            .unwrap();
+        assert!(ledger_matches(&store, &CAPTURE_MIGRATIONS).is_none());
+        drop(store);
+        let refused = open_capture_projection(&db).err().unwrap();
+        assert!(matches!(refused, RiftError::Integrity(_)), "{refused:?}");
+    }
+
+    fn backfill_marked(store: &SqliteStore) -> bool {
+        store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projection_meta WHERE key = ?)",
+                    [capture::IDENTITY_BACKFILL_COVERED],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    fn insert_bare_session(store: &SqliteStore, native: &str) {
+        let sid = rift_core::capture_session_row_id("claude-code", native);
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO session \
+                     (session_id, agent, model_primary, repo_id, started_at, schema_version) \
+                     VALUES (?, 'claude-code', '', 'repo', 1, 1)",
+                    [&sid],
+                )
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_covered_projection_is_marked_once_and_later_opens_skip_the_guard() {
+        let (_dir, db) = capture_db();
+        let store = open_capture_projection(&db).unwrap();
+        assert!(backfill_marked(&store));
+        // A bare session added after the mark stays bare: the guard no
+        // longer runs, which is the marker's whole point.
+        insert_bare_session(&store, "late");
+        drop(store);
+        let reopened = open_capture_projection(&db).unwrap();
+        let rows: i64 = reopened
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM projection_meta WHERE key = ?",
+                    [capture::IDENTITY_BACKFILL_COVERED],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "the mark is inserted once, never updated");
+    }
+
+    #[test]
+    fn an_uncovered_projection_is_not_marked_and_keeps_the_guard() {
+        let (_dir, db) = capture_db();
+        let old = open_migrated(&db, &default_migrations()).unwrap();
+        // No hook-audit fact exists to derive this session's identity from.
+        insert_bare_session(&old, "orphan");
+        drop(old);
+        let store = open_capture_projection(&db).unwrap();
+        assert!(!backfill_marked(&store));
     }
 }

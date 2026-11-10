@@ -137,7 +137,7 @@ fn savings(repo: &Path, cache: &Path) -> serde_json::Value {
 fn seed_codex_decision(cache: &Path, family: &impl rift_core::id::FamilyIds) {
     let recall_db = rift_store::recall_db_for_family_under(cache, family);
     std::fs::create_dir_all(recall_db.parent().unwrap()).unwrap();
-    let recall = rift_store::open_migrated(&recall_db, &rift_store::recall_migrations()).unwrap();
+    let recall = rift_store::open_recall_projection(&recall_db).unwrap();
     let rt = rt();
     rt.block_on(recall.insert(
         "memd_audit_event",

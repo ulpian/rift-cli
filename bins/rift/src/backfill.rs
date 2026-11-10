@@ -499,7 +499,7 @@ async fn recall_from(
         return recall::count_recall_rows(source).await;
     }
     let db = crate::family::recall_db(root)?;
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+    let store = rift_store::open_recall_projection(&db)?;
     recall::import_recall_from(&store, source).await
 }
 

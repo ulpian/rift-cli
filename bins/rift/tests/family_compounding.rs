@@ -243,7 +243,7 @@ impl Family {
     /// Rows out of the family's recall projection.
     fn rows(&self, sql: &str) -> Vec<Vec<String>> {
         let db = self.recall_db();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

@@ -67,7 +67,7 @@ pub(in crate::hooks) fn bind_and_cache_outlines(
         return None;
     }
     let db = crate::family::recall_db(work_tree).ok()?;
-    let recall = rift_store::open_migrated(&db, &rift_store::recall_migrations()).ok()?;
+    let recall = rift_store::open_recall_projection(&db).ok()?;
     let engine = rift_recall_policy::PolicyEngine::new(&cfg).with_serve_policy(
         rift_recall_policy::ServePolicy::load(&work_tree.join(".rift")),
     );

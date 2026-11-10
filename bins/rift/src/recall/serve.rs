@@ -179,7 +179,7 @@ async fn answer_one_bounded_skill_verb(call: ServeCall<'_>) -> Result<Outcome> {
 /// is a short-lived process answering one question a caller asked.
 fn open_the_recall_store_of_this_family(family: &rift_git::Family) -> Result<SqliteStore> {
     let db = crate::family::recall_db_of(family);
-    rift_store::open_migrated(&db, &rift_store::recall_migrations())
+    rift_store::open_recall_projection(&db)
 }
 
 /// Bring the projection up to this worktree's head before the answer is read

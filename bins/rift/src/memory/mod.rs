@@ -57,7 +57,7 @@ pub(crate) fn run(cmd: &MemoryCmd, root: &Path) -> Result<Outcome> {
 async fn dispatch(cmd: &MemoryCmd, repo: &Path) -> Result<Outcome> {
     let family = crate::family::resolve_at(repo)?;
     let db = crate::family::recall_db_of(&family);
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+    let store = rift_store::open_recall_projection(&db)?;
     let sub = GixSubstrate::open(repo)?;
 
     // Answer on fresh state: the same ingest pass the launch auto-ingest and
@@ -182,7 +182,7 @@ pub(crate) fn launch_ingest(repo: &Path) -> Result<bool> {
         .map_err(RiftError::from)?;
     rt.block_on(async {
         let db = crate::family::recall_db(repo)?;
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+        let store = rift_store::open_recall_projection(&db)?;
         let sub = GixSubstrate::open(repo)?;
         refresh_recall(&store, &sub, repo).await?;
         Ok::<_, RiftError>(())

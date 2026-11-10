@@ -733,7 +733,7 @@ mod tests {
         let repo = rift_store::recall_repo_id(proj).unwrap();
         let db = rift_store::recall_db_under(root, &repo);
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = runtime();
         for (i, (t, avoided)) in events.iter().enumerate() {
             rt.block_on(store.insert(

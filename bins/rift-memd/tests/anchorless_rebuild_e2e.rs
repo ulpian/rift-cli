@@ -108,7 +108,7 @@ fn run_rebuild(cwd: &Path, repo: &Path, home: &Path) -> String {
 }
 
 fn count(db: &Path, table: &str) -> i64 {
-    let store = rift_store::open_migrated(db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(db).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

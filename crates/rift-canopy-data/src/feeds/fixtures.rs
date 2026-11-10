@@ -144,7 +144,7 @@ pub(super) fn seed_recall_db(root: &Path, path: &str, events: &[(i64, i64)]) {
     let repo = recall_repo_id(Path::new(path)).unwrap();
     let db = recall_db_under(root, &repo);
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(&db).unwrap();
     let rt = runtime().unwrap();
     for (i, (t, avoided)) in events.iter().enumerate() {
         rt.block_on(store.insert(
@@ -211,7 +211,7 @@ pub(super) fn seed_serve_call_events(root: &Path, path: &str, events: &[(&str, i
     let repo = recall_repo_id(Path::new(path)).unwrap();
     let db = recall_db_under(root, &repo);
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(&db).unwrap();
     let rt = runtime().unwrap();
     for (call_id, recorded_at) in events {
         rt.block_on(store.insert(

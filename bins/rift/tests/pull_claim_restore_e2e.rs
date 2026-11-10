@@ -145,8 +145,7 @@ fn a_pulls_claim_condensed_into_the_shard_comes_back_on_a_cold_rebuild() {
     attribute_to_the_session(&repo, &stdout, &env);
     let repo_id = rift_store::recall_repo_id(&repo).unwrap();
     let db = rift_store::recall_db_under(&cache, &repo_id);
-    let live =
-        claim_rows(&rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap());
+    let live = claim_rows(&rift_store::open_recall_projection(&db).unwrap());
     let [row] = live.as_slice() else {
         panic!("one claim row: {live:?}");
     };

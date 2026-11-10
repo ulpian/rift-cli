@@ -430,17 +430,28 @@ pub fn capture_tool_result_schema_sql() -> String {
 /// (`record_capture_session_identity` in the projection path), so the guard
 /// converges to permanently-false after one historical backfill; it fires
 /// again only if a store predating the live write path gains sessions.
+///
+/// MARKED: once the guard reports full coverage the projection records it in
+/// `projection_meta` (key [`IDENTITY_BACKFILL_COVERED`]), and every later open
+/// reads that one primary-key row instead of the anti-join. The row is
+/// inserted, never updated, and lives as long as the file: a rebuild starts
+/// without it and the guard runs again. A store that stays uncovered (a
+/// session with no hook-audit fact to derive from) is never marked, so it
+/// keeps the guard exactly as before. What the marker gives up is the case
+/// above — a pre-identity binary adding sessions to an already-covered store —
+/// which `rift rebuild` repairs.
 pub(super) fn backfill_capture_session_identities(store: &SqliteStore) -> Result<()> {
     store.with_conn(|conn| {
-        let uncovered: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session s WHERE NOT EXISTS \
-             (SELECT 1 FROM capture_session_identity c \
-              WHERE c.session_id = s.session_id))",
-            [],
+        let marked: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projection_meta WHERE key = ?)",
+            [IDENTITY_BACKFILL_COVERED],
             |row| row.get(0),
         )?;
-        if !uncovered {
+        if marked {
             return Ok(());
+        }
+        if !sessions_uncovered(conn)? {
+            return mark_identity_backfill_covered(conn);
         }
         let facts = {
             let mut stmt = conn.prepare(
@@ -463,8 +474,36 @@ pub(super) fn backfill_capture_session_identities(store: &SqliteStore) -> Result
                 rusqlite::params![&session_id, agent, native_session_id, &session_id],
             )?;
         }
-        tx.commit()
+        tx.commit()?;
+        if sessions_uncovered(conn)? {
+            return Ok(());
+        }
+        mark_identity_backfill_covered(conn)
     })
+}
+
+/// The `projection_meta` key that records full identity coverage.
+pub(super) const IDENTITY_BACKFILL_COVERED: &str = "session_identity_backfill_covered";
+
+/// Whether some `session` row still lacks its `capture_session_identity` row.
+fn sessions_uncovered(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session s WHERE NOT EXISTS \
+         (SELECT 1 FROM capture_session_identity c \
+          WHERE c.session_id = s.session_id))",
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// Record full coverage once. `OR IGNORE`: two first openers racing to mark
+/// the same fact insert one row between them and update none.
+fn mark_identity_backfill_covered(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO projection_meta (key, value, schema_version) VALUES (?, 1, 1)",
+        [IDENTITY_BACKFILL_COVERED],
+    )
+    .map(|_| ())
 }
 
 /// The v16 additive capture migration: the observed models' prices and the

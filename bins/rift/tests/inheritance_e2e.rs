@@ -137,8 +137,7 @@ fn recall_db(repo: &Path, cache: &Path) -> PathBuf {
 
 /// The reasons of every observed repeat the audit relation holds.
 fn observed_reasons(repo: &Path, cache: &Path) -> Vec<String> {
-    let store = rift_store::open_migrated(recall_db(repo, cache), &rift_store::recall_migrations())
-        .unwrap();
+    let store = rift_store::open_recall_projection(recall_db(repo, cache)).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

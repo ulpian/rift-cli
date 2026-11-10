@@ -669,7 +669,7 @@ pub(crate) mod fixture {
 
     pub(crate) fn recall(rt: &tokio::runtime::Runtime, dir: &Path) -> std::path::PathBuf {
         let db = dir.join("recall.db");
-        let s = rift_store::open_migrated(&db, &rift_store::recall_migrations()).expect("recall");
+        let s = rift_store::open_recall_projection(&db).expect("recall");
         rt.block_on(async {
             s.insert(
                 "summary_binding",

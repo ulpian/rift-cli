@@ -467,7 +467,7 @@ fn delivered_first_pointer(
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let store = rift_store::open_migrated(db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(db).unwrap();
     (pointer, rt, store)
 }
 

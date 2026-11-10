@@ -52,9 +52,7 @@ pub(super) fn serve_audit_job(
         crate::capture_queue::proof_read(error, "serve proof-store location is unavailable")
     })?;
     let store = t
-        .phase("open_recall", || {
-            rift_store::open_migrated(&db, &rift_store::recall_migrations())
-        })
+        .phase("open_recall", || rift_store::open_recall_projection(&db))
         .map_err(|error| {
             crate::capture_queue::proof_read(error, "serve prior-key proof is unavailable")
         })?;
@@ -680,7 +678,7 @@ fn record_memd_event() -> Result<()> {
     std::io::stdin().read_to_end(&mut body)?;
     let cwd = std::env::current_dir()?;
     let db = crate::family::recall_db(&crate::worktree_root(&cwd))?;
-    let store = rift_store::open_migrated(&db, &rift_store::recall_migrations())?;
+    let store = rift_store::open_recall_projection(&db)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(rift_core::RiftError::from)?;
@@ -1139,7 +1137,7 @@ mod serve_audit_tests {
 
     fn attribution_rows(work_tree: &Path) -> Vec<Vec<String>> {
         let db = crate::family::recall_db(work_tree).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -1177,7 +1175,7 @@ mod serve_audit_tests {
 
     fn canonical_audit_facts(work_tree: &Path) -> Vec<Vec<rift_store::Row>> {
         let db = crate::family::recall_db(work_tree).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -1312,7 +1310,7 @@ mod serve_audit_tests {
         let expected =
             expected_serve_row(if call_orphan { &call } else { &decision }, 2000).unwrap();
         let db = crate::family::recall_db(tmp.path()).unwrap();
-        let store = rift_store::open_migrated(&db, &rift_store::recall_migrations()).unwrap();
+        let store = rift_store::open_recall_projection(&db).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

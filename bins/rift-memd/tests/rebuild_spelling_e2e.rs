@@ -238,7 +238,7 @@ fn run_rebuild(cwd: &Path, repo: &Path, home: &Path) {
 /// The first column of every row `sql` selects from the store the shipped
 /// binary produced: the `path`s a rebuild keyed.
 fn projected_paths(db: &Path, sql: &str) -> Vec<String> {
-    let store = rift_store::open_migrated(db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(db).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

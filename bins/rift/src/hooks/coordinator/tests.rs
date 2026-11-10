@@ -427,7 +427,7 @@ fn spend_rows(db: &Path) -> Vec<i64> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let store = rift_store::open_migrated(db, &rift_store::recall_migrations()).unwrap();
+    let store = rift_store::open_recall_projection(db).unwrap();
     let rows = rt
         .block_on(store.query(
             "SELECT tokens_returned FROM memd_audit_event \
