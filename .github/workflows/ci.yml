@@ -1,7 +1,7 @@
 name: ci
 on:
-  # The push trigger is off while the account's Actions runners are unavailable;
-  # run on demand with workflow_dispatch, and on pull requests as before.
+  push:
+    branches: [main]
   workflow_dispatch:
   pull_request:
 permissions:
