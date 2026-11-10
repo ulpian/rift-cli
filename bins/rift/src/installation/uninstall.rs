@@ -1,6 +1,6 @@
 //! Uninstall through the same ownership-aware integration services used by setup.
 
-use super::{refusal, Installation, UninstallArgs};
+use super::{path_entry, refusal, Installation, UninstallArgs};
 use crate::cli::{exit, Outcome};
 use rift_core::Result;
 use std::collections::BTreeSet;
@@ -10,14 +10,18 @@ pub(crate) fn run(args: &UninstallArgs) -> Result<Outcome> {
     let install = Installation::current()?;
     let projects = project_paths()?;
     let purge = args.purge.then(|| purge_paths(&projects)).transpose()?;
+    // The installer's PATH line in each startup file it wrote; the user's own
+    // lines are never touched.
+    let path_plan = path_entry::planned_removals();
+    let path_files: Vec<&Path> = path_plan.iter().map(|(file, _)| file.as_path()).collect();
     let summary = serde_json::json!({
         "binary": install.binary, "projects": projects,
         "purge": args.purge, "dry_run": args.dry_run,
         "git_history": "preserved", "repository_policy": "preserved",
-        "purge_paths": purge,
+        "purge_paths": purge, "path_entries": path_files,
     });
     if args.dry_run {
-        return Ok(Outcome::ok(format!("Would remove {} and its owned integrations in {} known project/worktree paths. Local data: {}.", install.binary.display(), projects.len(), if args.purge { "purge requested" } else { "preserved" }), summary));
+        return Ok(Outcome::ok(format!("Would remove {} and its owned integrations in {} known project/worktree paths, and the installer's PATH line from {} startup files. Local data: {}.", install.binary.display(), projects.len(), path_files.len(), if args.purge { "purge requested" } else { "preserved" }), summary));
     }
     if args.purge && !args.yes {
         return Ok(Outcome::coded(exit::PRECONDITION,
@@ -43,6 +47,7 @@ pub(crate) fn run(args: &UninstallArgs) -> Result<Outcome> {
     }
     install.recheck()?;
     let status = remove_executable(&install, &install_lock.0)?;
+    path_entry::remove(&path_plan)?;
     #[cfg(windows)]
     std::mem::forget(install_lock); // The deferred child now owns the installation lock.
     Ok(Outcome::ok(format!("Rift uninstall {status}. Captured Git history and repository policy were preserved. Local data: {}.", if args.purge { "purged" } else { "preserved" }), serde_json::json!({ "status": status, "operation": "uninstall", "purged": args.purge, "binary": install.binary })))
@@ -204,8 +209,13 @@ Remove-Item -LiteralPath $file.FullName
 Remove-Item -LiteralPath $env:RIFT_UNINSTALL_RECEIPT
 } finally { [IO.Directory]::Delete($env:RIFT_UNINSTALL_LOCK) }
 "#;
+    let parent = install.binary.parent().unwrap_or(install.binary.as_path());
+    // After the checks and the removal, never before: a deferred run that
+    // refuses the binary must leave the user's Path as it was.
+    let script = format!("{SCRIPT}{}", path_entry::windows_path_script(parent));
     std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env("RIFT_UNINSTALL_BIN", parent)
         .env("RIFT_UNINSTALL_PID", std::process::id().to_string())
         .env("RIFT_UNINSTALL_BINARY", &install.binary)
         .env("RIFT_UNINSTALL_RECEIPT", &install.receipt)

@@ -19,6 +19,7 @@ pub(crate) fn preferences(ascii: bool) -> Result<Outcome> {
     }
 }
 
+mod path_entry;
 mod uninstall;
 
 use crate::cli::{Outcome, UninstallArgs, UpdateArgs};
