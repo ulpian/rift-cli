@@ -70,8 +70,14 @@ impl WakeWatcher for NotifyWatcher {
             let _ = wake.send(WorkerMsg::Wake);
         })
         .map_err(|e| e.to_string())?;
+        // Only Rift's own subtree: the cache root is the user's whole
+        // `~/.cache` or `%LOCALAPPDATA%`, and watching it recursively woke the
+        // worker for every browser and build cache write, and on Linux spent
+        // an inotify watch on each of its directories.
+        let ours = root.join("rift");
+        std::fs::create_dir_all(&ours).map_err(|e| e.to_string())?;
         watcher
-            .watch(root, notify::RecursiveMode::Recursive)
+            .watch(&ours, notify::RecursiveMode::Recursive)
             .map_err(|e| e.to_string())?;
         self.inner = Some(watcher);
         Ok(())
