@@ -533,6 +533,25 @@ fn credential_key_value_detectors(g: &GatedCredentialDetector) -> Vec<ShapeDetec
             1,
             crate::unquoted_value,
         ),
+        // Layer 7, the environment half: `NAME=value` as `.env` files,
+        // `export` lines and `env` output write it. `dsn.password` owns `=`
+        // for the two words it names; this claims the rest of the
+        // vocabulary, but only in the shape no source code uses: an
+        // upper-case name whose credential word is a whole `_` segment
+        // (`ADMIN_TOKEN`, `JWT_SECRET`, `DB_PASS`; not `MONKEY`, not
+        // `token`), no space before `=`, and a literal value, never a `$`
+        // reference, since `$(gh auth token)` is not a secret. Short and
+        // word-shaped values are exactly what the entropy layer refuses,
+        // which is the gap this closes. `PWD` is not a credential word here:
+        // it is the shell's working directory before it is a password. The
+        // value must end where a value ends: on raw JSONL a quoted branch
+        // could otherwise take `","` between two fields and break the line.
+        g(
+            "kv.env_assignment",
+            r#"(?:\A|[\s;]|\\[nrt])(?:export[ \t]+)?(?:[A-Z][A-Z0-9]*_)*(?:SECRET|SECRETS|TOKEN|TOKENS|KEY|KEYS|APIKEY|PASSWORD|PASSWD|PASS|CREDENTIAL|CREDENTIALS|PRIVATE)(?:_[A-Z0-9]+)*=("[^"\n]*"|'[^'\n]*'|[^\s"'$\\\[][^\s"'\\]*)(?:\z|[\s;#"'\\])"#,
+            1,
+            crate::unquoted_value,
+        ),
         // The same layer, in the one place a credential carries its own
         // word instead of a key name. The scheme word is kept: it is what
         // makes the line diagnosable, and it is also what makes this rule

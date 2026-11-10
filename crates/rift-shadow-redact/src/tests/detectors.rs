@@ -265,3 +265,40 @@ fn smuggling_zero_width_is_still_caught() {
     );
     assert!(m.contains("[REDACTED:vendor]"));
 }
+
+/// `.env`-style credentials too short or too word-shaped for the entropy
+/// layer are masked by their key, and the shapes that are not credentials —
+/// a reference, a working directory, a lower-case field, a word that merely
+/// contains `KEY`, a spaced TOML key, an already-redacted marker — are not.
+#[test]
+fn masks_env_assignment_credentials_and_leaves_their_lookalikes() {
+    for (line, secret) in [
+        ("ADMIN_TOKEN=letmein2024", "letmein2024"),
+        ("export JWT_SECRET=supersecretvalue", "supersecretvalue"),
+        ("API_KEY=abc123def456", "abc123def456"),
+        (
+            "SESSION_SECRET=correct-horse-battery-staple",
+            "correct-horse-battery-staple",
+        ),
+        ("DB_PASS='quoted value'", "quoted value"),
+        ("x\\nGITHUB_TOKEN=gho_short\\n", "gho_short"),
+    ] {
+        let m = masked(line);
+        assert!(!m.contains(secret), "{line} kept its value: {m}");
+    }
+    for kept in [
+        "GITHUB_TOKEN=$(gh auth token)",
+        "PWD=/home/dev/project",
+        "token=abc123",
+        "MONKEY=banana",
+        "MAX_TOKENS = 400",
+        "export AWS_KEY=[REDACTED:vendor]",
+        r#"{"old":"x\nAPI_KEY=","new":"y"}"#,
+    ] {
+        let report = out(kept).report;
+        assert!(
+            !report.by_detector.contains_key("kv.env_assignment"),
+            "{kept} was claimed as an env credential"
+        );
+    }
+}

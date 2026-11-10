@@ -151,6 +151,7 @@ dsn.password_quoted = 5
 key.pem_block = 10
 kv.authorization_header = 5
 kv.credential_colon = 5
+kv.env_assignment = 5
 provider.anthropic.api_key = 10
 provider.github.fine_grained_pat = 10
 provider.supabase.secret_key = 10
@@ -307,6 +308,7 @@ whose evidence is the measurement recorded in this file.
 | `key.pem_block` | a `BEGIN`/`END` private-key block | RFC 7468, textual encodings; the OpenSSH private-key form shares the delimiters |
 | `kv.authorization_header` | an `Authorization` / `Proxy-Authorization` credential | RFC 7235, and RFC 6750 for the bearer form |
 | `kv.credential_colon` | a credential key and its value | **no external source.** The vocabulary is Rift's own and was chosen by measurement: `token`, `secret` and `pwd` are excluded because they measured 44, 7 and 1 hits of ordinary Rust here |
+| `kv.env_assignment` | an upper-case `NAME=value` whose name has a credential word as a whole `_` segment | the POSIX shell assignment and dotenv syntax. The shape restrictions are Rift's own: no space before `=`, never a `$` reference or a `[` value (an already-redacted marker), and `PWD` excluded. It measured **4** hits here, every one a deliberate fixture secret or placeholder in a test |
 | `provider.anthropic.api_key` | a vendor key prefix | the vendor's published key format |
 | `provider.github.fine_grained_pat` | a vendor key prefix | the vendor's published token formats |
 | `provider.supabase.secret_key` | a vendor key prefix | the vendor's published key format |
@@ -575,3 +577,4 @@ this rule's doing.
 | 2026-08-25 | on base `e57872b` | **the first live rows.** The two upstream-pin fixtures are classified under `pinned-evidence` — claude-code-hook-surface.md 5 of 5, codex-hook-surface.rs 1 of 1, six subtracted. What fires in them was measured token-by-token before the rows were written: the retrieval URLs, the upstream repository URL and the vendor tree path — all four upstream object ids score under the entropy threshold bare, so the citation apparatus is the cost, not the ids. Census on that change's tree with the rows live: **583 files, 9 845 795 bytes, 506 spans; `entropy.high` 429 raw − 6 classified = 423 of 460; `pii.email` 52 of 60**. This file's own price for the rows is `entropy.high` **+1** — the codex group's path line fires; the longer claude-code path line measures 0 — UNGUARDED like every self-cost figure here |
 | 2026-09-02 | the commit that tracked the guide | `docs/guide/` became tracked — the written guide to this toolchain now ships with the code — and the census gained its third excluded region, `docs/`, in that same commit. No revision ever measured the guide's worked examples as this repository's own text, so every ceiling, classified row and count above still describes the same set of files it described before |
 | 2026-09-11 | the word-shape fix | the entropy layer skips word-shaped tokens by owner decision. Re-measured on the same 683 files / 14 482 330 bytes: **149 spans, `entropy.high` 63 raw − 1 classified = 62**, down from 468 on the same tree that morning. Ceiling re-derived 470 → **80**; the claude-code pin row shrank 5 → 1 and the codex pin row was deleted, both because the guard's row arm said so. Every other detector's count is unchanged, which is the measurement that the rule touched one layer |
+| 2026-11-10 | the env-assignment detector | `kv.env_assignment` added for `.env`-style `NAME=value` credentials the entropy layer refuses as short or word-shaped (`ADMIN_TOKEN=letmein2024`). Measured on 1 544 files / 21 368 215 bytes: **4** hits, all deliberate fixture secrets or placeholders in tests; ceiling **5**. Every other detector's count is unchanged |

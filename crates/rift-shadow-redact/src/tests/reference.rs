@@ -76,7 +76,7 @@ const MAIN_DETECTOR_IDS: [&str; 12] = [
 /// 8 contribute no *new* id, because `pii.email` and `pii.ipv4` are already
 /// elements — whether the collision sits inside the enumerated tables (6, 8)
 /// or in a table outside them (5).
-const DETECTOR_IDS_ADDED_HERE: [&str; 17] = [
+const DETECTOR_IDS_ADDED_HERE: [&str; 18] = [
     "pii.us_taxpayer_id",
     "pii.us_taxpayer_id_labelled",
     "pii.phone_e164",
@@ -84,6 +84,7 @@ const DETECTOR_IDS_ADDED_HERE: [&str; 17] = [
     "pii.card_pan",
     "pii.street_address",
     "kv.credential_colon",
+    "kv.env_assignment",
     "kv.authorization_header",
     "provider.supabase.secret_key",
     "provider.anthropic.api_key",
@@ -271,6 +272,7 @@ const CENSUS_PROBE: &str = concat!(
     "Server=db;User Id=sa;Password=\"hunter 2 space\";\n",
     "password=hunter2hunter2hunter2\n",
     "password: hunter2hunter2hunter2\n",
+    "ADMIN_TOKEN=letmein2024\n",
     "authorization: Basic YWRtaW46aHVudGVyMg==\n",
     "supabase sb_secret_aBcDaBcDaBcDaBcDaBcDaBcD\n",
     "anthropic sk-ant-aBcDaBcDaBcDaBcDaBcDaBcD\n",
