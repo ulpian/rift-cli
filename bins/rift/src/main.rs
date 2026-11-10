@@ -188,6 +188,7 @@ fn route(cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
         Command::Update(args) => installation::update(args),
         Command::Uninstall(args) => installation::uninstall(args),
         Command::Init(a) => cmd_init(root, a),
+        Command::Doctor(a) if a.report => Ok(doctor::cmd_doctor_report(root)),
         Command::Doctor(a) => Ok(cmd_doctor(root, a.fix)),
         Command::Clean(a) => match not_init_guard(root) {
             Some(refusal) => Ok(refusal),

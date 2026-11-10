@@ -593,6 +593,12 @@ pub(crate) struct DoctorArgs {
     /// chain gaps and divergence are never auto-fixed.
     #[arg(long)]
     pub(crate) fix: bool,
+
+    /// Print a findings report to paste into an alpha issue: counts, states
+    /// and versions only, every path, name and message replaced by its
+    /// length. The doctor runs read-only, and nothing is sent anywhere.
+    #[arg(long, conflicts_with = "fix")]
+    pub(crate) report: bool,
 }
 
 /// `rift clean [--dry-run] [--ttl-days N]`.

@@ -29,6 +29,7 @@ mod prices;
 mod queues;
 mod recovery;
 mod redaction;
+mod report;
 mod session_gaps;
 mod set_asides;
 mod setup;
@@ -41,6 +42,8 @@ use std::path::Path;
 
 use crate::cli::Outcome;
 use crate::projection::worktree_root;
+
+pub(crate) use report::cmd_doctor_report;
 
 use capture::{
     doctor_capture_chain, doctor_shadow_refs, doctor_soak, doctor_stale_rewrite_toml,
