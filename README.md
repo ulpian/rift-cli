@@ -13,7 +13,7 @@ rift doctor               check that capture and recall are wired correctly
 rift recall status        see what Total Recall knows and what it has saved
 ```
 
-> **Alpha.** This is `v1.2.0-alpha`. Expect rough edges, and please
+> **Alpha.** This is `v1.3.0-alpha`. Expect rough edges, and please
 > [send findings](#feedback): that is what this alpha is for.
 
 ---
@@ -23,13 +23,13 @@ rift recall status        see what Total Recall knows and what it has saved
 **macOS and Linux**
 
 ```sh
-curl -fsS https://storage.googleapis.com/rift-e59ea04337d9/v1.2.0-alpha/install.sh | sh
+curl -fsS https://storage.googleapis.com/rift-e59ea04337d9/v1.3.0-alpha/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm 'https://storage.googleapis.com/rift-e59ea04337d9/v1.2.0-alpha/install.ps1' | iex
+irm 'https://storage.googleapis.com/rift-e59ea04337d9/v1.3.0-alpha/install.ps1' | iex
 ```
 
 The installer picks the build for your OS and CPU and checks its SHA-256. It
@@ -133,6 +133,9 @@ captured history is kept unless you add `--purge`.
 - **Redaction happens before storage.** The type system makes writing
   unredacted bytes to disk a compile error. Raw transcripts are opt-in and come
   with a warning.
+- **Stored summaries are encrypted.** Each project has its own key, kept
+  apart from Rift's cache, so a copy or backup of the cache can't be read on
+  its own.
 - **Agent settings stay out of git.** Claude Code saves commands you approve
   with "don't ask again", secrets included, in `.claude/settings.local.json`.
   Rift makes sure git ignores that file and warns you if it is already
@@ -198,7 +201,7 @@ redacted bytes only.
   wiring for each agent.
 - [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md): guidance for AI agents
   working in this repository.
-- [Release notes](release/notes/v1.2.0-alpha.md)
+- [Release notes](release/notes/v1.3.0-alpha.md)
 
 ## License
 

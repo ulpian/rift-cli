@@ -11,8 +11,8 @@ description = "Task-aware ranking signals (focus/error overlap, recency) with ou
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
-rift-recall-types = { version = "1.2.0-alpha", path = "../rift-recall-types" }
+rift-core = { version = "1.3.0-alpha", path = "../rift-core" }
+rift-recall-types = { version = "1.3.0-alpha", path = "../rift-recall-types" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

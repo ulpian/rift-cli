@@ -26,10 +26,10 @@ keyring = ["dep:keyring"]
 # design notes; re-evaluate before wiring.
 
 [dependencies]
-rift-shadow-cost = { version = "1.2.0-alpha", path = "../rift-shadow-cost" }
-rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
-rift-hashchain = { version = "1.2.0-alpha", path = "../rift-hashchain" }
-rift-crypto = { version = "1.2.0-alpha", path = "../rift-crypto" }
+rift-shadow-cost = { version = "1.3.0-alpha", path = "../rift-shadow-cost" }
+rift-core = { version = "1.3.0-alpha", path = "../rift-core" }
+rift-hashchain = { version = "1.3.0-alpha", path = "../rift-hashchain" }
+rift-crypto = { version = "1.3.0-alpha", path = "../rift-crypto" }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 # The storage seam (Store/StoreConn/CanonicalStore) is async so an async-native
@@ -52,4 +52,4 @@ tempfile = { workspace = true }
 # Mint a real `RedactedBytes` through the actual pipeline in the durable-surface
 # test, so `RedactedBytes::seal` keeps its single production call site in the
 # redaction crate (acyclic: rift-shadow-redact depends only on rift-core).
-rift-shadow-redact = { version = "1.2.0-alpha", path = "../rift-shadow-redact" }
+rift-shadow-redact = { version = "1.3.0-alpha", path = "../rift-shadow-redact" }

@@ -11,7 +11,7 @@ description = "Human-vs-agent line attribution math (LIFO ownership) and confide
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
+rift-core = { version = "1.3.0-alpha", path = "../rift-core" }
 serde = { workspace = true }
 sha2 = { workspace = true }
 # Diff-capture layer (H_i/A_i/C boundaries → hunks) for line attribution.
@@ -19,7 +19,7 @@ imara-diff = { workspace = true }
 # The read-side blob seam: capture reads commit trees/blobs through `BlobReader`
 # (gix internal to rift-git) — no gix types leak here. `default-features = false`
 # keeps this crate's own build gix-free (it only needs the trait + in-memory double).
-rift-git = { version = "1.2.0-alpha", path = "../rift-git", default-features = false }
+rift-git = { version = "1.3.0-alpha", path = "../rift-git", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -34,24 +34,24 @@ tui-hires = ["tui", "rift-canopy/xre-3d"]
 [dependencies]
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
-rift-core = { version = "1.2.0-alpha", path = "../../crates/rift-core" }
-rift-shadow = { version = "1.2.0-alpha", path = "../../crates/rift-shadow" }
-rift-canopy = { version = "1.2.0-alpha", path = "../../crates/rift-canopy" }
+rift-core = { version = "1.3.0-alpha", path = "../../crates/rift-core" }
+rift-shadow = { version = "1.3.0-alpha", path = "../../crates/rift-shadow" }
+rift-canopy = { version = "1.3.0-alpha", path = "../../crates/rift-canopy" }
 # The dashboard's data plane: the bus, poller, and UI-facts store
 # the binary wires into the live loop.
-rift-canopy-data = { version = "1.2.0-alpha", path = "../../crates/rift-canopy-data" }
-rift-registry = { version = "1.2.0-alpha", path = "../../crates/rift-registry" }
+rift-canopy-data = { version = "1.3.0-alpha", path = "../../crates/rift-canopy-data" }
+rift-registry = { version = "1.3.0-alpha", path = "../../crates/rift-registry" }
 # The dashboard's column-2 detail reads a project's effective policy (sensitive
 # path count, capture toggles) to summarize its settings.
-rift-config = { version = "1.2.0-alpha", path = "../../crates/rift-config" }
+rift-config = { version = "1.3.0-alpha", path = "../../crates/rift-config" }
 # `rift verify` re-derives a hash chain and cross-checks it against the projection.
 # `keyring`: OS-keychain custody for the identity install-salt + envelope KEK.
-rift-store = { version = "1.2.0-alpha", path = "../../crates/rift-store", features = ["keyring"] }
+rift-store = { version = "1.3.0-alpha", path = "../../crates/rift-store", features = ["keyring"] }
 # Per-install identity salt is minted from the OS CSPRNG.
 getrandom = { workspace = true }
-rift-hashchain = { version = "1.2.0-alpha", path = "../../crates/rift-hashchain" }
+rift-hashchain = { version = "1.3.0-alpha", path = "../../crates/rift-hashchain" }
 # The machine-id cache tag (`identity::machine_id_cache`): HKDF over the install salt.
-rift-crypto = { version = "1.2.0-alpha", path = "../../crates/rift-crypto" }
+rift-crypto = { version = "1.3.0-alpha", path = "../../crates/rift-crypto" }
 # Container-part digests for `rift bundle`. Already a
 # workspace dependency (rift-hashchain); this wires the same pinned crate into
 # one more package rather than introducing anything new to the lockfile.
@@ -70,21 +70,21 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # `rift enable/disable` and the projection-read query commands need the agent SDK
 # (verb lists / compat notes) and the recall substrate (checkpoint listing).
-rift-agent = { version = "1.2.0-alpha", path = "../../crates/rift-agent" }
-rift-agent-install = { version = "1.2.0-alpha", path = "../../crates/rift-agent-install" }
+rift-agent = { version = "1.3.0-alpha", path = "../../crates/rift-agent" }
+rift-agent-install = { version = "1.3.0-alpha", path = "../../crates/rift-agent-install" }
 # Worktree discovery + the gix blob-read seam drive live commit diff-capture.
-rift-git = { version = "1.2.0-alpha", path = "../../crates/rift-git" }
+rift-git = { version = "1.3.0-alpha", path = "../../crates/rift-git" }
 # `rift verify` re-derives the chain from the git-authoritative checkpoint branch
 # (`rift/checkpoints/v1`) through the read-only gix substrate reader.
-rift-recall-substrate = { version = "1.2.0-alpha", path = "../../crates/rift-recall-substrate" }
+rift-recall-substrate = { version = "1.3.0-alpha", path = "../../crates/rift-recall-substrate" }
 # `rift memory` reuses the recall server's library dispatch — the same
 # envelopes, budgets, and policy gates as the serve tools — over recall.db.
-rift-recall-ledger = { version = "1.2.0-alpha", path = "../../crates/rift-recall-ledger" }
-rift-recall-serve = { version = "1.2.0-alpha", path = "../../crates/rift-recall-serve" }
-rift-recall-policy = { version = "1.2.0-alpha", path = "../../crates/rift-recall-policy" }
-rift-recall-types = { version = "1.2.0-alpha", path = "../../crates/rift-recall-types" }
+rift-recall-ledger = { version = "1.3.0-alpha", path = "../../crates/rift-recall-ledger" }
+rift-recall-serve = { version = "1.3.0-alpha", path = "../../crates/rift-recall-serve" }
+rift-recall-policy = { version = "1.3.0-alpha", path = "../../crates/rift-recall-policy" }
+rift-recall-types = { version = "1.3.0-alpha", path = "../../crates/rift-recall-types" }
 # Tokenizer provenance printed on the reread report.
-rift-tokens = { version = "1.2.0-alpha", path = "../../crates/rift-tokens" }
+rift-tokens = { version = "1.3.0-alpha", path = "../../crates/rift-tokens" }
 # Documents an agent opens are handed to it as Markdown. The engine is linked
 # here — the fourteen parsers — and still never runs in the process a hook is:
 # conversion happens in `rift` re-spawned on the hidden `hooks doc` route
@@ -92,12 +92,12 @@ rift-tokens = { version = "1.2.0-alpha", path = "../../crates/rift-tokens" }
 # still dies in another address space, without a second binary to find. The
 # size this costs is measured and recorded in the guide's development chapter.
 # Optional, so `--no-default-features` drops the seam and the engine together.
-rift-recall-doc = { version = "1.2.0-alpha", path = "../../crates/rift-recall-doc", optional = true }
+rift-recall-doc = { version = "1.3.0-alpha", path = "../../crates/rift-recall-doc", optional = true }
 # Native file search: the path index, the family's frecency and the ranking.
 # Optional so `--no-default-features` drops the walker, the fuzzy matcher and
 # the query grammar along with everything else this binary can be built
 # without.
-rift-recall-search = { version = "1.2.0-alpha", path = "../../crates/rift-recall-search", optional = true }
+rift-recall-search = { version = "1.3.0-alpha", path = "../../crates/rift-recall-search", optional = true }
 
 # The capture-queue owner marker's file identity on Windows (volume serial and
 # file index), the same reader `rift-store`'s projection lock uses.
@@ -108,9 +108,9 @@ winapi-util = "0.1.11"
 proptest = { workspace = true }
 # The one repository-fixture builder: a `.git` a test writes has
 # to be a `.git` hardened discovery accepts.
-rift-git = { version = "1.2.0-alpha", path = "../../crates/rift-git", features = ["test-support"] }
+rift-git = { version = "1.3.0-alpha", path = "../../crates/rift-git", features = ["test-support"] }
 # The audit-integration test routes REAL serve events (not hand-rolled JSON)
 # through the same envelopes rift-memd emits.
-rift-recall-events = { version = "1.2.0-alpha", path = "../../crates/rift-recall-events" }
+rift-recall-events = { version = "1.3.0-alpha", path = "../../crates/rift-recall-events" }
 tempfile = { workspace = true }
 ed25519-dalek = { workspace = true }

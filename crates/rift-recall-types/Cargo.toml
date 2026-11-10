@@ -11,7 +11,7 @@ description = "Shared recall types: content-addressed handles, the four-state re
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
+rift-core = { version = "1.3.0-alpha", path = "../rift-core" }
 serde = { workspace = true }
 # `full.jsonl` records carry a redacted JSON payload (identity fields only).
 serde_json = { workspace = true }

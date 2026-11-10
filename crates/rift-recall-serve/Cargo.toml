@@ -11,33 +11,33 @@ description = "Bounded recall tool surface + budget/policy middleware, served ov
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
-rift-recall-types = { version = "1.2.0-alpha", path = "../rift-recall-types" }
-rift-recall-policy = { version = "1.2.0-alpha", path = "../rift-recall-policy" }
-rift-recall-events = { version = "1.2.0-alpha", path = "../rift-recall-events" }
+rift-core = { version = "1.3.0-alpha", path = "../rift-core" }
+rift-recall-types = { version = "1.3.0-alpha", path = "../rift-recall-types" }
+rift-recall-policy = { version = "1.3.0-alpha", path = "../rift-recall-policy" }
+rift-recall-events = { version = "1.3.0-alpha", path = "../rift-recall-events" }
 # The handlers query the recall.db projection + the read-only substrate, rank the
 # results, build four-state envelopes, and compile packs. (All acyclic: none of
 # these depend on rift-recall-serve.)
-rift-store = { version = "1.2.0-alpha", path = "../rift-store" }
-rift-recall-ledger = { version = "1.2.0-alpha", path = "../rift-recall-ledger" }
-rift-recall-validity = { version = "1.2.0-alpha", path = "../rift-recall-validity" }
-rift-recall-pack = { version = "1.2.0-alpha", path = "../rift-recall-pack" }
-rift-recall-rank = { version = "1.2.0-alpha", path = "../rift-recall-rank" }
-rift-recall-substrate = { version = "1.2.0-alpha", path = "../rift-recall-substrate", default-features = false }
+rift-store = { version = "1.3.0-alpha", path = "../rift-store" }
+rift-recall-ledger = { version = "1.3.0-alpha", path = "../rift-recall-ledger" }
+rift-recall-validity = { version = "1.3.0-alpha", path = "../rift-recall-validity" }
+rift-recall-pack = { version = "1.3.0-alpha", path = "../rift-recall-pack" }
+rift-recall-rank = { version = "1.3.0-alpha", path = "../rift-recall-rank" }
+rift-recall-substrate = { version = "1.3.0-alpha", path = "../rift-recall-substrate", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 # Honest token accounting (returned/avoided) for every content-bearing response.
-rift-tokens = { version = "1.2.0-alpha", path = "../rift-tokens" }
+rift-tokens = { version = "1.3.0-alpha", path = "../rift-tokens" }
 
 [dev-dependencies]
 insta = { workspace = true }
-rift-config = { version = "1.2.0-alpha", path = "../rift-config" }
+rift-config = { version = "1.3.0-alpha", path = "../rift-config" }
 # The one mint of `RedactedBytes`. A basis snapshot is durable content, so the
 # fixtures that write one seal it the way production does rather than through
 # a test-only door — there is no test-only door, and this dependency is how
 # that stays true.
-rift-shadow-redact = { version = "1.2.0-alpha", path = "../rift-shadow-redact" }
+rift-shadow-redact = { version = "1.3.0-alpha", path = "../rift-shadow-redact" }
 proptest = { workspace = true }
 tokio = { workspace = true }
 # A real checkout for the fixtures that ask what a file is NOW (the current
