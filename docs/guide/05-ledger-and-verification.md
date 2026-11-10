@@ -1,13 +1,10 @@
 # 5. The ledger and verification
 
-[Chapter 3](03-capture.md) ended with a commit condensing into a checkpoint.
-This chapter is what that checkpoint *is*: where it lives, what it contains, how
-it is bound to every byte it claims, and how you can prove later that nobody
-quietly changed it.
-
-The promise is narrow. Not "your history cannot be edited" — anything on your
-disk can be edited — but: **if it is edited, `rift verify` says so.** That is
-*tamper evidence*.
+This chapter is what a checkpoint ([Chapter 3](03-capture.md)) *is*: where it
+lives, what it contains, how it is bound to every byte it claims, and how you
+prove later that nobody quietly changed it. The promise is narrow — anything on
+your disk can be edited — but: **if it is edited, `rift verify` says so.** That
+is *tamper evidence*.
 
 ---
 
@@ -20,8 +17,8 @@ redaction/Merkle-checked (103 predate the derived Merkle root …)
 ```
 
 The parenthesis names what was *not* fully checked: a verifier that quietly skipped
-part of its job and still said OK would be the failure it exists to catch. `--json`
-reports the run. It is read-only and takes no arguments.
+part of its job would be the failure it exists to catch. It is read-only, takes no
+arguments, and `--json` reports the run.
 
 ---
 
@@ -94,10 +91,9 @@ redaction report is re-verified on every `rift verify`, and the artifact bridge
 refuses a checkpoint whose report is missing.
 
 **The transcript is redacted-complete.** `transcript.jsonl` is the client's own
-file at archive, line for line through the gate: every prompt, every assistant
-text and thinking block, every tool call's full input and every tool result in
-full — `full.jsonl` beside it is the canonical-event log, not the transcript.
-"Complete" means redacted-complete, not byte-identical, for two reasons kept by
+file at archive, line for line through the gate ([§3.7](03-capture.md#37-from-session-to-checkpoint-the-condense)
+lists what that holds) — `full.jsonl` beside it is the canonical-event log, not
+the transcript. "Complete" is not byte-identical, for two reasons kept by
 design: a secret never reaches durable storage, so a masked value is the record
 and not a loss; and a thinking block's `signature` is an opaque replay token
 rather than content, so the gate masks it as high-entropy text while the
@@ -106,16 +102,14 @@ A checkpoint sealed at a turn end can store that transcript as line-aligned part
 Every leaf, `content_hash.txt` input and id is still computed over the whole document, the parts' concatenation, so the layout needs no id rule of its own.
 One resolver answers the name `transcript.jsonl` for a segmented shard (a subagent's under `tasks/<id>/` too), and a missing part, a malformed count or both layouts at once read as absent, never as a shorter transcript.
 
-Fallback counts live in `redaction_report.json` for the parent transcript pair,
-with a checked mirror in parent metadata, and in each task's metadata for that
-pair. Missing both keys means zero; a present pair must contain u32 integers,
-positive fallback lines, and no more placeholders than lines. Malformed counts or
-a contradictory parent mirror are structure findings. Removing recorded
+Fallback counts live in `redaction_report.json` for the parent transcript pair
+(mirrored, checked, in parent metadata) and in each task's metadata. Missing keys
+mean zero; a present pair must be u32 integers, positive fallback lines, and no
+more placeholders than lines, else a structure finding. Removing recorded
 placeholder lines is a redaction finding: the sealed pair must hold at least the
 recorded number, because literal placeholder records can already occur in input.
-`rift doctor` names affected checkpoints and unreadable or inconsistent count
-facts, reading the bound report and task metadata once per pair; doctor alone
-does not certify their Merkle root or checkpoint identity.
+`rift doctor` names affected checkpoints and bad count facts, but does not
+certify their Merkle root or checkpoint identity.
 
 The sibling artifacts are separate files, not `metadata.json` members, because
 `metadata.json` is in `content_hash.txt`'s preimage and that digest does not move.
@@ -154,8 +148,8 @@ must cover exactly the header's sessions, with no duplicates or fallback agent.
   freezing one would mint a new checkpoint for an unchanged session. The head (every
   commit moves it) and the checkout path (a local address) are never members.
 - **Window journal** ([§6.12](06-recall.md#612-what-a-context-window-already-holds)):
-  the journal files are run state a sweep deletes; this is where the declines the
-  savings figures rest on become tamper-evident.
+  the run-state journal a sweep deletes becomes tamper-evident here, with the
+  declines the savings figures rest on.
 - **Serve audit:** every member that could hold typed text (an exact retrieval's
   reason, a refusal's target) is replaced by `withheld`. A schema-1 line has no
   clock, so a rebuild reads it only with a top-level `recorded_at`. The
@@ -165,12 +159,11 @@ must cover exactly the header's sessions, with no duplicates or fallback agent.
   at read time from a catalog that moves on its own. Spend settles one hook after its
   turn ([03-capture.md](03-capture.md) §3.9), so it reaches the shard one hook later.
 
-The **`Rift-Checkpoint` trailer** claims, before the commit exists, the id its
-checkpoint will have; it is exact when the session has no transcript in the shard and
-nothing lands before the condense. Nothing reads it as the answer: a commit resolves
-through the union of the trailer's claim and the checkpoints recorded against it (each
-shard keeps its own commit anchor). `rift checkpoint explain` renders a shard for a
-human (no argument: `HEAD`'s).
+The **`Rift-Checkpoint` trailer** is a claim, never the answer
+([§3.3](03-capture.md#33-the-five-git-hooks)): a commit resolves through the union
+of that claim and the checkpoints recorded against it (each shard keeps its own
+commit anchor). `rift checkpoint explain` renders a shard for a human (no
+argument: `HEAD`'s).
 
 ---
 
@@ -210,10 +203,9 @@ artifact's bytes changes the root.**
 
 ## 5.5 The checkpoint's name is the binding
 
-A checkpoint records its Merkle root in `metadata.json` — a file whoever edited
-`content.redacted` can also edit: recompute the root, write it back, and every check
-comparing recorded to derived root passes. The one binding an editor cannot rewrite
-by writing a file is the path:
+A checkpoint records its Merkle root in `metadata.json`, which whoever edited
+`content.redacted` can also rewrite so every recorded-versus-derived check passes.
+The one binding an editor cannot rewrite by writing a file is the path:
 
 > **The checkpoint's id is derived from its Merkle root, and the id is its path.**
 
@@ -273,10 +265,8 @@ branch has one chain position and every position names a checkpoint on it.
 A duplicate position, disagreeing orders (one append-only history was rewritten) or
 an orphan entry (the branch was rewritten, or this is another repository's chain) are
 **tamper**; an unchained checkpoint (the order has not caught up; the next archive
-heals it) is **structure**.
-
-**Incomplete is not falsified**: collapsing the two would cry wolf on ordinary lag
-or hide a real rewrite behind a reassuring word.
+heals it) is **structure**. **Incomplete is not falsified**: collapsing the two
+would cry wolf on ordinary lag or hide a real rewrite behind a reassuring word.
 
 **Second — per-checkpoint passes**, in order: (1) **redaction**: the report must
 exist, parse and be valid; (2) **recorded-leaf recompute** for a checkpoint that
@@ -356,7 +346,7 @@ verifications (a bare `rift verify` contributes nothing — reaching the writer 
 witness value); and the *distinct*-checkpoint count must also reach 20, else twenty
 re-condensations of one unchanged session clear it. **A divergence from any source
 vetoes the streak permanently**: the log is append-only, so only a rebuild from git
-clears it. Narrower scoping was rejected: a tamper finding is a fact about the *repository*. It is per repository family
+clears it; narrower scoping was rejected, since a tamper finding is a fact about the *repository*. It is per repository family
 ([Chapter 9](09-worktrees-and-families.md)).
 
 ---
@@ -364,12 +354,10 @@ clears it. Narrower scoping was rejected: a tamper finding is a fact about the *
 ## 5.9 Three layers of append-only
 
 The local database enforces append-only three independent times so no single mistake
-removes it. **Type layer:** the store trait has `insert` and `insert_or_ignore`, no
-`update`, no `delete`. **SQL layer:** every canonical table has `BEFORE UPDATE` and
-`BEFORE DELETE` triggers that abort, so raw SQL cannot mutate a row. **Registry-driven
-property test:** a test inserts a sample row into every registered table and asserts
-both `UPDATE` and `DELETE` are refused — **add a table without its guard and CI goes
-red** ([Chapter 13](13-storage-and-schema.md) counts and details them). Corrections
+removes it: the store trait has no `update` or `delete`; every canonical table has
+aborting `BEFORE UPDATE` and `BEFORE DELETE` triggers; and a registry-driven
+property test asserts both are refused on every registered table — **add a table
+without its guard and CI goes red** ([Chapter 13](13-storage-and-schema.md) details them). Corrections
 are new superseding rows, bitemporal for cost ([Chapter 8](08-cost-and-savings.md)).
 
 ---

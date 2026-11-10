@@ -1,10 +1,8 @@
 # 6. Recall — the delta model
 
-[Chapter 5](05-ledger-and-verification.md) left you with a ledger you can prove.
-This chapter is what it makes possible: an agent that asks **"what changed since
-the state I already hold?"** instead of re-reading the world.
-
-Answering that *honestly* is the whole design. A memory that says "unchanged"
+The ledger of [Chapter 5](05-ledger-and-verification.md) lets an agent ask
+**"what changed since the state I already hold?"** instead of re-reading the
+world. Answering that *honestly* is the whole design. A memory that says "unchanged"
 about a file the agent never saw, or returns a summary written against bytes that
 have since moved, is worse than none: it makes the agent confidently wrong.
 
@@ -23,9 +21,8 @@ AGENTS.md: unchanged since last captured read (re-read avoidable)
 
 `rift recall file-if-changed AGENTS.md --json` answers `changed` with
 `estimated_tokens_avoided` 0. Both are correct: `rift memory` answers for **a
-human** in the checkout and hashes the working tree; `rift recall` answers for
-**an agent**, whose context is not on disk, so one that names no hash holds
-nothing and everything reads as changed. With `--known-hash ee2f8418…c05600` it
+human** and hashes the working tree; `rift recall` answers for **an agent**,
+whose context is not on disk, so one naming no hash holds nothing. With `--known-hash ee2f8418…c05600` it
 answers `unchanged`, credited because this family recorded reading those bytes.
 Both spellings share one dispatcher, gate set and budget.
 
@@ -71,14 +68,11 @@ token estimates, `truncated`, `omitted` and a `containment` block.
   and 2,000 returned tokens — and a request/response surface has no turn
   delimiter, so the manifest call is the delimiter: it resets the draw-down and
   keeps the ceilings. A process-lifetime budget would starve a long session; a
-  time window is non-deterministic. A caller that never anchors runs under one
-  un-reset budget. Refilling leaves an anchor event in the serve audit, so
-  over-retrieval is *visible*; hard isolation is the policy gate's job.
-
-> **Tip:** each `rift recall …` process has a fresh budget, so the call ceiling
-> binds within a dispatch sequence, not across shell invocations; token accounting
-> and the audit are per-call. [Chapter 7](07-serving-and-injection.md) has the
-> channel budgets.
+  time window is non-deterministic. Refilling leaves an anchor event in the serve
+  audit, so over-retrieval is *visible*; hard isolation is the policy gate's job.
+  Each `rift recall …` process has a fresh budget, so the ceiling binds within
+  one dispatch sequence, not across shell invocations
+  ([Chapter 7](07-serving-and-injection.md)).
 
 ---
 
@@ -146,12 +140,10 @@ summary_key = SHA-256(
   ‖ extractor_version ‖ policy_version ‖ redaction_version )
 ```
 
-Change a byte, or bump the extractor, the summary policy or the redaction rules,
-and the key changes. A stale summary is not "invalid" but **unlookupable**:
-nothing must remember to delete it and nobody can find it by accident. The three
-versions are in the key because a summary goes wrong three independent ways — the
-source moves, the digest code changes, or the redaction rules change what a digest
-may contain.
+Change a byte, or bump the extractor, the summary policy or the redaction rules —
+the three independent ways a summary goes wrong — and the key changes. A stale
+summary is not "invalid" but **unlookupable**: nothing must remember to delete it
+and nobody can find it by accident.
 
 Checking a binding has three outcomes. **Valid**: path present, current hash equals
 the bound hash, digest found — returnable. **Invalid**: hashed differently; the
@@ -170,20 +162,18 @@ each definition's raw token count stored beside it (`summary_token_count`) so a
 surface can state its cost without a tokenizer. Failure signatures are
 *stabilized* (`:_`, `0x_`, `(_s)`) so one logical error yields one signature.
 
-Two consequences. **Injected directives are neutralized**: an extractor that only
-counts and outlines cannot be talked into repeating an instruction found in a log
-(the trust chokepoint of [Chapter 7](07-serving-and-injection.md) is the general
-defence). **The digest store is rebuildable**, since the same source recomputes
-byte-identically.
+So **injected directives are neutralized** (an extractor that only counts and
+outlines cannot repeat an instruction found in a log; [Chapter 7](07-serving-and-injection.md)
+has the general defence), and **the digest store is rebuildable**, since the same
+source recomputes byte-identically.
 
 ---
 
 ## 6.6 One constructor per artifact
 
-A guarantee re-implemented at the call site is a comment, not a guarantee: sealed
-types can be property-tested while serving handlers redo the hash comparison
-inline beside them, and the plane's strongest guarantee is then sidesteppable. So
-it is structural:
+A guarantee re-implemented at the call site is a comment, not a guarantee: a
+handler redoing the hash comparison inline sidesteps the sealed types beside it.
+So it is structural:
 
 1. **Sealed constructors are the sole producers.** The four-state envelope
    (`envelope_for`, the single builder), the validity verdict and the pack
@@ -300,14 +290,10 @@ throw away:
   words in an exact retrieval's reason are frozen as `withheld`; the only copy
   stays here.
 
-Node and edge kinds are `CHECK`-constrained to a deliberately narrow mechanical
-set, which a migration must widen.
-
 Ingest is incremental and idempotent (a watermark per branch) and runs before
-every pull verb. It also keeps level unasked: a worker pass that writes a
-checkpoint queues one ingest job, which answers every pass asking while it is
-pending, so a family worked on with no dashboard open never serves from an ever
-older checkpoint. A watermark stamps `ingested_at` from the injected clock (the
+every pull verb, and after every worker pass that writes a checkpoint
+([§3.10](03-capture.md#310-the-detached-worker)), so a family worked on with no
+dashboard open never serves from an ever older checkpoint. A watermark stamps `ingested_at` from the injected clock (the
 system clock in production, a fixed one in tests and rebuilds), and `0` reads as
 *unknown*, never an instant. A history walk records a proof per revision git does not hold, so
 a fully proven pass does not walk again, and a new read or moved `HEAD` has no
@@ -324,8 +310,7 @@ evaluation conditions).
 ## 6.11 Scope: the model never widens on uncertainty
 
 Every query is bounded by repository, branch ancestry, worktree, developer and a
-checkpoint window — a property-tested security property
-([Chapter 9](09-worktrees-and-families.md)).
+checkpoint window, a property-tested guarantee ([Chapter 9](09-worktrees-and-families.md)).
 
 **Cross-scope access is audited.** Widening past the caller's branch needs a grant
 with a reason (`--cross-branch <REASON>`); `containment` reports whether one was in
@@ -364,9 +349,9 @@ So the read is recorded where it happens:
 
 **It is run state, never a record.** Rows carry paths, hashes, line numbers and
 counts, never content; nothing is canonical or synced. Losing the directory costs
-a re-read that would have been declined — the failure direction the design leans
-toward, and why it is a file: a decision taken while an agent waits can afford a
-file read, not a store open. At condense the archive copies the rows into the
+a re-read that would have been declined — the safe direction. It is a file
+because a decision taken while an agent waits can afford a file read, not a
+store open. At condense the archive copies the rows into the
 checkpoint's `window_journal.jsonl`
 ([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint)) and the ingest
 reads them into `n_window_row`, so a rebuild restores every decline, edit and
@@ -441,7 +426,7 @@ windows and `rift doctor` counts them.
 ## 6.13 The agent holds what it wrote
 
 The largest measured pool is the read of a file **the agent just edited**, to
-confirm the edit landed: 58 reads and 866,705 tokens here, about 15,000 each. The
+confirm the edit landed (the 58 reads of §6.12, about 15,000 tokens each). The
 new bytes are in the agent's own tool call; the read is habit. Rift knows the
 agent holds the file only by an equality it checks, not by assuming editors:
 
@@ -518,13 +503,9 @@ cannot tell apart are ambiguous. `rift recall status --json` summarises the newe
 200 reads, three lags kept apart; `rift doctor` names reads still not queryable
 after a whole five-minute sweep.
 
-Recall serves from §6.10's projection through the pull verbs and hook injection
-([Chapter 7](07-serving-and-injection.md)); it keeps no in-session index of
-content, and §6.14's path index answers *where*, never *what does it say*.
-
-Every response carries `estimated_tokens_avoided`, an upper bound: a full read of
-the candidates against what was returned. [Chapter 8](08-cost-and-savings.md) has
-the accounting and the honesty ladder.
+Recall keeps no in-session index of content; §6.14's path index answers
+*where*, never *what does it say*. Every response carries `estimated_tokens_avoided`, an upper bound: a full read of
+the candidates against what was returned ([Chapter 8](08-cost-and-savings.md)).
 
 ---
 

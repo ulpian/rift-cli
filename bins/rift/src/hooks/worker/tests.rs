@@ -38,9 +38,11 @@ fn the_read_count_job_binds_and_caches_the_outline_of_what_was_read() {
         &crate::capture_queue::delivery::context(&serde_json::to_value(&job).unwrap()).unwrap(),
     );
     let common_dir = rift_git::discover(root).unwrap().common_dir;
-    let cached =
-        crate::hooks::gate::outline_cache_dir(&common_dir).join(format!("{sha}-e3p1r1.outline"));
-    let text = std::fs::read_to_string(&cached).expect("the outline is cached");
+    let name = format!("{sha}-e3p1r1.outline");
+    let cached = crate::hooks::gate::outline_cache_dir(&common_dir).join(&name);
+    let stored = std::fs::read(&cached).expect("the outline is cached");
+    let cipher = crate::column_key::column_cipher_at(root);
+    let text = crate::hooks::gate::open_sealed(&cipher, &name, &stored).expect("it opens");
     assert!(
         text.starts_with("rift-outline 1\nclass code\nshape 7 "),
         "{text}"

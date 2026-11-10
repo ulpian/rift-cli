@@ -103,6 +103,82 @@ pub fn load_or_mint_key_file(path: &Path) -> Result<DataKey> {
     read_key_file(path)?.ok_or_else(|| RiftError::crypto("key file vanished after a race"))
 }
 
+/// What a key file is, judged without minting, narrowing or reading it out:
+/// the health report's view of the custody [`load_or_mint_key_file`] keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyFileState {
+    /// No file: the first seal mints one, so nothing is wrong yet.
+    Missing,
+    /// Exactly [`KEY_LEN`] bytes, readable by its owner alone.
+    Usable,
+    /// A file of the wrong length, which every use refuses.
+    Malformed {
+        /// The file's length in bytes.
+        len: u64,
+    },
+    /// Readable or writable by someone other than its owner (unix), which
+    /// every use refuses.
+    OpenToOthers {
+        /// The permission bits, `0o777`-masked.
+        mode: u32,
+    },
+    /// There, but this user cannot read it (or it is not a regular file).
+    Unreadable,
+}
+
+impl KeyFileState {
+    /// The state's wire spelling: a short tag a scrubbed report keeps.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Usable => "usable",
+            Self::Malformed { .. } => "malformed",
+            Self::OpenToOthers { .. } => "open_to_others",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// Judge the key file at `path` the way [`load_or_mint_key_file`] would,
+/// without its side effects: no key is minted, no directory narrowed, and
+/// the key bytes are never read into memory.
+#[must_use]
+pub fn inspect_key_file(path: &Path) -> KeyFileState {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return KeyFileState::Missing,
+        Err(_) => return KeyFileState::Unreadable,
+    };
+    if !meta.is_file() {
+        return KeyFileState::Unreadable;
+    }
+    if let Some(mode) = shared_mode(&meta) {
+        return KeyFileState::OpenToOthers { mode };
+    }
+    if meta.len() != KEY_LEN as u64 {
+        return KeyFileState::Malformed { len: meta.len() };
+    }
+    match File::open(path) {
+        Ok(_) => KeyFileState::Usable,
+        Err(_) => KeyFileState::Unreadable,
+    }
+}
+
+/// The permission bits of a file others can reach, or `None` when only its
+/// owner can (and always on a platform without unix modes).
+#[cfg(unix)]
+fn shared_mode(meta: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode();
+    (mode & 0o077 != 0).then_some(mode & 0o777)
+}
+
+#[cfg(not(unix))]
+fn shared_mode(_meta: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
 /// The key at `path`, or `None` when no file is there.
 fn read_key_file(path: &Path) -> Result<Option<DataKey>> {
     let mut file = match File::open(path) {
@@ -319,6 +395,48 @@ mod tests {
         // key this process already holds.
         std::fs::remove_file(store.key_path(&repo("fam-a"))).unwrap();
         assert_eq!(store.repo_dek(&repo("fam-a")).unwrap().expose(), a.expose());
+    }
+
+    #[test]
+    fn inspecting_a_key_file_judges_it_without_minting_or_changing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("keys").join("fam.key");
+        assert_eq!(inspect_key_file(&missing), KeyFileState::Missing);
+        assert!(!missing.parent().unwrap().exists(), "nothing was minted");
+
+        let good = tmp.path().join("good.key");
+        write_private_file_bytes(&good, &[4u8; KEY_LEN]);
+        assert_eq!(inspect_key_file(&good), KeyFileState::Usable);
+
+        let short = tmp.path().join("short.key");
+        write_private_file_bytes(&short, &[4u8; 7]);
+        assert_eq!(inspect_key_file(&short), KeyFileState::Malformed { len: 7 });
+        assert_eq!(inspect_key_file(tmp.path()), KeyFileState::Unreadable);
+        for (state, tag) in [
+            (KeyFileState::Missing, "missing"),
+            (KeyFileState::Usable, "usable"),
+            (KeyFileState::Malformed { len: 1 }, "malformed"),
+            (KeyFileState::OpenToOthers { mode: 0o644 }, "open_to_others"),
+            (KeyFileState::Unreadable, "unreadable"),
+        ] {
+            assert_eq!(state.as_str(), tag);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspecting_a_key_file_others_can_read_names_its_mode_and_leaves_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fam.key");
+        std::fs::write(&path, [7u8; KEY_LEN]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            inspect_key_file(&path),
+            KeyFileState::OpenToOthers { mode: 0o640 }
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
     }
 
     #[test]

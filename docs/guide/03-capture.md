@@ -3,9 +3,8 @@
 Capture turns two streams of small, untrusted signals — the ones your git client
 emits and the ones your coding agent emits — into one immutable record: canonical
 events, sessions and checkpoints on a ledger you can verify. The constraint
-behind almost every choice here: **capture is not allowed to be slow, and it is
-not allowed to fail your work**. Run [`rift init`](01-quickstart.md) first; this
-chapter describes what it wired up.
+behind almost every choice here: **capture may not be slow, and may not fail
+your work**. This chapter describes what [`rift init`](01-quickstart.md) wired up.
 
 ---
 
@@ -52,8 +51,8 @@ dispatch table, so name and behaviour cannot drift apart.
 | `pre-push` | Refuses Rift's internal refs, signals "work is leaving" for `on-pr`, drains the push queue. |
 | `post-checkout` | The one moment git tells Rift a worktree was born, from inside the new tree; adopts a family member ([09](09-worktrees-and-families.md)). |
 
-There is no entry for an amend, rebase or merge: a name in the list *is* an installed,
-routed hook, so one with nothing behind it would read as coverage Rift does not have. A
+There is no entry for an amend, rebase or merge: an entry with nothing behind it
+would read as coverage Rift does not have. A
 rebase that moves recorded commits leaves the ledger holding the pre-rewrite shapes.
 
 The `Rift-Checkpoint` trailer is a **claim, not a record**: the prediction must finish
@@ -106,10 +105,9 @@ owns only `.rift/agents/<agent>.json` and adoption verifies the tracked file.
 Antigravity names its transcript on every hook as `transcriptPath` — the client's
 `transcript_full.jsonl`; the bridge copies only that address into the session
 cache, nothing on the hook path opens the file, and the archive seals it like
-every other agent's. Its records are not the shapes the compactor reduces, so
-for it the full copy is the record and the compaction saves little. The same holds
-for Codex: its rollout's records are not those shapes either, its compact form is
-nearly empty, and the full rollout sealed beside it is the record — nothing is lost.
+every other agent's. Neither its records nor Codex's rollout are shapes the
+compactor reduces, so for both the full copy sealed beside the near-empty
+compact form is the record — nothing is lost.
 
 ### The wire
 
@@ -202,8 +200,7 @@ re-opened session condenses again at its next end — and what holds is that not
 a finished condense leads into `ended`.
 
 The bridge asks the machine only for legal steps: a session not working is returned
-to work first, so a lone `SessionEnd` opens and ends it in one pass, and redelivered
-starts and ends change nothing. A session opened without its agent's start is a
+to work first, so a lone `SessionEnd` opens and ends it in one pass. A session opened without its agent's start is a
 **`synthesized-start`**, never a `start`, so the audit says what arrived. A refused
 trigger is **its own append-only row**, `refused-<trigger>`, because otherwise a
 refusal can hide a working session while the receipt reads "recorded".
@@ -227,10 +224,9 @@ archiver of the same commit. Sweeping early is safe because no phase is a trap.
 `rift doctor` is the alarm and the manual arm (*sweepable* past the floor, **STUCK**
 past 24 hours; `--fix` sweeps under the same lock — §3.15).
 A deferral carries one cause from a closed vocabulary (`worker-holds-lock`,
-`no-idle-edge`, `archive-produced-nothing`, `done-mark-failed`; the retired
-`no-commit-to-anchor` still reads from an old report, since a condense no longer
-needs a commit); only `worker-holds-lock` is someone else's to finish, and every
-other cause waits for the next `rift doctor --fix`.
+`no-idle-edge`, `archive-produced-nothing`, `done-mark-failed`, and the retired
+`no-commit-to-anchor` from an old report); all but `worker-holds-lock` wait for
+the next `rift doctor --fix`.
 
 ---
 
@@ -241,10 +237,9 @@ and a chain entry behind it. A shard holds its metadata, the opted-in working-tr
 capture after the gate, `redaction_report.json` (required before a shard is
 importable or projectable), the transcript and its compaction, the tool calls
 including files read, and four mechanical digests; [05](05-ledger-and-verification.md)
-walks the anatomy. The sealed transcript is **redacted-complete**: everything the
-agent recorded or produced — prompts, assistant text and thinking, every tool
-call's full input, every tool result in full — with secrets and the opaque
-thinking signatures masked
+walks the anatomy. The sealed transcript is **redacted-complete**: every prompt,
+assistant text and thinking block, tool call input and tool result in full, with
+secrets and the opaque thinking signatures masked
 ([§5.3](05-ledger-and-verification.md#53-anatomy-of-a-checkpoint) says why that,
 and not byte-identity, is the standard).
 A turn-end checkpoint can seal only the lines past the previous turn's cut, as one more part under `transcript.segments/`, and one resolver joins the parts back into the whole transcript every reader and every hash sees.
@@ -324,13 +319,13 @@ The cost is the worker's, not the hook's, and what still grows with the session 
 
 ## 3.8 The two latency budgets
 
-Two budgets measure different things; quoting one for the other is the mistake to avoid.
+Two budgets measure different things; never quote one for the other.
 
 ### The git-latency budget: 100 ms
 
 The time a `git commit` spends *beyond a bare commit*, summed over its three hooks —
-a displacement, not one process's wall time. It is a hard ceiling set by decision,
-not derived from measurements, so it does not move when the machine has a good day.
+a displacement, not one process's wall time. It is a ceiling set by decision, not
+derived from measurements, so a good day on the machine does not move it.
 The latest published run: bare commit about 35 ms, hooks installed about 64 ms, session
 live about 80 ms — roughly 45 ms of displacement. Opted-in capture spends the rest (§3.12).
 
@@ -348,7 +343,6 @@ whole budget against **1.2 ms** with it, the file going to the worker. The **fir
 of an unconverted document is outside the budget by design: it waits out the 250 ms
 conversion deadline (about 265 ms), then runs as written with the conversion journaled,
 once per document — the alternative is an agent reading a zip container as text.
-
 Figures are the release binary.
 
 ---
@@ -378,9 +372,9 @@ tokenizer takes about 234 ms to initialise. **The `scheduled` archive** redacts 
 multi-megabyte transcript; on the hook it outlasted the client's timeout and was
 restarted by the next hook, so the checkpoint never landed. **Turn-boundary collection**
 costs a `git status`, bounded reads and object writes for changed paths. The hook
-records a boundary event's `HEAD` and time. The worker later collects current bytes;
-a separate collection-attempt interval records that later work. Collection is not
-an atomic snapshot and does not reconstruct bytes at the event time.
+records a boundary event's `HEAD` and time; the worker later collects current bytes
+under a separate collection-attempt interval — not an atomic snapshot, and not the
+bytes at the event time.
 
 Turn-boundary capture preserves a symlink's target spelling without reading its
 referent. Rift trusts the directories above the configured worktree root; the root
@@ -398,7 +392,7 @@ rows they are projection-only; shards do not carry them.
 
 With no daemon, the hook writes an identifier-only job into its checkout's family
 run state, spawns one detached child with its streams going nowhere, and does not
-wait. Doctor can attempt the pending work too. Each checkout's worker holds an
+wait. Each checkout's worker holds an
 open-file lock at its canonical Git directory, and elapsed time never releases a
 live owner. An older Rift's lock file, a timestamp with no pid, reads as a live
 owner forever; `rift doctor` names it, and `--fix` moves it aside — renamed, never
@@ -414,8 +408,8 @@ through and every reader classifies through: a job ticket `<stem>[--<context>].j
 the markers `condensed-<key>` (a session's finished condense), `completed-<id>.done`
 (one condense delivery's completion), `unavailable-<stem>` (a basis snapshot that
 completed `unavailable`) and `<key>.error`; and publish stages. A marker is
-counted, never run, and a name outside the grammar is unknown — so a new marker is
-added once and no reader falls behind it.
+counted, never run, and a name outside the grammar is unknown, so no reader falls
+behind a new marker.
 
 Queue context includes the full payload apart from its attempt counter. An
 identical context stays queued without resetting retries; a changed session,
@@ -513,12 +507,12 @@ artifact bridge is the authoritative reconciler**: it walks the redacted shards,
 any without a valid redaction report, re-derives events from the shard's own transcript
 through the same writers and identity derivations as the live path, and advances an
 append-only watermark. Git is the record, so the bridge's view wins and the hook path is
-an optimisation over it. `rift rebuild` runs it (delete `projection.db` first for a
-from-scratch rebuild; ordinary existing checkpoints are skipped). A present recovery
-audit is authenticated and its exact projection rechecked even for an existing
-checkpoint. Refusal preserves that checkpoint and adds no unauthenticated gap
-facts. Hooks alone cannot be authoritative: they miss sessions run before
-installation. The bridge never reads raw session bytes.
+an optimisation over it; hooks alone cannot be authoritative, since they miss
+sessions run before installation. `rift rebuild` runs it (delete `projection.db`
+first for a from-scratch rebuild; existing checkpoints are skipped, except that a
+present recovery audit is authenticated and its projection rechecked; refusal
+keeps the checkpoint and adds no unauthenticated gap facts). The bridge never
+reads raw session bytes.
 
 A read-only importer lands another tool's checkpoints under their own chain era, never as
 a chain anchor ([05](05-ledger-and-verification.md)).
@@ -527,9 +521,9 @@ a chain anchor ([05](05-ledger-and-verification.md)).
 
 ## 3.14 What capture never does
 
-No network, no model, no daemon, no blocking, no guessing (an unestablishable fact is
-recorded as absent) and no mutation: [17](17-invariants.md) states these as standing
-rules and [18](18-what-rift-does-not-do.md) lists the rest.
+No network, model, daemon, blocking, guessing (an unestablishable fact is
+recorded as absent) or mutation: see [17](17-invariants.md) and
+[18](18-what-rift-does-not-do.md).
 
 ---
 

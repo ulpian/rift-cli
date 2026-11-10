@@ -5,9 +5,7 @@ your agent sessions spent: four billable token classes per model call, priced
 from a versioned catalog into integer micro-dollars — bookkeeping over facts the
 provider reported. Going **in** it estimates what the recall plane spared you:
 tokens a serve stood in for instead of a full re-read. That side is an
-*estimate*, and the chapter's discipline exists because an estimate that forgets
-it is one turns into a marketing number. Serving mechanics are in
-[Chapter 7](07-serving-and-injection.md).
+*estimate*, and an estimate that forgets it is one turns into a marketing number.
 
 ---
 
@@ -30,9 +28,8 @@ with a tilde; `tokens avoided`, an **estimated upper bound** on re-reads displac
 
 ## 8.2 Four token classes, four prices
 
-The same thousand tokens cost wildly different amounts by which side of the call
-they were on and whether the prompt cache had seen them, so each model call is
-priced per class:
+A token's price depends on its side of the call and whether the prompt cache had
+seen it, so each model call is priced per class:
 
 ```text
 call_cost = uncached_input · price_uncached_input
@@ -55,8 +52,8 @@ only `provider_reported`.
 
 ## 8.3 One tokenizer, one provenance tag
 
-Every crate that counted for itself would drift: budgets charge one number,
-reports publish another. So counting is one crate (`rift-tokens`), `count(text)`
+Crates counting for themselves would drift (budgets charge one number, reports
+publish another), so counting is one crate (`rift-tokens`), `count(text)`
 and `provenance()` — `cl100k_base` when the bundled byte-pair encoder is live,
 `chars/4+1` when it could not initialize. The fallback **rounds up**, so a budget
 ceiling cannot be breached by an under-count, and the provenance travels beside
@@ -121,11 +118,9 @@ model produces no cost fact rather than one silently omitting output tokens.
 A provider usage report writes a **model call** row, its 1:1 **token usage** row,
 and a **cost fact** only if the catalog fully covers the model. The fact is
 bitemporal and strict-append: an identical recomputation writes nothing, a changed
-belief appends a superseding fact, so "what did we think this cost last month" and
-"what do we think now" both stay on file. Reports quote captured usage against
+belief appends a superseding fact, so past and present beliefs both stay on file. Reports quote captured usage against
 the latest catalog belief at read time, using each call's start as valid time,
-counting each call once — a newly appended price prices old unpriced usage
-without a cost fact or a rebuild. A session with no completely priced call has no
+counting each call once. A session with no completely priced call has no
 dollar figure; a priced call with zero usage has a zero one.
 
 Money is **integer micro-dollars** end to end: a 64-bit integer through an
@@ -246,8 +241,8 @@ and reads by `tool_call.started_at`, so a decision and its read can straddle a
 boundary (every surface prints its window); and an unfrozen read weighs zero, so
 the share is over fewer measured reads than `n` suggests (§8.12).
 
-**The product declares no target**: the only threshold is the evaluation bar
-([§8.13](#813-the-bar-is-what-the-harness-measured)). **The window boundary is a
+**The product declares no target** ([§8.13](#813-the-bar-is-what-the-harness-measured)).
+**The window boundary is a
 file**: `rift savings reset` writes `<common_dir>/rift-family/savings-window.json`,
 the share counts what was recorded after it, `--at` places it (a boundary after now
 is refused, since it would exclude the sessions it opened to measure), and linked
@@ -262,9 +257,8 @@ no avoided tokens, so that lever publishes the **re-query rate** (bounded search
 asked again in the same turn), since a bound worked around immediately saved nothing
 ([§7.7](07-serving-and-injection.md#77-searches-are-bounded-and-sometimes-answered)).
 `dogfood --compare` ([§16.14](16-development.md#1614-a-savings-reading-through-the-real-clients))
-checks a booked figure against a removal over scripted sessions, lever off and on;
-the arms are separate non-deterministic runs, so it is a size check, not a
-replacement.
+checks a booked figure against a removal over scripted sessions, lever off and on:
+a size check, not a replacement, since the arms are separate non-deterministic runs.
 
 ---
 
@@ -287,9 +281,8 @@ per-million *rate* (a recorded price); a positive saving under a cent as
 `~<$0.01`, never `$0.00`; no amount for an unpriced model; no animation, because
 a tweening cost figure reads as changing.
 
-**Naming what the figure leaves out.** A model with no price adds usage and no
-dollars, so `rift doctor` under `prices` names each such model with its call
-count. It writes nothing; the remedy is a seeded price.
+**Naming what the figure leaves out.** `rift doctor` under `prices` names each
+unpriced model with its call count; the remedy is a seeded price.
 
 ---
 
@@ -344,16 +337,12 @@ focused opens the same breakdown ([Chapter 11](11-canopy-tour.md) walks the pane
   lever can be taken out of the totals (a family-held net includes what was read of
   those bytes afterwards, as tokens returned, never a negative saving).
 - `tool_output` in `rift savings --json` carries two classes, `tool_output_held` and
-  `tool_output_folded`.
-  Each splits into `would_save`, the results the class only observed, and
-  `realised`, the results it acted on.
-  `would_save` is beside the share and never added to it; its bytes read `null`,
-  because the audit relation keeps the row but not the byte figure.
-  `realised` tokens are already inside the share, so the key names which part of it
-  the class is and adds nothing.
-  The Canopy savings modal draws the same two classes under the share, and
-  `xtask replay-savings` reports the held class as the same-window repeats it would
-  hold and the folded class as not replayed.
+  `tool_output_folded`, each split into `would_save` (results only observed:
+  beside the share, never in it; bytes `null`, since the audit relation keeps the
+  row but not the byte figure) and `realised` (results acted on, already inside
+  the share; the key names that part and adds nothing). The Canopy savings modal
+  draws both under the share; `xtask replay-savings` reports the held class as
+  the same-window repeats it would hold and the folded class as not replayed.
 - `--since <rfc3339|epoch-ms>` and `--last 24h|7d|30d|all`: one window per call,
   mutually exclusive, composed with the boundary marker (the later cut) so `[7d]` on
   the card and `--last 7d` are one window; an unknown spelling is refused. Neither
@@ -406,16 +395,14 @@ read *is*.
 
 ## 8.13 The bar is what the harness measured
 
-A measured share and a gate are different numbers; conflating them fails builds for
-work nobody has done. **The share** is the repository-content tokens an agent would
+A measured share and a gate are different numbers. **The share** is the repository-content tokens an agent would
 otherwise read, any channel, **first reads included**, that the plane returned
 instead; it has no target.
 
 **The bar** is `SAVINGS_BAR_PCT` (`rift-recall-ledger`, **15**): the median savings
 the paired replays measured, raised only after the harness measures a higher median
 and **never above what it last measured**, because a bar set to an aspiration is no
-evidence. The go/no-go gate reads the constant; 15 was calibrated against §8.12's
-33.7 %.
+evidence. The go/no-go gate reads the constant.
 
 `cargo run -p xtask -- replay-savings` is neither: it replays recorded transcripts
 through this build's read gate over the share's denominator, the field measurement,
@@ -445,8 +432,7 @@ four tasks spend 543 to 595 tokens against baselines of 11,064 to 44,214: P10
 frames) saves P50 **67.68 %**, GO, lower because a decline returns a frame where a
 pack returns nothing. Both are **over a synthetic corpus of small fixture files**:
 evidence the machinery works and the gate is calibrated, not a promise about your
-repository, whose number is §8.12's. What these numbers do not cover is in
-[Chapter 18](18-what-rift-does-not-do.md).
+repository, whose number is §8.12's ([Chapter 18](18-what-rift-does-not-do.md)).
 
 ---
 

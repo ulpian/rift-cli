@@ -50,7 +50,7 @@ pub(in crate::hooks) use self::outline_cache::{
 };
 
 #[cfg(test)]
-pub(in crate::hooks) use self::outline_cache::outline_cache_dir;
+pub(in crate::hooks) use self::outline_cache::{open_sealed, outline_cache_dir};
 
 /// What this hook does about the window journal, if anything.
 pub(crate) enum GateStep {

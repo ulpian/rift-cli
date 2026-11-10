@@ -119,7 +119,7 @@ pub use integrity::{
     record_cost_if_changed, record_imported_checkpoint_if_new, verify_against_source, BookedCost,
     ChainSource, CheckpointRecord, CostFact, ImportedCheckpointRecord, VerifyReport,
 };
-pub use key_file::{load_or_mint_key_file, FileKeyStore};
+pub use key_file::{inspect_key_file, load_or_mint_key_file, FileKeyStore, KeyFileState};
 pub use key_metadata::{
     key_metadata_for_generation, latest_key_metadata, record_key_metadata, KeyMetadataRow,
 };

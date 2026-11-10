@@ -32,7 +32,11 @@ fn bind(work_tree: &std::path::Path, rel: &str, lines: u32) {
         ],
     };
     let sha = revision(work_tree, rel).to_hex();
-    write_outline_cache(&work_tree.join(".git"), &sha, &outline).unwrap();
+    // The outline is sealed under the family's key, so the checkout needs a
+    // family: a repository the gate resolves exactly as it would in production.
+    rift_git::test_support::fake_repo(work_tree).unwrap();
+    let cipher = crate::column_key::column_cipher_at(work_tree);
+    write_outline_cache(&work_tree.join(".git"), &sha, &outline, &cipher).unwrap();
 }
 
 fn first_contact_rows(work_tree: &std::path::Path) -> Vec<crate::agent_queue::ServeAudit> {

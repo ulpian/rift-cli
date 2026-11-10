@@ -5,11 +5,9 @@ another ([Chapter 6](06-recall.md)), the dashboard a third
 ([Chapter 12](12-canopy-architecture.md)): what they hold, why they may exist
 next to a git-native system of record, and what keeps them honest.
 
-One sentence carries the rest: **these databases are derived, append-only, and
-generated from one registry in code.** Derived, so deleting one is a recovery
-step, not a loss. Append-only, so nothing in them can be quietly edited.
-Generated, so the guarantee cannot be forgotten on a table someone added last
-Tuesday.
+**These databases are derived, append-only, and generated from one registry in
+code**: deleting one is a recovery step, nothing in them can be quietly edited,
+and the guarantee cannot be forgotten on a newly added table.
 
 ---
 
@@ -55,8 +53,8 @@ contact, never an answer. `rift clean` collects each on its TTL.
 - `rift-family/outline/` — `<sha256>-e<E>p<P>r<R>.outline`, a copy of a bound
   outline so the read gate learns with no store open that it is bound
   ([§7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)). Its grammar is
-  closed, under 64 KiB, and a moved file names another key, so a stale entry cannot
-  be read. TTL: `basis_ttl_days`.
+  closed, under 64 KiB, sealed under the family's column key (§13.8), and a moved
+  file names another key, so a stale entry cannot be read. TTL: `basis_ttl_days`.
 - `rift-family/linehash/` — `<sha256>.lh`, one file per revision: a magic, the line
   and byte counts and a 64-bit hash per line, so the output-matching step
   ([§7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)) compares a
@@ -83,9 +81,8 @@ on with the out-of-tree location.
 
 ## 13.3 Why a database at all
 
-Git is the record: a checkpoint's bytes and the chain live in git, and `rift
-verify` re-derives its answer from git ([Chapter 5](05-ledger-and-verification.md)).
-The database exists because "which files did this session read, and how many reads
+Git is the record ([Chapter 5](05-ledger-and-verification.md)). The database
+exists because "which files did this session read, and how many reads
 re-fetched bytes we already had" is a question about *joins*, and walking git trees
 per query would blow the hook budget. It is a **projection**, which means: deleting
 it is not data loss (the documented recovery step); migrations never need to be
@@ -168,8 +165,8 @@ diff.
 
 ## 13.6 Migrations: additive, ordered, checksum-locked
 
-A migration is a version, a name and SQL. The engine applies them in order, records
-each one's SHA-256, and re-computes the digests on every open; a mismatch refuses to
+The engine applies migrations in order, records each one's SHA-256, and
+re-computes the digests on every open; a mismatch refuses to
 run ("migration 4 checksum changed since it was applied … the projection is a
 rebuildable artifact: set it aside and run `rift rebuild`, then `rift verify`.
 Anything else here is tampering"). That is a lock, not a warning: **a schema change
@@ -214,9 +211,8 @@ read a development-time checksum refusal as "binary and source disagree" first.
 ## 13.7 Bitemporal facts
 
 Facts with two time axes — true in the world, and learned by this system — carry
-`valid_from`/`valid_to` and `recorded_at`, and a correction is a new row, so "what
-does this cost" and "what did we believe in March" are both answerable forever
-([Chapter 8](08-cost-and-savings.md) owns the price rules). Key custody uses the
+`valid_from`/`valid_to` and `recorded_at`, and a correction is a new row, so past
+beliefs stay answerable ([Chapter 8](08-cost-and-savings.md) owns the price rules). Key custody uses the
 same shape: a rotation inserts a generation whose `supersedes` points at the
 previous one.
 
@@ -224,9 +220,8 @@ previous one.
 
 ## 13.8 Encryption at rest and key custody
 
-Two layers are conceivable: the whole file, or the highest-sensitivity columns. The
-first is an engine feature unavailable on the intended production engine (§13.11),
-so the second is the standing guarantee.
+Whole-file encryption is an engine feature unavailable on the intended production
+engine (§13.11), so encrypting the most sensitive columns is the standing guarantee.
 
 **The envelope.** A per-repository key-encryption key lives in the OS keychain and
 never touches disk. A per-repository data key, generated once at random, is stored
@@ -238,10 +233,21 @@ sits behind a seam with an in-memory implementation for tests and headless hosts
 **What gets encrypted.** A second registry, mirroring the schema registry, names the
 `(table, column)` slots AEAD-encrypted before durable storage. It has one entry: the
 validity plane's digest bodies. Tests require each registered column to exist in a
-schema registry and be `BLOB`, because ciphertext has to fit. No production path
-holds a recall data key, so outline digests go through the plain frame, an encrypted
-row fails closed to unavailable, and the outline writer takes only redacted bytes
-and refuses any path the serve policy denies or marks sensitive.
+schema registry and be `BLOB`, because ciphertext has to fit. They are sealed under
+the family's file-held column key
+([§2.7](02-configuration.md#27-where-state-lives)) — a keychain prompt would
+stall a hook — as are the outline cache files (above), bound to their file name. A
+key that cannot seal writes nothing, never plaintext; a row that does not open is a
+miss. The outline writer takes only redacted bytes and refuses any path the serve
+policy denies or marks sensitive.
+
+**Rows from before the key.** A body written plain-framed by an earlier build still
+reads, but cannot be sealed in place: `digest_blob` is append-only and addressed by
+its plaintext digest, and a superseding row would leave the plaintext in the file.
+`rift doctor` counts them and names `rift-memd rebuild`, which sets the projection
+aside and binds afresh, sealed; the set-aside keeps the plaintext until deleted. The
+doctor also judges the key file — missing, malformed, open to others, unreadable —
+without minting one. A plaintext outline cache file is a miss the next bind replaces.
 
 **Anti-relocation.** Each ciphertext is a nonce plus sealed bytes with table, column
 and row id bound in as associated data, so copying it into another row fails
@@ -253,27 +259,23 @@ it under the key it wraps would be circular.
 
 ## 13.9 Two hashes over the same bytes
 
-SHA-256 where byte-compatibility with git matters (the chain, a checkpoint's
-content hash and id, the content hash recorded for a read, the derived ids of the
-recall graph's rows, the digest locking a migration); blake3 for internal handles
-(salted developer and machine identifiers, the policy fingerprint of an effective
-configuration, integration-ownership fingerprints, the frozen ids inside serve
-envelopes). They are **distinct types with no conversion**, enforced by a doc-test
-asserting the conversion does not compile ([Chapter 5](05-ledger-and-verification.md)
-§5.10). Git's own blob id is a third digest over a different framing of the same
-bytes, hence an explicit bridge table ([Chapter 6](06-recall.md)). The worktree
-hasher computes a **plain SHA-256** of file bytes, not a chain leaf and not blake3,
-because it compares against the content hash capture recorded at read time.
+The split of [§5.10](05-ledger-and-verification.md#510-two-hashes-over-the-same-bytes),
+as the stores see it: SHA-256 for the chain, a checkpoint's content hash and id,
+the content hash recorded for a read (which the worktree hasher matches with a
+**plain SHA-256**, not a chain leaf), the recall graph's derived row ids and the
+digest locking a migration; blake3 for salted developer and machine identifiers,
+policy and integration-ownership fingerprints and the frozen ids inside serve
+envelopes. Git's blob id, a third framing, is bridged by a table
+([Chapter 6](06-recall.md)).
 
 ---
 
 ## 13.10 Frozen names and read-compatible history
 
 The recall registry holds tables named for a retired serving transport, and a cache directory segment has the same flavour. Renaming them would be
-wrong three times over: the registry entry *is* the table's name in every deployed
-file; migration bodies are checksum-locked, so editing a byte refuses every
-existing store; and the tables are append-only, so historical rows cannot be
-rewritten under a new name. They survive as read-compatible history: the live
+wrong three times over: the registry entry *is* the deployed table name;
+migration bodies are checksum-locked; and append-only rows cannot be rewritten
+under a new name. They survive as read-compatible history: the live
 serving axis is the channel-discriminated pair `serve_call_event` and
 `serve_session_event` ([Chapter 7](07-serving-and-injection.md)); nothing writes the
 superseded pair and no reader targets it, and the cache segment that held
@@ -366,12 +368,10 @@ words of an exact retrieval's reason (`withheld`), are not restored.
 ## 13.13 The dashboard store
 
 The third store holds no captured data, only what the dashboard remembers. It is
-machine-global and modelled as **events rather than rows you edit** — superseding
-events reduced by a "latest valid per key" fold.
-
-Eight `canopy_*_event` tables — project catalogue, toggles, layouts (frozen for
+machine-global and modelled as **events rather than rows you edit**: eight
+`canopy_*_event` tables — project catalogue, toggles, layouts (frozen for
 writes), profiles, profile membership, per-profile layouts, theme slots and the
-startup pin — are each reduced by that fold.
+startup pin — each reduced by a "latest valid per key" fold.
 
 Every reducer mutation is insert-only; removing the active or last profile is
 refused in both reducer and store. [Chapter 12](12-canopy-architecture.md)

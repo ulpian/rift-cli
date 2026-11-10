@@ -1,9 +1,9 @@
 # 16 — Developing Rift
 
 For the person changing the code: how to build it, what each check proves, and
-which bites first if you skip the local run. [§16.1](#161-the-five-minute-version)
-gets you building; [§16.13](#1613-machine-hazards-macos-icloud-shell--and-windows)
-covers failures that are not your code's fault. Related: [17-invariants.md](17-invariants.md) (the rules the checks defend), [18-what-rift-does-not-do.md](18-what-rift-does-not-do.md).
+which bites first if you skip the local run.
+[§16.13](#1613-machine-hazards-macos-icloud-shell--and-windows) covers failures
+that are not your code's fault.
 
 ---
 
@@ -88,7 +88,7 @@ network. Its eighteen checks each return violations; any fails the command:
 11. **The conformance job runs exactly the declared suites.**
 12. **The fuzzy matcher keeps the feature that holds its vectorised backends inside their bytes**.
 13. **Deleted paths stay deleted**: on disk, in the index, or unignored, so a bulk `git add -A` cannot resurrect one.
-14. **The vocabulary screen**: planning shorthand in any tracked path or content, with no exclusions (this guide is in the corpus) and failing on a scan of nothing. The short id shapes are screened only over this guide and the root documents, because elsewhere they collide with hashes, benchmark arms and fixtures. The fix is words, never an exclusion. `docs/` is *excluded* from the redaction false-positive census (a prose corpus full of hashes would swamp it) and *included* here: two questions, two corpora ([04](04-redaction-and-secrets.md)).
+14. **The vocabulary screen**: planning shorthand in any tracked path or content, this guide included, failing on a scan of nothing; short id shapes only over this guide and the root documents, since elsewhere they collide with hashes and fixtures. The fix is words, never an exclusion. `docs/` is *excluded* from the redaction false-positive census (its hashes would swamp it) and *included* here: two questions, two corpora ([04](04-redaction-and-secrets.md)).
 15. **Size ceilings**: no tracked `.rs` file over 1,500 lines or function over 80, tests and `xtask` included, comments and strings masked.
 16. **An `#[ignore]` carries its reason.**
 17. **One cache root in the `rift` binary** (`family::cache_root`, one temp directory per test process), so a unit test cannot write into the developer's real cache.
@@ -142,7 +142,7 @@ nothing testable on the near side.
 data gives plausible fiction**), runs the instrumented suite once with `--branch`
 and hands the JSON to `check-coverage`. It needs `+nightly`, since `--branch` passes
 a flag the pinned channel refuses and the gate would then be neither passable nor
-failable; only CI applies the 85% floor. 
+failable; only CI applies the 85% floor.
 
 ---
 
@@ -150,9 +150,8 @@ failable; only CI applies the 85% floor.
 
 A test reading the network, the wall clock or the machine eventually fails for a
 reason unrelated to the change that triggered it, so the workspace injects those
-inputs. No test reads the network, and no assertion depends on the wall clock: a
-test may read it only to bound a wait or to seed a fixture, never to decide its
-verdict.
+inputs. A test may read the wall clock only to bound a wait or seed a fixture,
+never to decide its verdict.
 
 - **Identifiers:** `UlidSource` (`crates/rift-core/src/id.rs`); production's
   `MonotonicUlidSource` keeps a monotonic floor so a backwards clock still
@@ -204,11 +203,8 @@ builds it; it needs nightly. Fifteen targets: `config_parse`, `run_hook`,
 `checkpoint_artifact`, `mcp_request`, `palette_parse`, `doc_convert`,
 `shell_read`, `shell_read_bash`, `search_query`. **An untrusted-byte parser gets a target when it
 lands** and must be total: a value or a typed error for any input, never a panic.
-`doc_convert` is the largest parser surface; `shell_read` guards the recogniser
-that runs first on the read path, where a panic is a hook dying on a command line;
-`search_query` covers the model's query and the index file in a tree the served
-agent can write; `redact_fallback` drives the per-line fallback through a pack that
-never converges; `shell_read_bash` is differential: every line the recogniser
+`redact_fallback` drives the per-line fallback through a pack that never
+converges; `shell_read_bash` is differential: every line the recogniser
 accepts, `bash -n` accepts too, since a booked read the shell would not run is a
 claim about output never produced. `mcp_request` fuzzes the serve request decoder behind the recall
 skill CLI; renaming it would discard its corpus.
@@ -244,9 +240,9 @@ When Rift captures a repository, **five** git hooks are installed
 `rift`, routed by invoked name; on Windows a shim. A `.rift-managed-link` sidecar
 records the exact target, which is how Rift tells its own link from somebody
 else's hook; a pre-existing hook is chained aside, never overwritten
-([03](03-capture.md)). `rift disable|enable --agent <name>` act on an *agent
-client's* wiring, not the git hooks; there is no "disable the git hooks" verb, and
-the health probe reports a family missing one as unhealthy so the next install repairs it.
+([03](03-capture.md)). There is no "disable the git hooks" verb (`rift disable`
+acts on an agent client's wiring), and a family missing one is unhealthy, so the
+next install repairs it.
 
 **Holding the hooks aside** (a long scripted run) is not a product feature: rename
 them yourself and back, leaving the sidecars alone.
@@ -293,8 +289,6 @@ into the projection they resolve, which can inflate a clean-run streak.
 
 ## 16.13 Machine hazards: macOS, iCloud, shell — and Windows
 
-Not Rift bugs: environment properties that each cost somebody real time.
-
 **An iCloud-synced checkout**: `git add .` hangs on evicted ("dataless") files, so
 stage explicit paths; deleted tracked files come back when the sync replays; large
 trees fault in on enumeration (`brctl download .` before a bundle or gc); tests
@@ -308,7 +302,7 @@ silently matches nothing (use `-P`, or you "prove" an absence that is not there)
 firing as a hook after you edit a migration applies the old SQL under the new
 checksum**; rebuild before schema work.
 
-**Windows**, each with its fix:
+**Windows**:
 
 - `canonicalize` returns `\\?\` paths and Git for Windows refuses them in
   `GIT_DIR`/`--git-dir`/`GIT_INDEX_FILE`: compare paths, never strings, and spawn
@@ -332,8 +326,8 @@ checksum**; rebuild before schema work.
 
 ## 16.14 A savings reading through the real clients
 
-Everything above measures Rift against fixtures; one command measures it against
-the clients (`cargo run -p xtask -- dogfood --help` lists its flags):
+One command measures Rift against the real clients rather than fixtures
+(`--help` lists its flags):
 
 ```bash
 cargo run -p xtask -- dogfood --client all --sessions 10 --keep
@@ -342,7 +336,7 @@ cargo run -p xtask -- dogfood --client all --sessions 10 --keep
 It plays fixed scripted sessions through Claude Code, Codex and Antigravity and prints tokens read, avoided and returned, the honesty figure and its share ([§8.7](08-cost-and-savings.md#87-the-honesty-ladder)) and the decisions by kind.
 
 **It spends real API quota**, so it refuses to run under `CI`, prints the spend
-first, is unreachable from `cargo test`, and no workflow calls it. A missing or out-of-quota client is **UNAVAILABLE** and the run continues.
+first, and no test or workflow reaches it. A missing or out-of-quota client is **UNAVAILABLE** and the run continues.
 
 **It is isolated from your repository.** Each client works in its own clone under
 `~/rift-dogfood/`, which `rift init` gives a family of its own
@@ -358,11 +352,10 @@ deliberately *not* the approvals-and-sandbox bypass, which writes a trust row in
 **`--compare`** plays every session twice in two clones, one with `mode = "off"`
 in `[interception]`, `[search]` and `[doc]`, one as shipped, and tabulates read
 tokens off and on, the **measured** removal, what the levers **booked**, and
-`booked ÷ measured`. The pair exists because the booked share records what Rift
-decided, not what would have been read without it. Treat the ratio as a check on
-the booked figure's size, never a verdict: **the arms are not two runs of one
-experiment**, so a difference carries the levers and the day's choices together,
-and a negative removal is printed as the negative it is. 
+`booked ÷ measured`, because the booked share records what Rift decided, not what
+would have been read without it. The ratio checks the booked figure's size, never
+a verdict: **the arms are not two runs of one experiment**, and a negative
+removal is printed as the negative it is.
 
 ---
 

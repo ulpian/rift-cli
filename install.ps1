@@ -44,14 +44,6 @@ function Fetch-RiftFile([string]$Url, [string]$Destination, [long]$Limit) {
     if ($env:RIFT_DOWNLOAD_BUCKET -and -not $uri.AbsolutePath.StartsWith("/$($env:RIFT_DOWNLOAD_BUCKET)/", [StringComparison]::Ordinal)) {
         throw 'This link is not from the Rift release bucket. Use the link from your invitation.'
     }
-    # CI's stand-in for install.sh's PATH-resolved fixture curl: the preview
-    # bucket served from a local directory through the same capped copy. Never
-    # under a named release bucket, which `rift update` always sets.
-    if ($env:RIFT_INSTALL_FIXTURE_DIR -and -not $env:RIFT_DOWNLOAD_BUCKET -and $uri.AbsolutePath -match '^/rift-install-preview/([A-Za-z0-9][A-Za-z0-9._-]*)$') {
-        $source = [IO.File]::OpenRead((Join-Path $env:RIFT_INSTALL_FIXTURE_DIR $Matches[1]))
-        try { Copy-RiftCapped $source $Destination $Limit } finally { $source.Dispose() }
-        return
-    }
     try {
         $request = [Net.WebRequest]::Create($uri)
         $request.Timeout = 120000

@@ -1,9 +1,9 @@
 # 2. Configuration
 
 Rift is configured by two files you own and commit, plus a few environment
-variables; everything else (identities, queues, projections, caches) lives
-outside your working tree and is rebuildable or minted once. This chapter is the
-reference: each key, why its default is what it is, and where state lives.
+variables; everything else lives outside your working tree and is rebuildable or
+minted once. This chapter is the reference: each key, its default's reason, and
+where state lives.
 
 ---
 
@@ -52,8 +52,8 @@ Project Settings or `rift recall init` (`--no-recall` skips it).
 | `schedule_interval_minutes` | `30` | Interval for `scheduled` (≥ 1). |
 | `idle_sweep_minutes` | `5` | How long a live session may go without a hook before the idle sweep condenses and ends it (≥ 1). |
 
-**Raw transcripts are on unless written off.** An absent `raw_transcripts` is
-`true`, and a written `false` turns retrieval off for every path. A file that
+**Raw transcripts are on unless written off**, and a written `false` turns
+retrieval off for every path. A file that
 writes `raw_transcripts = true` must also write `acknowledge_risk = true`, or it
 is a validation error: a reviewer who sees the option switched back on sees an
 acknowledgement, not a boolean. Switching it off clears the acknowledgement in
@@ -184,8 +184,8 @@ you delete is a key you never wrote.
 | `injection_turn_budget` | `400` | Token ceiling for one turn's injected manifest; `0` disables per-turn injection. |
 
 **The injection budget.** 400 is small on purpose: a manifest is a *pointer at a
-delta*, and the agent pulls detail with the verbs it names, so a budget big
-enough to inline content would spend the context recall exists to save. `0` means off. It covers the **per-turn manifest only**; the
+delta*, and a budget big enough to inline content would spend the context recall
+exists to save. It covers the **per-turn manifest only**; the
 once-per-session pointer is gated on whether recall is enabled
 ([07](07-serving-and-injection.md) has both tiers).
 
@@ -227,9 +227,8 @@ first_contact = "observe"    # this harness only records first reads; others ans
 ```
 
 A per-lever entry is still a request: it never resolves above the family's read
-lever, and the pinned channel caps the result: a family whose reason channel no recorded run has confirmed
-resolves to `observe` however the table is written, and nothing lifts a family
-above what its rows allow — a cap, not a grant. An unknown family name, an unknown lever
+lever, and a family whose reason channel no recorded run has confirmed resolves
+to `observe` however the table is written — a cap, not a grant. An unknown family name, an unknown lever
 in a family's table and an unknown value each fail the load. `enforce` is the default because all three channels are pinned and
 confirmed; an explicit `off` or `observe` stays
 ([10](10-agent-integrations.md)).
@@ -239,18 +238,14 @@ measurements; [07 §7.4](07-serving-and-injection.md#74-tier-three-the-decision-
 gives their reasons. The 1 MiB hash ceiling also bounds a basis snapshot: past it
 nothing is diffed, so keeping the bytes would buy no answer.
 
-`first_contact` answers the first read of a large file once with its bound
-outline ([07 §7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)),
-`decline_family_held` declines once a read another live window holds,
-with a cheaper route ([07 §7.4](07-serving-and-injection.md#a-read-another-window-holds)),
-and `inherit_by_name` declines on lines a subagent was *pointed at*
-([07 §7.3](07-serving-and-injection.md#what-a-subagents-window-inherits)),
-all by default, capped by the family's mode and channel as they cap `mode` itself.
-At `observe`, `narrow` records the held part of a partly held read it would have declined, and
-`recognise_by_output` the lines a shell result showed
-([07 §7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)). No read is
-declined on any of them: each acts only where it is written `enforce`, and
-the family's mode and channel cap it there as they cap `mode` itself. `basis_ttl_days` governs the one durable artifact: a
+The levers are walked through in chapter 7:
+`first_contact` ([§7.4](07-serving-and-injection.md#a-first-read-of-a-large-file)),
+`decline_family_held` ([§7.4](07-serving-and-injection.md#a-read-another-window-holds)),
+`inherit_by_name` ([§7.3](07-serving-and-injection.md#what-a-subagents-window-inherits))
+and `recognise_by_output`
+([§7.4](07-serving-and-injection.md#what-a-shell-result-showed-the-window)). A
+lever at `observe` declines no read; at `enforce` the family's mode and channel
+cap it as they cap `mode` itself. `basis_ttl_days` governs the one durable artifact: a
 revision edited after reading has no blob, so the delta frame needs its
 **redacted** bytes kept; thirty days matches converted documents, since losing
 one costs a delta frame, never an answer.
@@ -273,9 +268,7 @@ elsewhere. The numbers bound how wrong each can be: **40** is a count the
 client's own documentation carries (the follow-up for the rest runs unbounded),
 **8** paths stand in for a listing the client cuts at a hundred, and **160
 tokens** is a ceiling: an answer costing more than the listing it replaces is
-not made, so the weakest case is *no lever*, never a loss. A search
-*inside* file contents is never answered from an index of names, which does not
-know the answer.
+not made, so the weakest case is *no lever*, never a loss.
 
 ### Documents: `[doc]`
 
@@ -290,9 +283,8 @@ know the answer.
 | `convert_budget_ms` | `250` | Gate-path deadline; past it the read runs and the worker converts. |
 | `ttl_days` | `30` | How long an unused sidecar is kept. |
 
-`channel` exists because an amendment can be lost (the last hook to answer a call
-wins): Rift verifies it and falls back to `redirect` for that window, and the key
-makes that primary.
+An amendment can be lost (the last hook to answer a call wins), so Rift verifies
+it and falls back to `redirect` for that window; `channel` makes that primary.
 
 ### Fail-closed
 
@@ -314,9 +306,8 @@ policy (yours) and run markers (Rift's)
 
 **"Initialized" is a fact about this machine, not about `.rift/`.** A repository
 is set up where its family's capture projection exists under the cache root.
-`.rift/config.toml` travels with every clone, so treating it as proof would make
-a fresh clone look set up everywhere and never offer the setup that wires that
-machine's agents; the CLI refuses a config-only clone and the dashboard shows
+`.rift/config.toml` travels with every clone, so treating it as proof would never
+offer a fresh clone the setup that wires that machine's agents; the CLI refuses a config-only clone and the dashboard shows
 `◌ not set up here` ([11-canopy-tour.md](11-canopy-tour.md)). The dashboard also
 requires the family's **binary of record** (`binary.json`) to name a binary that
 is still there, since an agent hook creates the projection on first contact.
@@ -345,22 +336,19 @@ Hook gates ask only for the projection: a running hook is its own proof.
 | `~/.cache/rift/install-salt`, `machine-id.json` | Per-install salt (`0600`, when the keychain is unused) and derived machine id. An older binary wrote both at the cache root itself; the first read moves them here unchanged. | Salt: changes derived identity. Id: re-derived. |
 | `~/.cache/rift/<family-id>/hook-timings.bin` | The family's last 4,096 agent-hook, `prepare-commit-msg` and `post-commit` runs on this machine: verb, total time and the three slowest phases, fixed 128-byte ring records. `rift doctor --report` prints p50/p95/max per verb. Never paths or content. | Yes — the percentiles start over. |
 | `~/.config/rift/projects.toml`, `canopy.toml` | Repository list; preferences (§2.9). | Yes — re-register / defaults. |
-| `~/.config/rift/keys/<recall-id>.key` | The family's 32-byte column key (`0600` in a `0700` directory): encrypts the summary and outline bodies in `recall.db`. Kept under the **config** root on purpose, so a copy, backup or sync of the cache alone is unreadable. | Yes, but encrypted summaries become misses until rebuilt; a fresh key is minted on next use. |
+| `~/.config/rift/keys/<recall-id>.key` | The family's 32-byte column key (`0600` in a `0700` directory): encrypts the summary and outline bodies in `recall.db` and the outline cache. Kept under the **config** root on purpose, so a copy, backup or sync of the cache alone is unreadable. | Yes, but encrypted summaries become misses until rebuilt; a fresh key is minted on next use. `rift doctor` reports a malformed, unreadable or over-shared one. |
 
-**The push queue is family state; the capture queues are not.** A queue entry
-names a *reference*, and references live in the shared object store; kept per
-checkout, a linked worktree's push shipped nothing and removing it deleted its
-queue. The capture and agent queues stay per checkout because they are one
-checkout's private progress: a session in A must never be credited to a commit
-in B.
+**The push queue is family state; the capture queues are not.** A push entry
+names a *reference* in the shared object store (kept per checkout, a linked
+worktree's push shipped nothing). The capture and agent queues are one checkout's
+private progress: a session in A must never be credited to a commit in B.
 
 **The family identity is minted once and then only read.** The first process
 that can *prove* which checkout is main writes the manifest (a hard link, so a
-concurrent minter loses cleanly); afterwards identity is read, never re-derived
-from a path, so moving a repository is survivable. Repair is one explicit command
-that appends its reason to the history; an unparseable manifest is a `rift
-doctor` finding with hooks doing nothing durable, since Rift records nothing
-rather than guess which repository this is.
+concurrent minter loses cleanly); identity is never re-derived from a path, so
+moving a repository is survivable. Repair is one explicit command that appends
+its reason to the history; an unparseable manifest is a `rift doctor` finding and
+hooks record nothing rather than guess which repository this is.
 
 ---
 

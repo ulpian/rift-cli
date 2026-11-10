@@ -2,8 +2,9 @@
 //! encrypted columns.
 //!
 //! Every production path in this binary that writes or reads a sensitive
-//! column (today `digest_blob.bytes`, the bound summary and outline bodies)
-//! takes its cipher from here; the library crates take a `&dyn ColumnCipher`
+//! column (today `digest_blob.bytes`, the bound summary and outline bodies,
+//! and the read gate's outline cache files under the git common dir) takes
+//! its cipher from here; the library crates take a `&dyn ColumnCipher`
 //! from their caller and never construct one. `xtask ci-meta` holds the
 //! no-key `PlainCipher` out of this crate's and the recall crates' production
 //! code, so a new call site cannot quietly write plaintext.
@@ -56,6 +57,32 @@ pub(crate) fn column_cipher_at(root: &Path) -> ColumnKey {
         Some(family) => column_cipher(&family),
         None => ColumnKey::Unresolved,
     }
+}
+
+/// The cipher for the family of the member whose git dir is `git_dir` — the
+/// read gate's view, which holds a git dir rather than a checkout.
+pub(crate) fn column_cipher_of_git_dir(git_dir: &Path) -> ColumnKey {
+    match rift_shadow::hooks::session_cache::work_tree_of(git_dir) {
+        Some(work_tree) => column_cipher_at(&work_tree),
+        None => ColumnKey::Unresolved,
+    }
+}
+
+/// The file `family`'s key is (or would be) kept in, or `None` when the
+/// environment names no config root, so there is nowhere to keep one.
+pub(crate) fn key_file_of(family: &Family) -> Option<PathBuf> {
+    config_root_named().then(|| keys().key_path(&family.recall_id))
+}
+
+#[cfg(not(test))]
+fn config_root_named() -> bool {
+    rift_registry::configured_config_root(|key| std::env::var(key).ok()).is_some()
+}
+
+/// The test build's key root is always a temp dir, so it is always named.
+#[cfg(test)]
+fn config_root_named() -> bool {
+    true
 }
 
 impl ColumnCipher for ColumnKey {

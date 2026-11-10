@@ -424,6 +424,8 @@ fn gui_sparse_path_still_runs_installed_hook_via_absolute_path() {
         .current_dir(tmp.path())
         .env("PATH", "")
         .env("GIT_DIR", &gd)
+        .env("RIFT_CACHE_DIR", &cache)
+        .env("RIFT_NO_KEYCHAIN", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -445,7 +447,16 @@ fn gui_sparse_path_still_runs_installed_hook_via_absolute_path() {
 /// the test process, before the child's `PATH` is scrubbed — so the property
 /// under test (the shim reaches rift by absolute path with an empty `PATH`)
 /// is the same on both platforms.
+///
+/// The entry runs the binary without [`common::rift_cmd`], so the config root
+/// is pinned here as the chokepoint pins it.
 fn hook_command(hook: &Path) -> Command {
+    let mut cmd = shim_command(hook);
+    cmd.env("RIFT_CONFIG_DIR", common::test_config_root());
+    cmd
+}
+
+fn shim_command(hook: &Path) -> Command {
     #[cfg(windows)]
     {
         let mut cmd = Command::new(bundled_sh());

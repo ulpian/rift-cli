@@ -13,7 +13,8 @@
 //! transcripts the redaction gate sealed by its per-line fallback,
 //! `turn_seals` the sessions whose last turn-end seal fell back or lags,
 //! `set_asides` the recall
-//! projections a rebuild set aside, `prices` the observed models the price
+//! projections a rebuild set aside, `encryption` the column key and the
+//! summaries still stored in plaintext, `prices` the observed models the price
 //! catalog cannot price. This file assembles the report
 //! in the order the legs print.
 
@@ -21,6 +22,7 @@ mod capture;
 mod checkouts;
 mod completeness;
 mod compose;
+mod encryption;
 mod family;
 mod git_hooks;
 pub(crate) mod health;
@@ -162,6 +164,11 @@ fn cmd_doctor_with_mode(start: &Path, fix: bool, strict_read_only: bool) -> Outc
     report.leg("session_gaps", session_gaps::doctor_session_gaps(root));
     report.leg("read_stages", crate::read_stages::doctor_leg(root));
     report.leg("recall_set_asides", doctor_recall_set_asides(root));
+    report.leg("column_key", encryption::doctor_column_key(root));
+    report.leg(
+        "plaintext_summaries",
+        encryption::doctor_plaintext_summaries(root),
+    );
     report.leg("sibling_tool_hooks", doctor_sibling_tool_hooks(root));
     // Every leg has read the said-once markers; only a repair run clears them.
     if repair {

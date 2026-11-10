@@ -16,16 +16,33 @@
 //! or a word from a fixed set, and the name is the outline's own (an
 //! identifier, or a heading already cut to the frame alphabet). The renderer
 //! still judges every name before a frame quotes it.
+//!
+//! **Sealed at rest.** A file holds the rendered text sealed under the
+//! family's column key (`column_key`), bound to its own file name, so a copy
+//! or backup of `.git` carries no definition names without the config
+//! directory, and a file moved under another revision's name does not open.
+//! The cost on a hook is one key-file read per process, paid only on a hit.
+//! A file that does not open — sealed under a lost key, or a plaintext one an
+//! older binary wrote — is a miss, and the next bind replaces it.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use rift_recall_serve::DefinitionKind;
+use rift_store::ColumnCipher;
 
 use crate::hooks::family_state::family_state_dir;
 
 /// The cache's subdirectory of the family's run-state directory.
 const OUTLINE_DIR: &str = "outline";
+
+/// The slot a cache file's text is sealed for; the row is the file's name.
+const SEALED_TABLE: &str = "outline_cache";
+const SEALED_COLUMN: &str = "text";
+
+/// What sealing adds to the text: a frame byte, the nonce and the tag, with
+/// room to spare. A file past the text ceiling plus this is not read.
+const SEAL_OVERHEAD: usize = 64;
 
 /// The first line of every cache file: the grammar and its version. A file
 /// that opens any other way is a miss, never a guess.
@@ -93,11 +110,12 @@ fn outline_cache_name(content_sha256: &str) -> String {
 }
 
 /// The cached outline of `rel_path` at `hash`, or `None` — a miss — when no
-/// file holds one, the file is past its ceiling, or a line of it is not in
-/// the grammar.
+/// file holds one, the file is past its ceiling, it does not open under the
+/// family's key, or a line of it is not in the grammar.
 ///
 /// The decision path's one read for a first contact: the common dir from
-/// the git dir's own pointer file, then one bounded file read. No store, no
+/// the git dir's own pointer file, then one bounded file read, then the key
+/// (read once per process, and only once a file is found). No store, no
 /// tokenizer, no walk of the work tree.
 pub(in crate::hooks) fn load_outline_cache(
     git_dir: &Path,
@@ -105,37 +123,68 @@ pub(in crate::hooks) fn load_outline_cache(
     hash: rift_core::Sha256Id,
 ) -> Option<CachedOutline> {
     let common_dir = rift_git::read_common_dir(git_dir);
-    let file = outline_cache_dir(&common_dir).join(outline_cache_name(&hash.to_hex()));
+    let name = outline_cache_name(&hash.to_hex());
+    let file = outline_cache_dir(&common_dir).join(&name);
     let meta = std::fs::symlink_metadata(&file).ok()?;
-    if !meta.is_file() || meta.len() > MAX_OUTLINE_CACHE_BYTES as u64 {
+    if !meta.is_file() || meta.len() > (MAX_OUTLINE_CACHE_BYTES + SEAL_OVERHEAD) as u64 {
         return None;
     }
-    let text = std::fs::read_to_string(&file).ok()?;
+    let stored = std::fs::read(&file).ok()?;
+    let cipher = crate::column_key::column_cipher_of_git_dir(git_dir);
+    let text = open_sealed(&cipher, &name, &stored)?;
     parse_outline_cache(&text, rift_recall_serve::is_markdown_path(rel_path))
 }
 
+/// The text sealed in a cache file named `name`, or `None` when it does not
+/// open: another key, another name, a torn file, or plaintext.
+pub(in crate::hooks) fn open_sealed(
+    cipher: &dyn ColumnCipher,
+    name: &str,
+    stored: &[u8],
+) -> Option<String> {
+    // A plain-framed value would pass `DekCipher` through; no writer of this
+    // cache ever frames one, so it is refused rather than trusted.
+    if rift_store::is_plain_framed(stored) {
+        return None;
+    }
+    let plain = cipher
+        .decrypt(SEALED_TABLE, SEALED_COLUMN, name, stored)
+        .ok()?;
+    String::from_utf8(plain).ok()
+}
+
 /// Write `outline` as the cached outline of the revision `content_sha256`,
-/// unless a file already holds it. Says whether a file was written.
+/// sealed under `cipher`, unless a file that opens already holds it. Says
+/// whether a file was written.
 ///
 /// The one writer, called wherever an outline is bound: the detached
 /// worker's job after a read, and the catch-up at condense. Written to a
-/// temporary name and renamed, so a reader finds a whole file or none.
+/// temporary name and renamed, so a reader finds a whole file or none; a
+/// file there that does not open (a plaintext one from before sealing, or
+/// one sealed under a lost key) is replaced the same way.
 ///
 /// # Errors
-/// An I/O failure creating the directory or writing the file.
+/// An I/O failure creating the directory or writing the file, or a key that
+/// cannot seal — in which case nothing is written, never plaintext instead.
 pub(in crate::hooks) fn write_outline_cache(
     common_dir: &Path,
     content_sha256: &str,
     outline: &CachedOutline,
+    cipher: &dyn ColumnCipher,
 ) -> std::io::Result<bool> {
     let dir = outline_cache_dir(common_dir);
-    let file = dir.join(outline_cache_name(content_sha256));
-    if file.is_file() {
+    let name = outline_cache_name(content_sha256);
+    let file = dir.join(&name);
+    if std::fs::read(&file).is_ok_and(|stored| open_sealed(cipher, &name, &stored).is_some()) {
         return Ok(false);
     }
+    let text = render_outline_cache(outline);
+    let sealed = cipher
+        .encrypt(SEALED_TABLE, SEALED_COLUMN, &name, text.as_bytes())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     std::fs::create_dir_all(&dir)?;
     let staged = dir.join(format!(".{content_sha256}.{}.tmp", std::process::id()));
-    std::fs::write(&staged, render_outline_cache(outline))?;
+    std::fs::write(&staged, sealed)?;
     std::fs::rename(&staged, &file)?;
     Ok(true)
 }
@@ -330,18 +379,32 @@ mod tests {
         }
     }
 
+    /// A cipher over a key directory of the test's own.
+    fn cipher_in(dir: &Path) -> rift_store::DekCipher<rift_store::FileKeyStore> {
+        rift_store::DekCipher::new(
+            rift_store::FileKeyStore::new(dir.join("keys")),
+            rift_core::RepoId::new("fam").unwrap(),
+        )
+    }
+
     /// ★ One file per revision, named by its content hash and the outline's
-    /// versions, in the family's common directory, written once.
+    /// versions, in the family's common directory, written once, and sealed:
+    /// no definition name is on disk, and the text opens back exactly.
     #[test]
     fn a_bound_outline_is_cached_once_under_its_content_hash() {
         let tmp = tempfile::tempdir().unwrap();
         let common_dir = tmp.path();
+        let cipher = cipher_in(tmp.path());
         let sha = rift_agent::content_sha256(b"the bytes").to_hex();
-        assert!(write_outline_cache(common_dir, &sha, &outline()).unwrap());
-        assert!(!write_outline_cache(common_dir, &sha, &outline()).unwrap());
-        let file = outline_cache_dir(common_dir).join(format!("{sha}-e3p1r1.outline"));
+        assert!(write_outline_cache(common_dir, &sha, &outline(), &cipher).unwrap());
+        assert!(!write_outline_cache(common_dir, &sha, &outline(), &cipher).unwrap());
+        let name = format!("{sha}-e3p1r1.outline");
+        let stored = std::fs::read(outline_cache_dir(common_dir).join(&name)).unwrap();
+        for plain in [&b"rift-outline"[..], b"role_of", b"Display"] {
+            assert!(!stored.windows(plain.len()).any(|w| w == plain));
+        }
         assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
+            open_sealed(&cipher, &name, &stored).unwrap(),
             "rift-outline 1\nclass code\nshape 637 23449 3 5704\n\
              def impl 32 58 222 fmt::Display for Thing\ndef fn 129 141 - role_of\n"
         );
@@ -350,6 +413,36 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 1, "no staged file is left behind: {names:?}");
+    }
+
+    /// A plaintext file an older binary left is a miss, and the next bind
+    /// replaces it with a sealed one; a sealed file under another revision's
+    /// name, or under another key, does not open.
+    #[test]
+    fn a_file_that_does_not_open_is_a_miss_and_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let common_dir = tmp.path();
+        let cipher = cipher_in(tmp.path());
+        let sha = "a".repeat(64);
+        let name = outline_cache_name(&sha);
+        let dir = outline_cache_dir(common_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = render_outline_cache(&outline());
+        std::fs::write(dir.join(&name), &plain).unwrap();
+        assert_eq!(open_sealed(&cipher, &name, plain.as_bytes()), None);
+        let mut framed = vec![0u8];
+        framed.extend_from_slice(plain.as_bytes());
+        assert_eq!(open_sealed(&cipher, &name, &framed), None);
+
+        assert!(write_outline_cache(common_dir, &sha, &outline(), &cipher).unwrap());
+        let stored = std::fs::read(dir.join(&name)).unwrap();
+        assert!(open_sealed(&cipher, &name, &stored).is_some());
+        assert_eq!(
+            open_sealed(&cipher, &outline_cache_name(&"b".repeat(64)), &stored),
+            None
+        );
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(open_sealed(&cipher_in(other.path()), &name, &stored), None);
     }
 
     /// A Markdown outline is never read for a code path, nor the reverse.
@@ -383,10 +476,11 @@ mod tests {
     #[test]
     fn a_cached_outline_reads_back_exactly_under_its_content_hash() {
         let tmp = tempfile::tempdir().unwrap();
+        rift_git::test_support::fake_repo(tmp.path()).unwrap();
         let git_dir = tmp.path().join(".git");
-        std::fs::create_dir_all(&git_dir).unwrap();
+        let cipher = crate::column_key::column_cipher_at(tmp.path());
         let hash = rift_agent::content_sha256(b"the bytes");
-        write_outline_cache(&git_dir, &hash.to_hex(), &outline()).unwrap();
+        write_outline_cache(&git_dir, &hash.to_hex(), &outline(), &cipher).unwrap();
         assert_eq!(
             load_outline_cache(&git_dir, "src/a.rs", hash),
             Some(outline())
@@ -405,8 +499,9 @@ mod tests {
         let common_dir = tmp.path();
         let old_sha = "a".repeat(64);
         let fresh_sha = "b".repeat(64);
-        write_outline_cache(common_dir, &old_sha, &outline()).unwrap();
-        write_outline_cache(common_dir, &fresh_sha, &outline()).unwrap();
+        let cipher = cipher_in(&tmp.path().join("key-root"));
+        write_outline_cache(common_dir, &old_sha, &outline(), &cipher).unwrap();
+        write_outline_cache(common_dir, &fresh_sha, &outline(), &cipher).unwrap();
         let dir = outline_cache_dir(common_dir);
         let staged = dir.join(format!(".{}.123.tmp", "c".repeat(64)));
         let stranger = dir.join("notes.txt");

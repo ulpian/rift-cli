@@ -45,7 +45,10 @@ pub(crate) fn cmd_doctor_report(start: &Path) -> Outcome {
     let text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
     let timings = report
         .get("hook_timings")
-        .map_or_else(String::new, timing_lines);
+        .map_or_else(String::new, timing_lines)
+        + &report
+            .get("doctor")
+            .map_or_else(String::new, encryption_line);
     Outcome::ok(
         format!(
             "Rift findings report. It holds counts, states and versions only: every \
@@ -75,6 +78,19 @@ fn timing_lines(summary: &Value) -> String {
         ));
     }
     out
+}
+
+/// The column key's state and the plaintext summary count, from the
+/// scrubbed doctor object: tags and numbers only, never the key's path.
+fn encryption_line(doctor: &Value) -> String {
+    let Some(state) = doctor.pointer("/column_key/state").and_then(Value::as_str) else {
+        return String::new();
+    };
+    let plaintext = doctor
+        .pointer("/plaintext_summaries/plaintext_rows")
+        .and_then(Value::as_i64)
+        .map_or_else(String::new, |n| format!(", {n} summaries in plaintext"));
+    format!("column key: {state}{plaintext}\n")
 }
 
 /// p50/p95/max per hook verb and the share over 100 ms, from the family's
@@ -180,6 +196,19 @@ mod tests {
             );
         }
         assert_eq!(scrubbed["path"]["withheld_chars"], 38);
+    }
+
+    #[test]
+    fn the_encryption_line_carries_the_key_state_and_count_and_no_path() {
+        let doctor = scrub(&serde_json::json!({
+            "column_key": { "surveyed": true, "state": "open_to_others", "mode": 420 },
+            "plaintext_summaries": { "surveyed": true, "plaintext_rows": 3 },
+        }));
+        assert_eq!(
+            encryption_line(&doctor),
+            "column key: open_to_others, 3 summaries in plaintext\n"
+        );
+        assert_eq!(encryption_line(&serde_json::json!({})), "");
     }
 
     #[test]

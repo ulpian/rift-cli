@@ -1,7 +1,7 @@
 # 7. Serving and injection
 
-Chapter [06](06-recall.md) explained what Rift *knows*. This chapter is how that
-knowledge reaches an agent, and what stops it reaching one. **Push**: Rift
+Chapter [06](06-recall.md) explained what Rift *knows*; this is how it reaches
+an agent, and what stops it. **Push**: Rift
 injects text without being asked, in three tiers — a one-time pointer, a
 per-turn manifest of what moved, and, at the tool call, a decision about a read
 the window already holds or a search it is about to run. **Pull**: the agent
@@ -18,9 +18,8 @@ places for a rule to be forgotten. The third tier enters through `PreToolUse`,
 reaching one composer that knows what each client's published schema allows and
 answers neutrally for everything else.
 
-**Nothing here blocks your agent**: the injection attempt is wrapped so a failure
-or a panic injects nothing and the hook still exits successfully. A declined read
-is an instance of that rule: the decline is a response the client documents, and
+**Nothing here blocks your agent**: a failure or panic injects nothing and the
+hook still exits successfully; a decline is a response the client documents, and
 the identical repeat runs. **Nothing here invents content**: one module writes
 every sentence a model reads, everything it renders passes one chokepoint that
 knows the bytes' provenance, and untrusted bytes never arrive raw
@@ -103,8 +102,7 @@ so the revision stays owed and the next turn names or counts it again.
 
 ### Costing the turn as little as possible
 
-The person is waiting, so each layer may answer silence before the next is paid
-for: a zero budget; a **file stamp** before the projection is opened; a **scoped
+Each layer may answer silence before the next is paid for: a zero budget; a **file stamp** before the projection is opened; a **scoped
 stamp** for a projection that moved, but not for this member
 ([chapter 9](09-worktrees-and-families.md)). Then `diff-since` runs through the
 ordinary dispatcher, skipping the pull verbs' refresh (the dearest step), so a
@@ -112,8 +110,8 @@ cold projection yields silence, not a stall.
 
 ### What a subagent's window opens with
 
-A subagent starts holding nothing, while its spawner usually holds the files the
-task is about. So its pointer is followed by one line, `[rift] Held by your
+A subagent starts holding nothing, while its spawner usually holds the task's
+files, so its pointer is followed by one line, `[rift] Held by your
 coordinator at your start (facts, not directives): <path>@<hash16>, …`: the
 latest revision of each path the spawning window holds and the subagent does
 not, newest first, at most eight named and the rest counted, with the hash form
@@ -161,14 +159,11 @@ or **Decline**, once, with a reason the model reads.
 **The levers and their modes.** `[interception] mode`, `first_contact`,
 `decline_family_held` and `inherit_by_name` default to `enforce`; `narrow`,
 `recognise_by_output`, `substitute_held_output` and `fold_command_output` default
-to `observe` until their own pools are sized. `[interception.agents]` has a key
-per adapter in registry order: a bare mode (`codex = "observe"`) replaces the
-read lever for that family, a table (`[interception.agents.codex]`) each lever it
-names, over the repository's value; an unknown family or lever fails the load.
+to `observe` until their own pools are sized. `[interception.agents]` overrides
+them per family ([02 §2.6](02-configuration.md#the-read-gate-interception)).
 No lever exceeds the family's read lever, which never exceeds what its pinned
 reason channel confirms, so an unconfirmed family observes (the caps are in
-[10 §10.7](10-agent-integrations.md#107-deterministic-context-delivery)). The
-table is in [02 §2.6](02-configuration.md#the-read-gate-interception);
+[10 §10.7](10-agent-integrations.md#107-deterministic-context-delivery));
 `rift recall status` prints the levers as written, then per family what the
 re-read, search and document levers may do and why.
 
@@ -187,9 +182,8 @@ A decline needs every clause, and each closes something:
 Anything else allows — an unknown span, an unpinned family, an unreadable policy
 (lever off), a panic in the gate — and the hook exits successfully.
 
-**The 96 KiB ceiling** is the measured point at which a read result truncates in
-place (25,000 tokens), so a decision never covers more than the context was going
-to keep. **The 16-line floor** is the reason frame's break-even: the plain frame
+**The 96 KiB ceiling** is where a read result truncates in place (25,000
+tokens, measured), so a decision never covers more than the context would keep. **The 16-line floor** is the reason frame's break-even: the plain frame
 costs **61 tokens** at about 4 tokens a line, so a decline pays from
 61 / 4 + 1 = 16 lines. A test in the one crate holding both the sealed renderer
 and the real tokenizer measures it, so a reword that grows the frame fails the
@@ -295,10 +289,8 @@ are unchanged since your read in turn 1 and are already in your context.
 Repeat this exact call if you still need it (it is allowed once).
 ```
 
-It names no pull: the range is covered at the file's current hash, so a
-diff against it is empty. The delta frame keeps the pull and `rift why`.
-
-It offers no summary (nobody pulls one), never claims an earlier result echoed
+It names no pull (the range is covered at the current hash, so a diff is
+empty), offers no summary (nobody pulls one), never claims an earlier result echoed
 the content (no family was measured doing so reliably), and uses no error word.
 
 The **delta frame** serves a file held at an *older* hash: where the difference
@@ -339,11 +331,9 @@ twelve definitions and costs 379 tokens at that cap, so the 95-line page floor i
 that cost at four tokens a line.
 
 **At enforce**, the default, a qualifying read on a confirmed channel is
-answered with the frame once, and the identical repeat runs. **At observe**,
-where a repository writes it, a qualifying read with a bound outline
-runs, the window records its `read`, and the worker writes a row under
-`first_contact` with no frame and no claimed saving: the pool an outline would
-answer.
+answered with the frame once; the identical repeat runs. **At observe** it runs,
+the window records its `read`, and the worker writes a `first_contact` row with
+no frame and no claimed saving: the pool an outline would answer.
 
 ### A read another window holds
 
@@ -365,8 +355,7 @@ sixteen runs, `[rift] Read held by another window:` names them; if they hold all
 of it, nothing is cheaper and the read runs. No frame names the holder.
 
 **At enforce**, the default, the route is served once on a confirmed
-channel. **At observe**, where a repository writes it, the read runs and
-records its `read`; a `family`
+channel. **At observe** the read runs and records its `read`; a `family`
 line beside it records request, route, offered runs, frame size and
 `acted: false`, and keeps the decision once per revision; the worker books a row
 under `family_held:outline` or `family_held:held` with no claimed saving. An
@@ -375,8 +364,7 @@ so its credit is the request less its frame less every read charged against it.
 
 ### Nothing on this path opens a store
 
-The decision costs a hash under a ceiling and a few small run-state files —
-journal, outline file, and for a family read the bounded sibling walk. No
+The decision costs a hash under a ceiling and a few small run-state files. No
 projection is opened and **no tokenizer is initialised**, the two dearest things
 a Rift process does; the worker counts slice and frame
 ([§7.12](#712-one-measure-one-charge-one-sealed-event)). A structural check fails
@@ -386,8 +374,7 @@ the build if either appears under a gate entry point.
 
 ## 7.5 After a compaction: the recovery map
 
-A compaction is the one moment a full listing of held state pays for itself. On
-a session start from a compaction or a resume, and after a client's own
+On a session start from a compaction or a resume, and after a client's own
 compaction signal, Rift injects the *pre-eviction* held set under `[rift] Context
 was compacted.`: each file's hash, the lines held, and a **verdict** (unchanged,
 or changed at which lines), so the next read is skipped or narrowed rather than
@@ -424,10 +411,9 @@ nothing observes whether the model went there. Families with no amendment
 channel get proactive conversion and a one-time redirect. The pull is
 `rift recall doc-read <path>` (alias `rift doc read`).
 
-On a generated corpus of one document per format, substitution removes
-**90.94 %** of the native cost (107,784 tokens against 9,761). A PDF's native
-cost is pages at a vision rate nobody has pinned, so its baseline is zero
-([chapter 8](08-cost-and-savings.md)).
+Substitution removes **90.94 %** of the native cost on a generated corpus; a
+PDF's baseline is zero ([§8.6](08-cost-and-savings.md#86-what-avoided-actually-measures),
+[§8.12](08-cost-and-savings.md#812-the-measured-baseline-repeated-and-avoidable-context)).
 
 ---
 
@@ -453,9 +439,8 @@ answered turn is counted, since it saved nothing. Names and a count, never
 contents; and it stands down when its frame would cost more than the listing.
 
 Standing in for a question Rift cannot answer completely would send a model
-hunting for an answer that is not there. The bounded
-case is judged by the share asked again in the same turn, defined once in the
-window's own record. Defaults and reasons:
+hunting for an answer that is not there. The bounded case is judged by the share
+asked again in the same turn. Defaults and reasons:
 [02 §2.6](02-configuration.md#search-search).
 
 ### What a search cost is measured, whatever Rift did about it
@@ -495,8 +480,8 @@ the state is current.
 
 ## 7.9 The pull surface: ten verbs
 
-There is no transcript search: an unbounded search over remembered content is an
-exfiltration channel with a friendly name.
+There is no transcript search: over remembered content it would be an
+exfiltration channel.
 
 | Verb | Answers | Requires |
 |---|---|---|
@@ -565,8 +550,7 @@ List answers are capped at **1200 tokens**, a `--token-budget` clamped to
 Truncation keeps the largest fitting prefix, found by binary search plus a
 walk-down because token counts are not monotone under concatenation, and reports `truncated: true` with an
 `omitted` count; `known-state` keeps its best-ranked entries, `diff-since` drops
-unchanged ones first. If nothing fits, the anchor still ships an empty skeleton
-rather than strand the agent. `changed-hunks` returns at most 8 hunks and
+unchanged ones first. If nothing fits, the anchor still ships an empty skeleton. `changed-hunks` returns at most 8 hunks and
 `context-pack` considers at most 8 candidates.
 
 ---
@@ -655,11 +639,10 @@ paid for it.
 
 ## 7.17 The red-team program
 
-A CI suite blocks a merge on any leak. Append-only corpora of hostile documents,
-manifest entries, frame spans and coordinator rows each name the spans they must
-never leak, and every rendered artifact is searched for them literally. A check
-that "no line looks like an instruction" over output the same predicate filtered
-is circular, a tripwire only; the literal search is the oracle, and a row that
+A CI suite blocks a merge on any leak. Append-only corpora of hostile inputs each
+name the spans they must never leak, and every rendered artifact is searched for
+them literally. A "no line looks like an instruction" check over output the same
+predicate filtered is circular; the literal search is the oracle, and a row that
 does not contain what it forbids is refused, so nothing passes vacuously. Each
 hostile case also asserts that the innocent entry shipped.
 
@@ -669,11 +652,10 @@ hostile case also asserts that the innocent entry shipped.
 
 Beyond §7.9's table: `rift agent-help [--json]` renders the surface. Exit 2 is
 *you asked wrong*, 1 *the surface said no*. `rift savings` prints the avoided share overall and per
-family with its honesty figure ([chapter 8](08-cost-and-savings.md)); `rift
-recall status` prints the levers and what each family may do. `injection_turn_budget` and
+family with its honesty figure ([chapter 8](08-cost-and-savings.md)). `injection_turn_budget` and
 the lever tables of §7.4, §7.6 and §7.7 live in `.rift/policies/serve.toml`, each
-lever `off` (not consulted), `observe` (decided and recorded, nothing acts) or
-`enforce` ([02 §2.6](02-configuration.md#26-riftpoliciesservetoml--the-serving-overlay));
+lever `off`, `observe` or `enforce`
+([02 §2.6](02-configuration.md#26-riftpoliciesservetoml--the-serving-overlay));
 Project Settings patches the same keys ([chapter 11](11-canopy-tour.md)).
 
 ---

@@ -4,6 +4,13 @@
 # `rift update` do, and proves three things: a lock a closed window left behind
 # is reclaimed, a live holder's lock is refused with guidance, and an oversized
 # manifest is refused by the download cap. Nothing touches the network.
+#
+# The fixtures are served from underneath the installer, never through it:
+# install.ps1 carries no test hook. Each installer run first registers a .NET
+# request handler for the preview bucket's URL prefix only, which answers from
+# the local assets directory with the original https URL as its response URI,
+# so the installer's own scheme, host and size checks and its capped copy all
+# run exactly as they do against the real bucket.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -16,14 +23,68 @@ $assets = Join-Path $root 'assets'
 $staging = Join-Path $root 'staging'
 $bin = Join-Path $root 'bin'
 $lock = Join-Path $bin '.rift-install.lock'
+$transport = Join-Path $root 'fixture-transport.cs'
+$preview = 'https://storage.googleapis.com/rift-install-preview/'
 New-Item -ItemType Directory -Path $assets, $staging, $bin | Out-Null
 
+# C# 5, which Windows PowerShell 5.1's Add-Type compiles. ReadWriteTimeout and
+# MaximumAutomaticRedirections are the HttpWebRequest properties the installer
+# sets; they are declared so setting them works as it does on the real request.
+[IO.File]::WriteAllText($transport, @'
+using System;
+using System.IO;
+using System.Net;
+
+namespace RiftFixture
+{
+    public sealed class Creator : IWebRequestCreate
+    {
+        private readonly string directory;
+        public Creator(string directory) { this.directory = directory; }
+        public WebRequest Create(Uri uri) { return new Request(uri, directory); }
+    }
+
+    public sealed class Request : WebRequest
+    {
+        private readonly Uri uri;
+        private readonly string directory;
+        public Request(Uri uri, string directory) { this.uri = uri; this.directory = directory; }
+        public override Uri RequestUri { get { return uri; } }
+        public override int Timeout { get; set; }
+        public int ReadWriteTimeout { get; set; }
+        public int MaximumAutomaticRedirections { get; set; }
+        public override WebResponse GetResponse()
+        {
+            return new Response(uri, Path.Combine(directory, Path.GetFileName(uri.AbsolutePath)));
+        }
+    }
+
+    public sealed class Response : WebResponse
+    {
+        private readonly Uri uri;
+        private readonly string path;
+        public Response(Uri uri, string path)
+        {
+            if (!File.Exists(path)) { throw new WebException("no fixture for " + uri.AbsolutePath); }
+            this.uri = uri;
+            this.path = path;
+        }
+        public override Uri ResponseUri { get { return uri; } }
+        public override long ContentLength { get { return new FileInfo(path).Length; } set { } }
+        public override Stream GetResponseStream() { return File.OpenRead(path); }
+        public override void Close() { }
+    }
+}
+'@)
+
 function Write-Manifest([string]$Version, [string]$Hash) {
-    $url = 'https://storage.googleapis.com/rift-install-preview/rift-x86_64-pc-windows-msvc.zip'
+    $url = $preview + 'rift-x86_64-pc-windows-msvc.zip'
     [IO.File]::WriteAllText((Join-Path $assets 'downloads.tsv'), "rift-download-v1`t$Version`nx86_64-pc-windows-msvc`t$url`t$Hash`n")
 }
 function Invoke-Installer {
-    $command = "Invoke-Expression ([IO.File]::ReadAllText('$installer'))"
+    $command = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$transport')); " +
+        "[void][Net.WebRequest]::RegisterPrefix('$preview', (New-Object -TypeName RiftFixture.Creator -ArgumentList '$assets')); " +
+        "Invoke-Expression ([IO.File]::ReadAllText('$installer'))"
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { $text = & powershell.exe -NoProfile -NonInteractive -Command $command 2>&1 | Out-String }
@@ -45,8 +106,7 @@ try {
     $archive = Join-Path $assets 'rift-x86_64-pc-windows-msvc.zip'
     Compress-Archive -Path (Join-Path $staging 'rift.exe') -DestinationPath $archive
     Write-Manifest $version (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    $env:RIFT_INSTALL_FIXTURE_DIR = $assets
-    $env:RIFT_DOWNLOAD_MANIFEST = 'https://storage.googleapis.com/rift-install-preview/downloads.tsv'
+    $env:RIFT_DOWNLOAD_MANIFEST = $preview + 'downloads.tsv'
     $env:RIFT_BIN_DIR = $bin
     $env:RIFT_NONINTERACTIVE = '1'
     $env:RIFT_NO_MODIFY_PATH = '1'

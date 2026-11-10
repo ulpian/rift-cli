@@ -25,10 +25,19 @@
 //!   re-aims a child regardless of cwd); a test that needs a specific git
 //!   dir passes `--git-dir` explicitly;
 //! * [`only_the_chokepoint_names_the_binary`] keeps this the only door: a
-//!   future test naming `CARGO_BIN_EXE_rift` anywhere else goes red.
+//!   future test naming `CARGO_BIN_EXE_rift` anywhere else goes red;
+//! * [`rift_cmd`] names a config root under the system temp dir
+//!   ([`test_config_root`]), which a test may override with its own. The
+//!   config root holds the per-family column keys (`rift/keys/`) and the
+//!   project registry, and a spawn that inherited the developer's environment
+//!   minted a key file in their real `~/.config/rift/keys/` for every fixture
+//!   family. A spawn that runs the binary by another door (an installed git
+//!   hook entry) names it itself, and [`no_spawn_sets_a_cache_root_alone`]
+//!   holds that.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// The one place the binary under test may be named.
 const RIFT: &str = env!("CARGO_BIN_EXE_rift");
@@ -148,8 +157,10 @@ fn base36(mut value: u32) -> String {
     digits.iter().rev().collect()
 }
 /// THE spawn chokepoint: a `Command` for the binary under test, pinned to a
-/// hermetic working directory, with the re-targeting environment scrubbed.
-/// Layer stdio/env/args on the returned builder as the test needs.
+/// hermetic working directory, with the re-targeting environment scrubbed
+/// and the config root pinned to [`test_config_root`].
+/// Layer stdio/env/args on the returned builder as the test needs; a later
+/// `.env("RIFT_CONFIG_DIR", ..)` replaces the default.
 pub(crate) fn rift_cmd(cwd: &Path) -> Command {
     assert_hermetic_cwd(cwd);
     let mut cmd = Command::new(RIFT);
@@ -157,7 +168,26 @@ pub(crate) fn rift_cmd(cwd: &Path) -> Command {
     for k in RETARGETING_ENV {
         cmd.env_remove(k);
     }
+    cmd.env("RIFT_CONFIG_DIR", test_config_root());
     cmd
+}
+
+/// The config root every spawn of this test process names unless the test
+/// names its own: one directory under the system temp dir, created once.
+///
+/// One per process, not per test, because [`rift_cmd`] is handed only a cwd.
+/// That is enough to keep the developer's config out of reach: each test's
+/// family is minted in its own temp repository, so the key files under it
+/// never collide, and the tests that read the registry back name their own.
+pub(crate) fn test_config_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("rift-e2e-config-")
+            .tempdir()
+            .expect("the test process's config root is created under the system temp dir")
+            .keep()
+    })
 }
 
 /// Set the repository up **on this machine** the way `rift init` leaves it —
@@ -312,6 +342,99 @@ fn only_the_chokepoint_names_the_binary() {
         hits.iter().any(|p| p.ends_with("common/mod.rs")),
         "scan self-check: the chokepoint itself must be found"
     );
+}
+
+/// The builders that pin the config root themselves: the chokepoint, and the
+/// installed-hook runner `hooks_e2e` keeps for the one door it cannot use.
+const CONFIG_PINNING_BUILDERS: [&str; 2] = ["rift_cmd(", "hook_command("];
+
+/// How far above an `.env(..)` line its builder may start, and how near a
+/// `RIFT_CONFIG_DIR` must sit to count as set on the same builder.
+const BUILDER_REACH: usize = 30;
+const CONFIG_NEARBY: usize = 4;
+
+/// The `.env("RIFT_CACHE_DIR", ..)` lines of `text` (1-based) whose builder
+/// does not pin the config root and that set none of their own nearby.
+fn cache_without_config(text: &str) -> Vec<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let needle = concat!(".env(\"RIFT_", "CACHE_DIR\"");
+    let config = concat!("\"RIFT_", "CONFIG_DIR\"");
+    let mut offenders = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        if !line.contains(needle) {
+            continue;
+        }
+        let builder = lines[at.saturating_sub(BUILDER_REACH)..=at]
+            .iter()
+            .rev()
+            .find_map(|l| {
+                ["Command::new("]
+                    .iter()
+                    .chain(CONFIG_PINNING_BUILDERS.iter())
+                    .find(|b| l.contains(*b))
+            });
+        if builder.is_some_and(|b| CONFIG_PINNING_BUILDERS.contains(b)) {
+            continue;
+        }
+        let near =
+            &lines[at.saturating_sub(CONFIG_NEARBY)..(at + CONFIG_NEARBY + 1).min(lines.len())];
+        if !near.iter().any(|l| l.contains(config)) {
+            offenders.push(at + 1);
+        }
+    }
+    offenders
+}
+
+/// **No spawn names a cache root and leaves the config root to the
+/// developer's environment.** [`rift_cmd`] pins the config root, so a
+/// builder it started is covered; any other builder that sets
+/// `RIFT_CACHE_DIR` (a `git` whose hooks run the binary, an installed hook
+/// entry) must set `RIFT_CONFIG_DIR` beside it, or the binary it reaches
+/// mints its family's column key in the real `~/.config/rift/keys/`.
+#[test]
+fn no_spawn_sets_a_cache_root_alone() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut hits = Vec::new();
+    files_containing(&tests, concat!("RIFT_", "CACHE_DIR"), &mut hits);
+    let offenders: Vec<String> = hits
+        .iter()
+        .flat_map(|path| {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            cache_without_config(&text)
+                .into_iter()
+                .map(move |line| format!("{}:{line}", path.display()))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a spawn sets RIFT_CACHE_DIR without RIFT_CONFIG_DIR and is not built by \
+         rift_cmd: {offenders:?}"
+    );
+}
+
+/// Calibration, both arms of the screen above, and the chokepoint's own pin.
+#[test]
+fn the_config_screen_flags_a_bare_builder_and_admits_the_chokepoint() {
+    let bare = concat!(
+        "let out = Command::new(\"git\")\n",
+        "    .env(\"RIFT_",
+        "CACHE_DIR\", &cache)\n",
+        "    .output();\n"
+    );
+    assert_eq!(cache_without_config(bare), vec![2]);
+    let paired = format!("{bare}    .env(\"RIFT_{}\", &conf)\n", "CONFIG_DIR");
+    assert!(cache_without_config(&paired).is_empty());
+    let pinned = bare.replace("Command::new(\"git\")", "rift_cmd(repo)");
+    assert!(cache_without_config(&pinned).is_empty());
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cmd = rift_cmd(tmp.path());
+    let pinned_root = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "RIFT_CONFIG_DIR")
+        .and_then(|(_, v)| v);
+    assert_eq!(pinned_root, Some(test_config_root().as_os_str()));
+    assert!(test_config_root().starts_with(std::env::temp_dir()));
 }
 
 /// Calibration, both arms: a tempdir is admitted; the repository under test —

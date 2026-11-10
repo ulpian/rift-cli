@@ -115,7 +115,7 @@ fn cache_bound_outlines(
         let Some(outline) = rt.block_on(bound_outline(recall, cipher, path, sha)) else {
             continue;
         };
-        if let Err(error) = write_outline_cache(&common_dir, sha, &outline) {
+        if let Err(error) = write_outline_cache(&common_dir, sha, &outline, cipher) {
             tracing::warn!(%error, "an outline was bound and could not be cached");
         }
     }
@@ -191,9 +191,14 @@ mod tests {
         let first = bind_and_cache_outlines(&rt, root, &reads).unwrap();
         assert_eq!(first.bound, 1, "{first:?}");
         let common_dir = rift_git::discover(root).unwrap().common_dir;
-        let file = crate::hooks::gate::outline_cache_dir(&common_dir)
-            .join(format!("{sha}-e3p1r1.outline"));
-        let written = std::fs::read_to_string(&file).unwrap();
+        let name = format!("{sha}-e3p1r1.outline");
+        let file = crate::hooks::gate::outline_cache_dir(&common_dir).join(&name);
+        let cipher = crate::column_key::column_cipher_at(root);
+        let opened = || {
+            let stored = std::fs::read(&file).unwrap();
+            crate::hooks::gate::open_sealed(&cipher, &name, &stored).unwrap()
+        };
+        let written = opened();
         assert!(
             written.starts_with("rift-outline 1\nclass markdown\nshape 7 37 2 "),
             "{written}"
@@ -202,6 +207,6 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         let again = bind_and_cache_outlines(&rt, root, &reads).unwrap();
         assert_eq!((again.bound, again.already_bound), (0, 1));
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+        assert_eq!(opened(), written);
     }
 }
