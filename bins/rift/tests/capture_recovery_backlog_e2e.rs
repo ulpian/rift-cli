@@ -4,6 +4,10 @@
 //! owed. Report-only doctor changes nothing; `--fix` archives the historical
 //! backlog, retires exactly its tickets, collects the reserved current
 //! boundary and releases the hold; a second `--fix` is a no-op.
+// Capture recovery pins tickets by hard link and descriptor identity, which
+// only the unix build implements; elsewhere the doctor reports "capture
+// recovery runs on unix only" and there is nothing for these suites to drive.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

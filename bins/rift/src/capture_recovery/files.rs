@@ -95,6 +95,22 @@ impl Namespace {
         }
         Ok(())
     }
+
+    /// Flush the directory's entries to disk. The held `dir` cannot do it:
+    /// on Linux cap-std opens directories `O_PATH`, and `fsync` on an
+    /// `O_PATH` descriptor fails with `EBADF`. A readable descriptor of the
+    /// same directory is opened through the held one and must carry its
+    /// identity, so the flush never lands on a substituted directory.
+    pub(super) fn sync(&self) -> PinResult<()> {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let readable = self.dir.open_with(".", &options).map_err(|_| PinError)?;
+        let metadata = readable.metadata().map_err(|_| PinError)?;
+        if !metadata.is_dir() || directory_identity(&metadata) != self.identity()? {
+            return Err(PinError);
+        }
+        readable.sync_all().map_err(|_| PinError)
+    }
 }
 
 pub(super) fn clean_absolute(path: &Path) -> PinResult<()> {

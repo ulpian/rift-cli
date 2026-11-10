@@ -456,7 +456,9 @@ mod shell_cd_tests {
     fn a_read_after_cd_into_a_member_is_filed_under_the_member() {
         let tmp = tempfile::tempdir().unwrap();
         let (main, linked) = repo_with_linked_worktree(tmp.path());
-        let command = format!("cd {} && sed -n '1,40p' src/a.rs", linked.display());
+        // Quoted as an agent's shell must quote it: unquoted, a Windows path's
+        // backslashes are escapes to the shell grammar and name nothing.
+        let command = format!("cd '{}' && sed -n '1,40p' src/a.rs", linked.display());
         assert_eq!(
             observed_from_main(&main, tmp.path(), &command),
             filed("linked", "shell_cd")
@@ -471,7 +473,7 @@ mod shell_cd_tests {
         let (main, _linked) = repo_with_linked_worktree(tmp.path());
         let stranger = tmp.path().join("stranger");
         rift_git::test_support::fake_repo(&stranger).unwrap();
-        let command = format!("cd {} && sed -n '1,40p' src/a.rs", stranger.display());
+        let command = format!("cd '{}' && sed -n '1,40p' src/a.rs", stranger.display());
         assert_eq!(
             observed_from_main(&main, tmp.path(), &command),
             filed("main", "payload_cwd")
