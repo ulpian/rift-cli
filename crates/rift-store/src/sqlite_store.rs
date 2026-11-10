@@ -35,6 +35,18 @@ struct ConnectionState {
     _lease: Option<ProjectionLease>,
 }
 
+/// The journal a connection asks for at open.
+///
+/// Only a connection that may write asks for WAL: switching the mode is a
+/// write to the database header, which a read-only handle cannot make, and
+/// an in-memory database has no log to keep. A read-only handle reads
+/// whatever mode the file is already in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Journal {
+    Wal,
+    AsFound,
+}
+
 impl SqliteStore {
     /// Open an in-memory store (tests, ephemeral tooling).
     ///
@@ -42,7 +54,7 @@ impl SqliteStore {
     /// Returns [`RiftError::Storage`] if the connection or pragmas fail.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(map_sql)?;
-        Self::init(conn, ":memory:", None)
+        Self::init(conn, ":memory:", None, Journal::AsFound)
     }
 
     /// Open (or create) a store at `path`.
@@ -53,7 +65,7 @@ impl SqliteStore {
         let lease = ProjectionLease::writable(path.as_ref())?;
         let display = lease.path().display().to_string();
         let conn = Connection::open(lease.path()).map_err(map_sql)?;
-        Self::init(conn, display, Some(lease))
+        Self::init(conn, display, Some(lease), Journal::Wal)
     }
 
     /// Open a guarded live projection read-only, without creating its DB,
@@ -70,7 +82,7 @@ impl SqliteStore {
         let conn =
             Connection::open_with_flags(lease.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(map_sql)?;
-        Self::init(conn, display, Some(lease))
+        Self::init(conn, display, Some(lease), Journal::AsFound)
     }
 
     /// Read an explicitly selected historical source in one read transaction.
@@ -87,12 +99,8 @@ impl SqliteStore {
     pub fn open_historical_snapshot(snapshot: crate::HistoricalProjectionSnapshot) -> Result<Self> {
         let lease = snapshot.lease()?;
         let display = snapshot.path().display().to_string();
-        let conn = Connection::open_with_flags(
-            snapshot.path(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(map_sql)?;
-        let store = Self::init(conn, display, lease)?;
+        let conn = historical_connection(snapshot.path())?;
+        let store = Self::init(conn, display, lease, Journal::AsFound)?;
         store.with_conn(|conn| conn.execute_batch("BEGIN DEFERRED"))?;
         Ok(store)
     }
@@ -112,20 +120,21 @@ impl SqliteStore {
         let conn =
             Connection::open_with_flags(lease.path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                 .map_err(map_sql)?;
-        Self::init(conn, display, Some(lease)).map(Some)
+        Self::init(conn, display, Some(lease), Journal::Wal).map(Some)
     }
 
     pub(crate) fn open_replacement(guard: ProjectionReplacementGuard) -> Result<Self> {
         let lease = guard.into_lease()?;
         let display = lease.path().display().to_string();
         let conn = Connection::open(lease.path()).map_err(map_sql)?;
-        Self::init(conn, display, Some(lease))
+        Self::init(conn, display, Some(lease), Journal::Wal)
     }
 
     fn init(
         conn: Connection,
         path: impl Into<String>,
         lease: Option<ProjectionLease>,
+        journal: Journal,
     ) -> Result<Self> {
         let store = Self {
             conn: Arc::new(ConnectionState {
@@ -138,9 +147,29 @@ impl SqliteStore {
         // error must also close SQLite before releasing its lifetime guard.
         store.with_conn(|conn| {
             conn.pragma_update(None, "foreign_keys", true)?;
-            conn.busy_timeout(std::time::Duration::from_secs(5))
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            if journal == Journal::Wal {
+                enter_wal(conn)?;
+            }
+            Ok(())
         })?;
         Ok(store)
+    }
+
+    /// Copy what the write-ahead log can without waiting on any reader or
+    /// writer back into the database file (`PRAGMA wal_checkpoint(PASSIVE)`).
+    ///
+    /// SQLite already checkpoints every 1000 pages and when the last
+    /// connection closes; this is for a long-lived writer to call at a quiet
+    /// moment, so a log that readers kept from resetting does not keep
+    /// growing. PASSIVE, never TRUNCATE: a checkpoint that waits on a
+    /// dashboard read would stall the caller up to the busy timeout. A store
+    /// not in WAL mode answers with nothing to do.
+    ///
+    /// # Errors
+    /// [`RiftError::Storage`] if SQLite refuses the checkpoint.
+    pub fn checkpoint_wal(&self) -> Result<()> {
+        self.with_conn(|conn| conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())))
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -342,6 +371,71 @@ impl Store for SqliteStore {
     fn descriptor(&self) -> &StoreDescriptor {
         &self.desc
     }
+}
+
+/// Put a writable connection in WAL mode with `synchronous=NORMAL`.
+///
+/// Why WAL: in the rollback journal a dashboard reader holding SHARED blocks
+/// an agent hook's commit, which then waits on the busy timeout, and every
+/// commit pays several fsyncs. In WAL readers and the one writer proceed
+/// together and a commit appends to the log. The mode is persistent in the
+/// file, so every later handle, read-only ones included, reads through the
+/// log; the `-wal` and `-shm` sidecars are part of the projection from then
+/// on, which the lease, rebuild and set-aside code already treat them as.
+///
+/// Why NORMAL only under WAL: there it loses at most the last commits on a
+/// power cut and never corrupts, and a projection is rebuildable from git
+/// anyway. Under the rollback journal NORMAL can corrupt, so a filesystem
+/// that refuses WAL (no shared memory) keeps FULL and the old journal.
+fn enter_wal(conn: &Connection) -> rusqlite::Result<()> {
+    let mode: String =
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Ok(());
+    }
+    conn.pragma_update(None, "synchronous", "NORMAL")
+}
+
+/// A read-only connection to a historical source, which may sit in a
+/// directory nobody can write.
+///
+/// A WAL-mode file is read through its `-shm` index, and SQLite must create
+/// that file when it is absent; in a read-only directory it cannot, and the
+/// first read fails. When there is no `-wal` and no `-shm` beside the file,
+/// the whole database is the main file, and a directory that refuses the
+/// index also refuses the log any writer would need, so nothing can change
+/// it while it is read: only then is the file opened `immutable`, which
+/// reads it without the index. Every other case keeps SQLite's own locking.
+fn historical_connection(path: &std::path::Path) -> Result<Connection> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let conn = Connection::open_with_flags(path, flags).map_err(map_sql)?;
+    let readable = conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()));
+    let sidecars = ["-wal", "-shm"].iter().any(|suffix| {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        std::path::Path::new(&sidecar).symlink_metadata().is_ok()
+    });
+    if readable.is_ok() || sidecars {
+        return Ok(conn);
+    }
+    drop(conn);
+    let uri = format!("file:{}?immutable=1", uri_path(path));
+    Connection::open_with_flags(uri, flags | rusqlite::OpenFlags::SQLITE_OPEN_URI).map_err(map_sql)
+}
+
+/// `path` as the path part of an SQLite `file:` URI: `%`, `?` and `#` would
+/// otherwise end or escape it.
+fn uri_path(path: &std::path::Path) -> String {
+    let mut out = String::new();
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '?' => out.push_str("%3f"),
+            '#' => out.push_str("%23"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Statement execution against a locked connection (shared by the connection

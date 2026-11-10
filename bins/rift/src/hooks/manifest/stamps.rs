@@ -71,12 +71,11 @@ impl<'a> TurnStamp<'a> {
 /// state that must never be treated as "unchanged" — the full path would fail
 /// here too, and failing to *ask* is different from asking and hearing nothing.
 ///
-/// The `-wal` file is stamped as well as the database. Today `rift-store` opens
-/// in the default rollback-journal mode, where every commit moves the main
-/// file's length or mtime, so the first component alone would do. But a future
-/// `journal_mode=WAL` would land committed writes in the log and leave the main
-/// file untouched for a while — silently turning this precondition from
-/// conservative into wrong. One extra `stat` buys immunity from that.
+/// The `-wal` file is stamped as well as the database, and must be:
+/// `rift-store` opens every writable projection in `journal_mode=WAL`, where a
+/// commit lands in the log and leaves the main file untouched until the next
+/// checkpoint. Stamping the database alone would turn this precondition from
+/// conservative into wrong.
 pub(in crate::hooks) fn projection_stamp(repo: &std::path::Path) -> Option<String> {
     let db = crate::family::recall_db(repo).ok()?;
     let wal = {

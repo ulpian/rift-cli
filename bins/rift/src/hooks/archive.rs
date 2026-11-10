@@ -699,6 +699,13 @@ pub(crate) fn level_projection(work_tree: &Path) -> Result<()> {
         "claude-code",
         now_ms(),
     ))?;
+    // The drain's last write is this levelling. Fold the log back while the
+    // queue lock is still ours, so a dashboard that kept the log from
+    // resetting does not leave it growing between drains. Best-effort: the
+    // rows are committed either way.
+    if let Err(e) = store.checkpoint_wal() {
+        tracing::debug!(error = %e, "projection log not checkpointed after levelling");
+    }
     Ok(())
 }
 
