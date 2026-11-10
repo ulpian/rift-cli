@@ -3,7 +3,8 @@
 //! The per-repo projection is keyed by [`RepoId`] under a cache *root* chosen,
 //! in order, from `RIFT_CACHE_DIR` (an explicit override — also what tests set
 //! for hermeticity), `XDG_CACHE_HOME`, then `$HOME/.cache` on unix /
-//! `%LOCALAPPDATA%` on Windows, falling back to `.`. This mirrors the
+//! `%LOCALAPPDATA%` on Windows, and never the working directory: with none of
+//! them set, Rift's binaries refuse (see [`configured_cache_root`]). This mirrors the
 //! env-override discipline of `rift_registry::resolve_from`, so the projection
 //! path is testable without ever touching the real home directory.
 
@@ -11,20 +12,46 @@ use std::path::{Path, PathBuf};
 
 use rift_core::{FamilyIds, RepoId};
 
-/// Resolve the cache *root* from an injected environment lookup.
+/// What a process should say when [`configured_cache_root`] has no answer.
+pub const CACHE_ROOT_UNSET: &str =
+    "no cache directory: set HOME (or LOCALAPPDATA on Windows) or RIFT_CACHE_DIR";
+
+/// The root [`resolve_cache_root`] answers when the environment names none:
+/// a path under a device file, so every directory or store created under it
+/// fails instead of landing somewhere. Rift's binaries refuse before reaching
+/// it (they ask [`configured_cache_root`] first); the old fallback, `.`, put
+/// projections and the install salt in whatever repository a cron job or a
+/// service happened to run in.
+const UNRESOLVED_CACHE_ROOT: &str = if cfg!(windows) {
+    r"\\.\NUL\rift-cache-unset"
+} else {
+    "/dev/null/rift-cache-unset"
+};
+
+/// The cache *root* the environment names, or `None` when it names none:
+/// `RIFT_CACHE_DIR`, `XDG_CACHE_HOME`, then `$HOME/.cache` on unix /
+/// `%LOCALAPPDATA%` on Windows. An empty value counts as unset, because an
+/// empty path resolves against the process's directory.
 #[must_use]
-pub fn resolve_cache_root(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    env("RIFT_CACHE_DIR")
+pub fn configured_cache_root(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let set = |key: &str| env(key).filter(|value| !value.is_empty());
+    set("RIFT_CACHE_DIR")
         .map(PathBuf::from)
-        .or_else(|| env("XDG_CACHE_HOME").map(PathBuf::from))
+        .or_else(|| set("XDG_CACHE_HOME").map(PathBuf::from))
         .or_else(|| {
             if cfg!(windows) {
-                env("LOCALAPPDATA").map(PathBuf::from)
+                set("LOCALAPPDATA").map(PathBuf::from)
             } else {
-                env("HOME").map(|h| PathBuf::from(h).join(".cache"))
+                set("HOME").map(|h| PathBuf::from(h).join(".cache"))
             }
         })
-        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Resolve the cache *root* from an injected environment lookup:
+/// [`configured_cache_root`], or a root nothing can be created under.
+#[must_use]
+pub fn resolve_cache_root(env: impl Fn(&str) -> Option<String>) -> PathBuf {
+    configured_cache_root(env).unwrap_or_else(|| PathBuf::from(UNRESOLVED_CACHE_ROOT))
 }
 
 /// Restrict a projection to its owner: `0o700` on the containing directory and
@@ -329,8 +356,19 @@ mod tests {
     }
 
     #[test]
-    fn empty_env_falls_back_to_dot() {
-        assert_eq!(resolve_cache_root(env_of(&[])), PathBuf::from("."));
+    fn an_environment_naming_no_root_is_refused_and_never_the_working_directory() {
+        assert_eq!(configured_cache_root(env_of(&[])), None);
+        assert_eq!(
+            configured_cache_root(env_of(&[("RIFT_CACHE_DIR", ""), ("HOME", "")])),
+            None,
+            "an empty value would resolve against the process's directory"
+        );
+        let fallback = resolve_cache_root(env_of(&[]));
+        assert!(fallback.is_absolute() || cfg!(windows), "{fallback:?}");
+        assert!(
+            std::fs::create_dir_all(fallback.join("rift")).is_err(),
+            "nothing can be created under the unresolved root"
+        );
     }
 
     #[test]

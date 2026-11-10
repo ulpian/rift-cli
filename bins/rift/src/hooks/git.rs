@@ -273,6 +273,7 @@ fn trailer_prepare(git_dir: Option<&str>, fwd: &[String]) -> Result<()> {
     }
     let start = hook_work_tree(git_dir)?;
     let repo = t.phase("discover", || rift_git::discover(&start))?;
+    keep_timing(&t, &repo);
     let Some(sess) = t
         .phase("live_sessions", || {
             live_sessions_for(
@@ -513,6 +514,7 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
     let t = crate::hooktime::HookTimer::from_env("post-commit");
     let start = hook_work_tree(git_dir)?;
     let repo = t.phase("discover", || rift_git::discover(&start))?;
+    keep_timing(&t, &repo);
     // The just-created commit is HEAD. An unborn HEAD (no commit yet) means there is
     // nothing to capture — return before queueing anything.
     let reader = t.phase("gix_open", || {
@@ -576,6 +578,15 @@ fn capture_post_commit(git_dir: Option<&str>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// File this commit-path hook's timing in its family's ring: one manifest
+/// read, timed as its own phase so the ring shows what keeping it costs. A
+/// repository whose family is not minted keeps no record.
+fn keep_timing(t: &crate::hooktime::HookTimer, repo: &rift_git::RepoPaths) {
+    if let Some(dir) = t.phase("family", || crate::family::family_dir_of_paths(repo)) {
+        t.keep_in(dir);
+    }
 }
 
 /// The queue entry `post-commit` hands the worker: the commit that anchored

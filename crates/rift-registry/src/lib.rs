@@ -228,24 +228,48 @@ fn comparable(path: &Path) -> PathBuf {
 
 /// Resolve the registry file path from an injected environment lookup.
 ///
-/// The config *root* is chosen from, in order: `RIFT_CONFIG_DIR` (an explicit
-/// override, also what tests set for hermeticity), `XDG_CONFIG_HOME`, then
-/// `$HOME/.config` on unix / `%APPDATA%` on Windows, falling back to `.`. The
-/// registry file is always `<config-root>/rift/projects.toml`.
+/// The registry file is always `<config-root>/rift/projects.toml`, the root
+/// from [`configured_config_root`] or, with none named, one nothing can be
+/// created under.
 #[must_use]
 pub fn resolve_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let base = env("RIFT_CONFIG_DIR")
+    let base = configured_config_root(env).unwrap_or_else(|| PathBuf::from(UNRESOLVED_CONFIG_ROOT));
+    base.join("rift").join("projects.toml")
+}
+
+/// What a process should say when [`configured_config_root`] has no answer.
+pub const CONFIG_ROOT_UNSET: &str =
+    "no config directory: set HOME (or APPDATA on Windows) or RIFT_CONFIG_DIR";
+
+/// The root [`resolve_from`] answers when the environment names none: a path
+/// under a device file, so the registry can be neither read nor written there.
+/// Rift's binaries refuse before reaching it (they ask
+/// [`configured_config_root`] first); the old fallback, `.`, wrote the
+/// registry into whatever directory the process ran in.
+const UNRESOLVED_CONFIG_ROOT: &str = if cfg!(windows) {
+    r"\\.\NUL\rift-config-unset"
+} else {
+    "/dev/null/rift-config-unset"
+};
+
+/// The config *root* the environment names, or `None` when it names none:
+/// `RIFT_CONFIG_DIR` (an explicit override, also what tests set for
+/// hermeticity), `XDG_CONFIG_HOME`, then `$HOME/.config` on unix /
+/// `%APPDATA%` on Windows. An empty value counts as unset, because an empty
+/// path resolves against the process's directory.
+#[must_use]
+pub fn configured_config_root(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let set = |key: &str| env(key).filter(|value| !value.is_empty());
+    set("RIFT_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| env("XDG_CONFIG_HOME").map(PathBuf::from))
+        .or_else(|| set("XDG_CONFIG_HOME").map(PathBuf::from))
         .or_else(|| {
             if cfg!(windows) {
-                env("APPDATA").map(PathBuf::from)
+                set("APPDATA").map(PathBuf::from)
             } else {
-                env("HOME").map(|h| PathBuf::from(h).join(".config"))
+                set("HOME").map(|h| PathBuf::from(h).join(".config"))
             }
         })
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("rift").join("projects.toml")
 }
 
 /// The default registry path for this machine — [`resolve_from`] over the real
@@ -352,6 +376,21 @@ mod tests {
             });
             assert_eq!(home, PathBuf::from("/home/u/.config/rift/projects.toml"));
         }
+    }
+
+    #[test]
+    fn an_environment_naming_no_root_is_refused_and_never_the_working_directory() {
+        assert_eq!(configured_config_root(|_| None), None);
+        assert_eq!(
+            configured_config_root(|_| Some(String::new())),
+            None,
+            "an empty value would resolve against the process's directory"
+        );
+        let fallback = resolve_from(|_| None);
+        assert!(
+            std::fs::create_dir_all(fallback.parent().unwrap()).is_err(),
+            "nothing can be created under the unresolved root: {fallback:?}"
+        );
     }
 
     /// ★ One directory, one row, whatever the caller spelled it.

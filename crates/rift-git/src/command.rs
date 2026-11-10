@@ -149,16 +149,25 @@ pub fn run_git_status(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| RiftError::storage(format!("git invocation failed: {e}")))?;
-    if !stdin.is_empty() {
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(stdin)
-                .map_err(|e| RiftError::storage(format!("git stdin failed: {e}")))?;
-        }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| RiftError::storage(format!("git invocation failed: {e}")))?;
-    Ok((output.status.success(), output.stdout))
+    // stdin is fed from its own thread while this one drains stdout, as std's
+    // `Command::output` does: a command that answers while it still reads
+    // (`hash-object --stdin-paths`) fills the stdout pipe, and writing all of
+    // stdin first would leave both processes waiting on each other.
+    let pipe = child.stdin.take();
+    std::thread::scope(|scope| {
+        let feeder = scope.spawn(move || match pipe {
+            Some(mut pipe) => pipe.write_all(stdin),
+            None => Ok(()),
+        });
+        let output = child
+            .wait_with_output()
+            .map_err(|e| RiftError::storage(format!("git invocation failed: {e}")))?;
+        let fed = feeder
+            .join()
+            .map_err(|_| RiftError::storage("git stdin writer stopped"))?;
+        fed.map_err(|e| RiftError::storage(format!("git stdin failed: {e}")))?;
+        Ok((output.status.success(), output.stdout))
+    })
 }
 
 /// The worktree paths that differ from HEAD (modified/added/deleted, staged or

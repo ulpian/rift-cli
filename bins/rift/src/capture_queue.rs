@@ -468,6 +468,23 @@ impl QueueLock {
                 return Err(RiftError::validity("queue owner: marker was replaced"));
             }
         }
+        // Windows has no inode in `Metadata`: the volume serial and file index
+        // are the file's identity, read from a handle as `rift-store`'s
+        // projection lock reads them. The path is opened afresh for reading,
+        // which the held handle's read/write sharing admits; the byte-range
+        // lock is not disturbed by a second handle.
+        #[cfg(windows)]
+        {
+            let identity = |file: &std::fs::File| {
+                winapi_util::file::information(file)
+                    .map(|info| (info.volume_serial_number(), info.file_index()))
+            };
+            let held = identity(&self.file)?;
+            let current = identity(&std::fs::File::open(owner_path(&self.git_dir)?)?)?;
+            if held != current {
+                return Err(RiftError::validity("queue owner: marker was replaced"));
+            }
+        }
         Ok(())
     }
 

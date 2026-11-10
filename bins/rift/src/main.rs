@@ -112,13 +112,39 @@ fn init_tracing() {
         .try_init();
 }
 
+/// With nowhere to keep machine state: a hook exits 0 and says nothing (it
+/// must never fail an agent's turn), a command names what to set.
+fn refuse_without_state_roots(cli: &Cli, reason: &str) -> ExitCode {
+    if matches!(cli.cmd, Some(Command::Hooks(_))) {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("rift: {reason}");
+    ExitCode::from(1)
+}
+
+/// `rift` invoked under a git hook's name runs that hook and never returns;
+/// `None` when it was not. A hook never fails the developer's git op: with
+/// nowhere to keep state it does nothing, quietly.
+#[cfg(unix)]
+fn direct_git_hook(roots_unset: Option<&str>) -> Option<ExitCode> {
+    let name = hooks::direct_git_hook_name()?;
+    if roots_unset.is_some() {
+        return Some(ExitCode::SUCCESS);
+    }
+    hooks::run_direct_git_hook(name, std::env::args().skip(1).collect())
+}
+
 fn main() -> ExitCode {
     init_tracing();
+    let roots_unset = family::state_roots_unset();
     #[cfg(unix)]
-    if let Some(name) = hooks::direct_git_hook_name() {
-        hooks::run_direct_git_hook(name, std::env::args().skip(1).collect());
+    if let Some(code) = direct_git_hook(roots_unset) {
+        return code;
     }
     let cli = Cli::parse();
+    if let Some(reason) = roots_unset {
+        return refuse_without_state_roots(&cli, reason);
+    }
 
     // Bare `rift`: launch Canopy (TTY) or print a status-style frame (non-TTY).
     let Some(cmd) = cli.cmd.as_ref() else {

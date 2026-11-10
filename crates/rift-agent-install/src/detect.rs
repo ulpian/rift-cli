@@ -232,10 +232,17 @@ pub const fn command_names(token: &str) -> &'static [&'static str] {
     }
 }
 
-/// The first `PATH` entry holding one of the agent's command names.
+/// The first absolute `PATH` entry holding one of the agent's command names.
+///
+/// An empty or relative entry (`a::b`, `.`) resolves against the process's
+/// directory, usually a freshly cloned repository, and what is found here is
+/// later run with `--version` unprompted: such entries are skipped, so a file
+/// planted at a repository's root is never detected, let alone executed.
 fn path_command(token: &str, search_path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let search_path = search_path?;
-    std::env::split_paths(search_path).find_map(|dir| find_executable(&dir, command_names(token)))
+    std::env::split_paths(search_path)
+        .filter(|dir| dir.is_absolute())
+        .find_map(|dir| find_executable(&dir, command_names(token)))
 }
 
 /// The spellings a command has on disk. The bare name is the POSIX binary;
@@ -642,6 +649,42 @@ mod tests {
             ..DetectionEnvironment::default()
         };
         assert!(installations("codex", &env).is_empty());
+    }
+
+    /// A relative `PATH` entry spelled to reach a planted `claude` from the
+    /// test's directory (as `.` reaches a cloned repository's root), beside an
+    /// empty entry and `.` itself: none is searched, so the plant is never
+    /// detected and never run. Unix-only because a relative walk from the
+    /// test's directory to a temporary one cannot cross a Windows drive.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_or_empty_path_entry_never_finds_a_planted_command() {
+        let planted = tempfile::tempdir().unwrap();
+        write(&planted.path().join("claude"), b"#!/bin/sh\n");
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.ancestors().skip(1) {
+            relative.push("..");
+        }
+        relative.push(planted.path().strip_prefix("/").unwrap());
+        assert!(
+            relative.join("claude").is_file(),
+            "the entry reaches the plant"
+        );
+        let empty = tempfile::tempdir().unwrap();
+        let search_path = std::env::join_paths([
+            PathBuf::new(),
+            PathBuf::from("."),
+            relative,
+            empty.path().to_path_buf(),
+        ])
+        .unwrap();
+        let env = DetectionEnvironment {
+            search_path: Some(search_path),
+            ..DetectionEnvironment::default()
+        };
+
+        assert!(installations("claude-code", &env).is_empty());
     }
 
     /// The case this module exists for: Claude Code run only through the VS

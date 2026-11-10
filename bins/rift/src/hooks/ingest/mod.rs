@@ -47,7 +47,7 @@ pub(super) fn try_ingest_agent_hook(
     search: &mut Option<crate::search_gate::SearchAnswer>,
     held_output: &mut Option<serde_json::Value>,
 ) -> Result<()> {
-    let t = crate::hooktime::HookTimer::from_env("agent-hook");
+    let t = crate::hooktime::HookTimer::from_env("agent-hook").with_verb(format!("{agent}:{verb}"));
     let verb = verb.to_owned();
     let Some(raw) = enriched_raw_hook(&t, agent, &verb, body) else {
         return Ok(()); // malformed/oversized/agent token → deferred
@@ -228,6 +228,7 @@ fn family_projection(
         t.phase("no_family_identity", || ());
         return Ok(None);
     };
+    t.keep_in(crate::family::family_dir_of(&family));
     let store = t.phase("open_store", || {
         rift_store::open_capture_projection(crate::family::projection_db_of(&family))
     })?;

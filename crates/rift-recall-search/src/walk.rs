@@ -231,11 +231,11 @@ fn relative(root: &Path, path: &Path) -> Option<String> {
     Some(out)
 }
 
-/// Whether the repository's policy calls this path sensitive.
+/// Whether the repository's policy calls this path sensitive: the same
+/// matcher as `EffectiveConfig::is_sensitive_path`, case folded where the
+/// filesystem folds it.
 fn is_sensitive(rel: &str, sensitive: &[String]) -> bool {
-    sensitive
-        .iter()
-        .any(|glob| rift_config::glob_match(glob, rel))
+    rift_config::sensitive_match(sensitive, rel)
 }
 
 /// A directory's modification time, read from the directory itself.

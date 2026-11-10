@@ -138,6 +138,37 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     dp[t.len()]
 }
 
+/// Whether this platform's default filesystems compare names without regard
+/// to case: APFS as macOS formats it, and NTFS as Windows opens it. There a
+/// file named `.ENV` is the file a `**/.env*` rule means to protect.
+pub const PATHS_FOLD_CASE: bool = cfg!(any(target_os = "macos", windows));
+
+/// Whether `path` matches any of the sensitive-path `globs`, ignoring ASCII
+/// case where [`PATHS_FOLD_CASE`] says the filesystem does.
+///
+/// The one matcher every sensitive-path check goes through. Folding only
+/// ever widens what matches, so on a case-insensitive filesystem more paths
+/// are protected and never fewer; on Linux, where `.ENV` and `.env` are two
+/// files, the match stays exact. Only ASCII is folded: a non-ASCII name that
+/// differs by case alone stays a different name to this check.
+#[must_use]
+pub fn sensitive_match(globs: &[String], path: &str) -> bool {
+    if PATHS_FOLD_CASE {
+        any_match_ignoring_ascii_case(globs, path)
+    } else {
+        globs.iter().any(|glob| glob_match(glob, path))
+    }
+}
+
+/// Whether `path` matches any of `globs` with both sides ASCII-lowercased.
+#[must_use]
+pub fn any_match_ignoring_ascii_case(globs: &[String], path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    globs
+        .iter()
+        .any(|glob| glob_match(&glob.to_ascii_lowercase(), &path))
+}
+
 #[cfg(test)]
 mod work {
     //! A count of the cells the matcher's sweep visits, compiled into the test
@@ -169,7 +200,44 @@ mod work {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_match, tokenize, wildcard_count, work};
+    use super::{
+        any_match_ignoring_ascii_case, glob_match, sensitive_match, tokenize, wildcard_count, work,
+        PATHS_FOLD_CASE,
+    };
+
+    /// On a case-insensitive filesystem `.ENV` is protected by `**/.env*`;
+    /// on Linux it is another file and the match stays exact. Folding never
+    /// loses a match the exact matcher had.
+    #[test]
+    fn a_sensitive_glob_folds_case_only_where_the_filesystem_does() {
+        let globs = vec!["**/.env*".to_owned(), "**/ID_RSA".to_owned()];
+        assert!(any_match_ignoring_ascii_case(&globs, "app/.ENV.local"));
+        assert!(any_match_ignoring_ascii_case(&globs, "home/.ssh/id_rsa"));
+        assert!(!any_match_ignoring_ascii_case(&globs, "app/env"));
+        assert_eq!(sensitive_match(&globs, "app/.ENV"), PATHS_FOLD_CASE);
+        assert!(sensitive_match(&globs, "app/.env"), "exact still matches");
+        assert_eq!(
+            PATHS_FOLD_CASE,
+            cfg!(any(target_os = "macos", windows)),
+            "folded on macOS and Windows only"
+        );
+    }
+
+    proptest::proptest! {
+        /// INVARIANT: folding only widens — whatever the exact matcher
+        /// protects, the folded one protects too.
+        #[test]
+        fn folding_never_loses_an_exact_match(
+            pattern in proptest::string::string_regex("[aB/*?]{0,8}").expect("valid regex"),
+            text in proptest::string::string_regex("[aAbB/]{0,10}").expect("valid regex"),
+        ) {
+            let globs = vec![pattern.clone()];
+            if glob_match(&pattern, &text) {
+                proptest::prop_assert!(any_match_ignoring_ascii_case(&globs, &text));
+                proptest::prop_assert!(sensitive_match(&globs, &text));
+            }
+        }
+    }
 
     #[test]
     fn literal_and_single_star() {

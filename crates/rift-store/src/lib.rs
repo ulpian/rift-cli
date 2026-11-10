@@ -134,11 +134,11 @@ pub use migrate::{
 };
 pub use paths::{
     canopy_ui_db_from, canopy_ui_db_under, capture_projection_db_for_repo, capture_repo_id,
-    connection_state_dir_for_repo, connection_state_dir_under, default_canopy_ui_db,
-    default_projection_db, default_projection_dir, default_recall_db, projection_db_for_family,
-    projection_db_for_family_under, projection_db_under, projection_dir_under,
-    recall_db_for_family, recall_db_for_family_under, recall_db_for_repo, recall_db_from,
-    recall_db_under, recall_repo_id, resolve_cache_root,
+    configured_cache_root, connection_state_dir_for_repo, connection_state_dir_under,
+    default_canopy_ui_db, default_projection_db, default_projection_dir, default_recall_db,
+    projection_db_for_family, projection_db_for_family_under, projection_db_under,
+    projection_dir_under, recall_db_for_family, recall_db_for_family_under, recall_db_for_repo,
+    recall_db_from, recall_db_under, recall_repo_id, resolve_cache_root, CACHE_ROOT_UNSET,
 };
 pub use projection_lock::{HistoricalProjectionSnapshot, ProjectionReplacementGuard};
 pub use rebuild::rebuild;

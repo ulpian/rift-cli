@@ -949,6 +949,30 @@ mod tests {
         assert_eq!(hash_files_write(&repo, &[]).unwrap(), Vec::<String>::new());
     }
 
+    /// Five thousand oids are about 200 KiB of answer, past any pipe buffer:
+    /// git answers while it still reads, so a writer that fed all of stdin
+    /// before draining stdout would wait forever. The wall clock only bounds
+    /// the wait; the verdict is the count.
+    #[cfg(feature = "gix")]
+    #[test]
+    fn a_batch_write_past_the_pipe_buffer_completes() {
+        let (tmp, repo) = init_repo();
+        let names: Vec<String> = (0..5000).map(|i| format!("f{i:05}.txt")).collect();
+        for (i, name) in names.iter().enumerate() {
+            std::fs::write(tmp.path().join(name), format!("{i}\n")).unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let paths: Vec<&str> = names.iter().map(String::as_str).collect();
+            let _ = tx.send(hash_files_write(&repo, &paths).map(|oids| oids.len()));
+        });
+
+        let answered = rx.recv_timeout(std::time::Duration::from_mins(2));
+
+        assert_eq!(answered.expect("no deadlock").unwrap(), 5000);
+        drop(tmp);
+    }
+
     /// The sweep's two refusals and its one removal, with the clock injected:
     /// an index a day old that nobody holds goes; one whose `-held` sibling is
     /// locked (here, by this test) stays however old; a fresh one stays.

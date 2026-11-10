@@ -39,7 +39,10 @@ pub use edit::{
     PolicyRevision, ProjectPolicyPatch, ProjectPolicySnapshot,
 };
 pub use effective::{idle_sweep_ms, EffectiveConfig, BUILTIN_SENSITIVE_PATHS};
-pub use glob::{glob_match, wildcard_count, MAX_PATTERN_LEN, MAX_WILDCARDS};
+pub use glob::{
+    any_match_ignoring_ascii_case, glob_match, sensitive_match, wildcard_count, MAX_PATTERN_LEN,
+    MAX_WILDCARDS, PATHS_FOLD_CASE,
+};
 pub use redactor_packs::{
     load_redactor_packs, redactor_pack_dir, LoadedPacks, PackDiagnostic, RedactorPack,
     RedactorRule, RedactorSample, REDACTORS_DIR_NAME, REDACTOR_PACK_SCHEMA_VERSION,

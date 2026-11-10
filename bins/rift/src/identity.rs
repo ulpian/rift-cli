@@ -5,7 +5,7 @@
 //! all writes are idempotent).
 //!
 //! Salt custody: the OS keychain (`rift`/`install-salt`) when available; a
-//! `0o600` file under the machine-global cache root as the documented fallback
+//! `0o600` file under `<cache root>/rift/` as the documented fallback
 //! for headless machines (the salt is an unlinkability nonce, not a key); a
 //! zero salt as the last resort (ids remain hashed, just unsalted).
 
@@ -34,22 +34,62 @@ fn salt_from_keychain(backend: &impl KeychainBackend) -> Option<[u8; 32]> {
     Some(salt)
 }
 
-/// Fallback custody: a `0o600` salt file under the machine-global cache root.
+/// Rift's own directory under the machine-global cache root, beside the
+/// family projections. The salt and the machine-id cache once sat at the
+/// cache root itself (`~/.cache`, `%LOCALAPPDATA%`), two generic names among
+/// every other program's files; they are read there once more to move them.
+const STATE_DIR: &str = "rift";
+
+/// Fallback custody: a `0o600` salt file under Rift's directory of the
+/// machine-global cache root.
+///
+/// The salt is never re-minted while one exists: every salted identity
+/// already recorded depends on it. So a salt at the old location is moved,
+/// not replaced, and the new file is renamed into place before the old one
+/// goes — a concurrent hook that finds the old one gone finds the new one on
+/// its second look rather than minting a third.
 fn salt_from_file(cache_root: &Path) -> Option<[u8; 32]> {
-    let path = cache_root.join(SALT_FILE);
-    if let Ok(bytes) = std::fs::read(&path) {
-        return bytes.as_slice().try_into().ok();
+    let dir = cache_root.join(STATE_DIR);
+    let path = dir.join(SALT_FILE);
+    if let Some(salt) = read_salt(&path) {
+        return Some(salt);
+    }
+    let legacy = cache_root.join(SALT_FILE);
+    if let Some(salt) = read_salt(&legacy) {
+        if write_owner_only(&dir, SALT_FILE, &salt) {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        return Some(salt);
+    }
+    if let Some(salt) = read_salt(&path) {
+        return Some(salt);
     }
     let mut salt = [0u8; 32];
     getrandom::getrandom(&mut salt).ok()?;
-    std::fs::create_dir_all(cache_root).ok()?;
-    std::fs::write(&path, salt).ok()?;
+    write_owner_only(&dir, SALT_FILE, &salt).then_some(salt)
+}
+
+/// A salt file's 32 bytes; anything else is no salt.
+fn read_salt(path: &Path) -> Option<[u8; 32]> {
+    std::fs::read(path).ok()?.as_slice().try_into().ok()
+}
+
+/// Write `name` under `dir`: a temp file made owner-only, then renamed into
+/// place, so no reader sees it partial or wider than `0o600`. Best-effort.
+fn write_owner_only(dir: &Path, name: &str, body: &[u8]) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let tmp = dir.join(format!("{name}.tmp"));
+    if std::fs::write(&tmp, body).is_err() {
+        return false;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    Some(salt)
+    std::fs::rename(&tmp, dir.join(name)).is_ok()
 }
 
 /// The per-install salt: keychain → file fallback → zero (documented order).
@@ -108,12 +148,19 @@ fn cached_machine_id(
 ) -> Option<MachineId> {
     let tag =
         rift_core::Blake3Id::from_bytes(rift_crypto::salt_tag(salt, MACHINE_ID_TAG_LABEL)).to_hex();
-    let path = root.join(MACHINE_ID_FILE);
-    if let Some(hit) = read_machine_id_cache(&path, &tag) {
+    let dir = root.join(STATE_DIR);
+    if let Some(hit) = read_machine_id_cache(&dir.join(MACHINE_ID_FILE), &tag) {
         return Some(hit);
     }
-    let id = derive()?;
-    write_machine_id_cache(root, &path, &tag, id);
+    // The old location, read once: a hit moves it, so the fingerprint is not
+    // read again just because the file changed directories.
+    let legacy = root.join(MACHINE_ID_FILE);
+    let id = match read_machine_id_cache(&legacy, &tag) {
+        Some(hit) => hit,
+        None => derive()?,
+    };
+    write_machine_id_cache(&dir, &tag, id);
+    let _ = std::fs::remove_file(&legacy);
     Some(id)
 }
 
@@ -132,7 +179,7 @@ fn read_machine_id_cache(path: &Path, tag: &str) -> Option<MachineId> {
 
 /// Write the cache: temp file + rename, owner-only. Best-effort — a failure
 /// here changes nothing but the next hook's cost.
-fn write_machine_id_cache(root: &Path, path: &Path, tag: &str, id: MachineId) {
+fn write_machine_id_cache(dir: &Path, tag: &str, id: MachineId) {
     let Ok(body) = serde_json::to_vec(&MachineIdCache {
         schema: MACHINE_ID_SCHEMA,
         salt_tag: tag.to_owned(),
@@ -140,19 +187,7 @@ fn write_machine_id_cache(root: &Path, path: &Path, tag: &str, id: MachineId) {
     }) else {
         return;
     };
-    if std::fs::create_dir_all(root).is_err() {
-        return;
-    }
-    let tmp = root.join(format!("{MACHINE_ID_FILE}.tmp"));
-    if std::fs::write(&tmp, body).is_err() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    let _ = std::fs::rename(&tmp, path);
+    let _ = write_owner_only(dir, MACHINE_ID_FILE, &body);
 }
 
 /// Derive (or read back) this install's machine id now, so a session's first
@@ -301,7 +336,7 @@ mod tests {
         assert_eq!(ask(), Some(derived(&salt)));
         assert_eq!(derivations, 1, "one derivation per install, not per hook");
 
-        let path = tmp.path().join(MACHINE_ID_FILE);
+        let path = tmp.path().join(STATE_DIR).join(MACHINE_ID_FILE);
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(!body.contains(RAW), "the raw id is never on disk: {body}");
         assert!(
@@ -322,7 +357,8 @@ mod tests {
     #[test]
     fn a_corrupt_or_foreign_cache_falls_back_to_derivation() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(MACHINE_ID_FILE);
+        let path = tmp.path().join(STATE_DIR).join(MACHINE_ID_FILE);
+        std::fs::create_dir_all(tmp.path().join(STATE_DIR)).unwrap();
         let salt = [5u8; 32];
         let count = |body: &str| {
             std::fs::write(&path, body).unwrap();
@@ -372,7 +408,7 @@ mod tests {
     fn an_absent_fingerprint_is_never_cached() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(cached_machine_id(tmp.path(), &[1u8; 32], || None), None);
-        assert!(!tmp.path().join(MACHINE_ID_FILE).exists());
+        assert!(!tmp.path().join(STATE_DIR).join(MACHINE_ID_FILE).exists());
     }
 
     #[test]
@@ -392,11 +428,52 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(tmp.path().join(SALT_FILE))
+            let mode = std::fs::metadata(tmp.path().join(STATE_DIR).join(SALT_FILE))
                 .unwrap()
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "salt file must be owner-only");
         }
+    }
+
+    /// A salt at the old, un-namespaced location is the install's salt: it is
+    /// moved under Rift's directory byte for byte, never re-minted, and the
+    /// cache root is left without it.
+    #[test]
+    fn a_salt_at_the_old_location_moves_under_rifts_directory_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = [9u8; 32];
+        std::fs::write(tmp.path().join(SALT_FILE), old).unwrap();
+
+        assert_eq!(salt_from_file(tmp.path()), Some(old));
+
+        assert!(!tmp.path().join(SALT_FILE).exists(), "the old file is gone");
+        assert_eq!(
+            std::fs::read(tmp.path().join(STATE_DIR).join(SALT_FILE)).unwrap(),
+            old
+        );
+        assert_eq!(salt_from_file(tmp.path()), Some(old), "and read from there");
+    }
+
+    /// The machine-id cache moves the same way, and a hit at the old location
+    /// derives nothing.
+    #[test]
+    fn a_machine_id_cache_at_the_old_location_moves_without_a_derivation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let salt = [5u8; 32];
+        cached_machine_id(tmp.path(), &salt, || Some(derived(&salt)));
+        let moved = tmp.path().join(STATE_DIR).join(MACHINE_ID_FILE);
+        std::fs::rename(&moved, tmp.path().join(MACHINE_ID_FILE)).unwrap();
+
+        let mut derivations = 0;
+        let got = cached_machine_id(tmp.path(), &salt, || {
+            derivations += 1;
+            Some(derived(&salt))
+        });
+
+        assert_eq!(got, Some(derived(&salt)));
+        assert_eq!(derivations, 0);
+        assert!(moved.is_file());
+        assert!(!tmp.path().join(MACHINE_ID_FILE).exists());
     }
 }

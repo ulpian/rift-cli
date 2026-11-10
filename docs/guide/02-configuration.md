@@ -342,7 +342,8 @@ Hook gates ask only for the projection: a running hook is its own proof.
 | `~/.cache/rift/<family-id>/projection.db`, `<recall-id>/recall.db` | The rebuildable capture and recall projections. | Yes — `rift rebuild`. |
 | `…/recall.db.set-aside-<UTC stamp>` | A recall projection `rift-memd rebuild` set aside: the only copy of serves no checkpoint carries (`rift backfill --recall-from <file>` reads it back). | No — only you remove it. |
 | `~/.cache/rift/canopy/ui-state.db` | Machine-global dashboard state. | Yes — layout and profiles. |
-| `~/.cache/install-salt`, `machine-id.json` | Per-install salt (`0600`, when the keychain is unused) and derived machine id, at the cache **root**. | Salt: changes derived identity. Id: re-derived. |
+| `~/.cache/rift/install-salt`, `machine-id.json` | Per-install salt (`0600`, when the keychain is unused) and derived machine id. An older binary wrote both at the cache root itself; the first read moves them here unchanged. | Salt: changes derived identity. Id: re-derived. |
+| `~/.cache/rift/<family-id>/hook-timings.bin` | The family's last 4,096 agent-hook, `prepare-commit-msg` and `post-commit` runs on this machine: verb, total time and the three slowest phases, fixed 128-byte records in a ring (per hook: its 16-byte header read, one record and the header written). `rift doctor --report` prints p50/p95/max per verb and the share over 100 ms. Never paths or content. | Yes — the percentiles start over. |
 | `~/.config/rift/projects.toml`, `canopy.toml` | Repository list; preferences (§2.9). | Yes — re-register / defaults. |
 | `~/.config/rift/keys/<recall-id>.key` | The family's 32-byte column key (`0600` in a `0700` directory): encrypts the summary and outline bodies in `recall.db`. Kept under the **config** root on purpose, so a copy, backup or sync of the cache alone is unreadable. | Yes, but encrypted summaries become misses until rebuilt; a fresh key is minted on next use. |
 

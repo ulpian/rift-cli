@@ -227,10 +227,11 @@ impl EffectiveConfig {
         &self.sensitive_paths
     }
 
-    /// Whether `path` matches any sensitive-path glob.
+    /// Whether `path` matches any sensitive-path glob, ignoring case on the
+    /// platforms whose filesystems do ([`glob::sensitive_match`]).
     #[must_use]
     pub fn is_sensitive_path(&self, path: &str) -> bool {
-        self.sensitive_paths.iter().any(|g| glob_match(g, path))
+        glob::sensitive_match(&self.sensitive_paths, path)
     }
 
     /// Whether rift-total-recall is enabled for this repository:

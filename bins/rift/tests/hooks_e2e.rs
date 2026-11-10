@@ -371,14 +371,14 @@ fn install_warms_the_projection_and_the_salt_so_the_first_commit_does_not() {
     assert_eq!(code, 0, "install exits 0");
 
     assert!(
-        cache.join("install-salt").exists(),
+        cache.join("rift").join("install-salt").exists(),
         "the salt was minted at install, not at the first commit"
     );
     // The machine id's one derivation (an `ioreg` child on macOS) is paid
     // here too, so a session's first hook reads the salted digest instead.
     if cfg!(target_os = "macos") {
         assert!(
-            cache.join("machine-id.json").exists(),
+            cache.join("rift").join("machine-id.json").exists(),
             "the machine id was derived and cached at install"
         );
     }
@@ -514,7 +514,7 @@ async fn the_machine_fingerprint_is_read_once_per_install_not_once_per_session()
 
     session_start(&repo, "01JMACHINEIDCACHE0000000001", &env);
     assert_eq!(spawns(), 1, "the first session's first hook derived the id");
-    let cache_file = cache.join("machine-id.json");
+    let cache_file = cache.join("rift").join("machine-id.json");
     assert!(cache_file.exists(), "and cached the salted digest");
     let body = std::fs::read_to_string(&cache_file).unwrap();
     assert!(

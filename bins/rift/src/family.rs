@@ -124,6 +124,28 @@ pub(crate) fn projection_db(root: &Path) -> Result<PathBuf> {
     Ok(projection_db_of(&resolve_at(root)?))
 }
 
+/// The family's own directory under [`cache_root`], where its capture
+/// projection and its hook-timing ring live.
+pub(crate) fn family_dir_of(family: &Family) -> PathBuf {
+    rift_store::projection_dir_under(&cache_root(), &family.family_id)
+}
+
+/// The family directory of the repository at `root` without minting: `None`
+/// outside a repository or before the family has an identity. For the hook
+/// paths and read-only reports that must never create one.
+pub(crate) fn family_dir_here(root: &Path) -> Option<PathBuf> {
+    family_dir_of_paths(&rift_git::discover(root).ok()?)
+}
+
+/// [`family_dir_here`] for a repository already discovered: one manifest
+/// read, never a mint.
+pub(crate) fn family_dir_of_paths(paths: &rift_git::RepoPaths) -> Option<PathBuf> {
+    match rift_git::resolve_family(paths, MintPolicy::Never) {
+        Ok(FamilyState::Minted(family)) => Some(family_dir_of(&family)),
+        _ => None,
+    }
+}
+
 /// The capture projection of a family already resolved, under [`cache_root`].
 pub(crate) fn projection_db_of(family: &Family) -> PathBuf {
     rift_store::projection_db_for_family_under(&cache_root(), family)
@@ -205,6 +227,34 @@ pub(crate) fn cache_root() -> PathBuf {
 /// the seam its resolution order is tested through.
 fn cache_root_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
     rift_store::resolve_cache_root(env)
+}
+
+/// Why this process has nowhere to keep its machine state, or `None` when it
+/// has: the environment names neither a cache root nor a config root (cron,
+/// `env -i`, a service with no `HOME`). `main` asks before anything runs, so a
+/// command refuses with this sentence and a hook exits quietly, instead of
+/// projections, the registry and the install salt landing in the working
+/// directory.
+#[cfg(not(test))]
+pub(crate) fn state_roots_unset() -> Option<&'static str> {
+    state_roots_unset_from(|key| std::env::var(key).ok())
+}
+
+/// The test build always has its per-process root (see [`cache_root`]).
+#[cfg(test)]
+pub(crate) fn state_roots_unset() -> Option<&'static str> {
+    None
+}
+
+/// [`state_roots_unset`] over an injected environment lookup.
+fn state_roots_unset_from(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    if rift_store::configured_cache_root(&env).is_none() {
+        return Some(rift_store::CACHE_ROOT_UNSET);
+    }
+    if rift_registry::configured_config_root(&env).is_none() {
+        return Some(rift_registry::CONFIG_ROOT_UNSET);
+    }
+    None
 }
 
 /// Forget every memoized resolution of one family: the entries whose
@@ -575,6 +625,27 @@ mod tests {
             PathBuf::from("/home/u/.cache")
         };
         assert_eq!(cache_root_from(table(&ALL[2..])), platform);
+    }
+
+    /// With no `HOME` and no override, the process refuses rather than keep
+    /// its state in the working directory; an override alone is not enough,
+    /// because the registry lives under the config root.
+    #[test]
+    fn an_environment_without_home_or_an_override_names_why_it_refuses() {
+        let none = |_: &str| None::<String>;
+        assert_eq!(
+            state_roots_unset_from(none),
+            Some(rift_store::CACHE_ROOT_UNSET)
+        );
+        let cache_only = |key: &str| (key == "RIFT_CACHE_DIR").then(|| "/c".to_owned());
+        assert_eq!(
+            state_roots_unset_from(cache_only),
+            Some(rift_registry::CONFIG_ROOT_UNSET)
+        );
+        let both = |key: &str| {
+            matches!(key, "RIFT_CACHE_DIR" | "RIFT_CONFIG_DIR").then(|| "/c".to_owned())
+        };
+        assert_eq!(state_roots_unset_from(both), None);
     }
 
     /// An in-process test never reaches the developer's cache: every store

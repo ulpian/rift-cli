@@ -14,8 +14,8 @@
 //! ```
 //!
 //! Unset — the shipped default, and what every real commit runs — the timer
-//! takes no clock reading at all past construction and prints nothing, so the
-//! instrumented path is the same path an uninstrumented user runs.
+//! prints nothing; it still reads the clock around each phase for the ring
+//! below, and the phases run exactly as they would uninstrumented.
 //!
 //! Why stderr and not the projection: a hook that cannot open its store still
 //! has phases worth reporting, and stderr is the one sink a `git commit`
@@ -34,8 +34,17 @@
 //! `outside_repository` instead: it captures nothing, and a
 //! phase that says so is how the instrument distinguishes that from a hook
 //! that never ran.
+//!
+//! Every run the hook names a family for is also kept, timing only, in the
+//! family's ring ([`ring`]): one fixed-size record appended on drop, read by
+//! `rift doctor --report`. That is why a timer from the environment records
+//! its phases whether or not it prints them; a clock read per phase is the
+//! whole of that cost.
+
+pub(crate) mod ring;
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// The environment variable that turns phase reporting on.
@@ -47,8 +56,15 @@ pub(crate) const TIMING_ENV: &str = "RIFT_HOOK_TIMING";
 pub(crate) struct HookTimer {
     /// The hook name the line is keyed by (`post-commit`, …).
     hook: &'static str,
+    /// The verb the ring files this run under: the hook name, or the agent
+    /// and its verb for an agent hook.
+    verb: String,
     /// `false` short-circuits every phase to a plain call with no clock read.
     enabled: bool,
+    /// Whether drop prints the line ([`TIMING_ENV`]).
+    print: bool,
+    /// The family directory the run is appended to, once the hook knows it.
+    ring_dir: RefCell<Option<PathBuf>>,
     /// When the hook body started (only meaningful while `enabled`).
     start: Instant,
     /// Phases in the order they completed.
@@ -56,9 +72,12 @@ pub(crate) struct HookTimer {
 }
 
 impl HookTimer {
-    /// A timer for `hook`, enabled iff [`TIMING_ENV`] is set in the environment.
+    /// A timer for `hook` that records its phases for the ring, and prints
+    /// its line iff [`TIMING_ENV`] is set in the environment.
     pub(crate) fn from_env(hook: &'static str) -> Self {
-        Self::new(hook, std::env::var_os(TIMING_ENV).is_some())
+        let mut timer = Self::new(hook, true);
+        timer.print = std::env::var_os(TIMING_ENV).is_some();
+        timer
     }
 
     /// A timer with an explicit gate — the seam the tests drive, so no test has
@@ -66,9 +85,27 @@ impl HookTimer {
     pub(crate) fn new(hook: &'static str, enabled: bool) -> Self {
         Self {
             hook,
+            verb: hook.to_owned(),
             enabled,
+            print: enabled,
+            ring_dir: RefCell::new(None),
             start: Instant::now(),
             records: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The same timer filed in the ring under `verb` instead of the hook name.
+    pub(crate) fn with_verb(mut self, verb: String) -> Self {
+        self.verb = verb;
+        self
+    }
+
+    /// Append this run to the ring under `family_dir` when it ends. Called
+    /// once the hook has resolved its family; a hook that never does (outside
+    /// a repository, not set up here) leaves no record.
+    pub(crate) fn keep_in(&self, family_dir: PathBuf) {
+        if self.enabled {
+            *self.ring_dir.borrow_mut() = Some(family_dir);
         }
     }
 
@@ -116,8 +153,16 @@ impl HookTimer {
 
 impl Drop for HookTimer {
     fn drop(&mut self) {
-        if self.enabled {
+        if self.print {
             eprintln!("{}", self.report_line());
+        }
+        if let Some(dir) = self.ring_dir.borrow_mut().take() {
+            ring::append(
+                &dir,
+                &self.verb,
+                self.start.elapsed().as_micros(),
+                &self.records.borrow(),
+            );
         }
     }
 }
@@ -187,5 +232,27 @@ mod tests {
             2,
             "both occurrences survive into the line: {line}"
         );
+    }
+
+    /// A run whose hook named its family lands in that family's ring under
+    /// its verb when the timer drops; one that never did leaves nothing.
+    #[test]
+    fn a_timer_kept_in_a_family_appends_one_run_on_drop() {
+        let family = tempfile::tempdir().unwrap();
+        {
+            let t = HookTimer::new("agent-hook", true).with_verb("codex:stop".into());
+            t.phase("ingest", || ());
+            t.keep_in(family.path().to_path_buf());
+        }
+        {
+            let t = HookTimer::new("post-commit", true);
+            t.phase("discover", || ());
+        }
+
+        let runs = ring::read_runs(family.path());
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].verb, "codex:stop");
+        assert_eq!(runs[0].slowest[0].0, "ingest");
     }
 }

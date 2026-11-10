@@ -40,17 +40,50 @@ pub(crate) fn cmd_doctor_report(start: &Path) -> Outcome {
         "doctor_exit": doctor.code,
         "doctor": scrub(&doctor.json),
         "recall_status": scrub(&status),
+        "hook_timings": scrub(&hook_timings(&root)),
     });
     let text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
+    let timings = report
+        .get("hook_timings")
+        .map_or_else(String::new, timing_lines);
     Outcome::ok(
         format!(
             "Rift findings report. It holds counts, states and versions only: every \
              path, name and message is replaced by its length. Nothing is sent \
              anywhere. Review it, then paste everything between the fences into your \
-             report.\n```json\n{text}\n```"
+             report.\n{timings}```json\n{text}\n```"
         ),
         report,
     )
+}
+
+/// One line per hook verb for the person reading the report before pasting.
+fn timing_lines(summary: &Value) -> String {
+    let Some(verbs) = summary.get("verbs").and_then(Value::as_object) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (verb, s) in verbs {
+        let num = |key: &str| s.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+        out.push_str(&format!(
+            "hook {verb}: {} runs, p50 {} ms, p95 {} ms, max {} ms, {:.1}% over 100 ms\n",
+            s.get("runs").and_then(Value::as_u64).unwrap_or(0),
+            num("p50_ms"),
+            num("p95_ms"),
+            num("max_ms"),
+            num("over_100ms_share") * 100.0,
+        ));
+    }
+    out
+}
+
+/// p50/p95/max per hook verb and the share over 100 ms, from the family's
+/// timing ring; an empty summary for a repository with no family here.
+fn hook_timings(root: &Path) -> Value {
+    let runs = crate::family::family_dir_here(root)
+        .map(|dir| crate::hooktime::ring::read_runs(&dir))
+        .unwrap_or_default();
+    crate::hooktime::ring::summary(&runs)
 }
 
 /// The kind of an error, never its message: messages can quote paths.

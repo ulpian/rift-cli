@@ -99,6 +99,11 @@ rift-recall-doc = { version = "1.2.0-alpha", path = "../../crates/rift-recall-do
 # without.
 rift-recall-search = { version = "1.2.0-alpha", path = "../../crates/rift-recall-search", optional = true }
 
+# The capture-queue owner marker's file identity on Windows (volume serial and
+# file index), the same reader `rift-store`'s projection lock uses.
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+
 [dev-dependencies]
 proptest = { workspace = true }
 # The one repository-fixture builder: a `.git` a test writes has
