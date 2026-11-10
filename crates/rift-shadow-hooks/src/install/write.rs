@@ -39,14 +39,29 @@ use super::{HookInstall, CHAINED_SUFFIX, HOOK_NAMES, MARKER};
 /// can never be executable. It fails closed instead of resolving elsewhere.
 #[must_use]
 pub fn shim_text(rift_bin: &Path, name: &str) -> String {
-    let bin = rift_bin.display();
+    let bin = shell_word(&rift_bin.display().to_string());
     format!(
         "#!/bin/sh\n\
          {MARKER} — do not edit.\n\
          chained=\"${{0%/*}}/{name}{CHAINED_SUFFIX}\"\n\
          if [ -x \"$chained\" ]; then \"$chained\" \"$@\" || exit $?; fi\n\
-         exec \"{bin}\" hooks git {name} --git-dir \"${{GIT_DIR:-.git}}\" -- \"$@\"\n"
+         exec {bin} hooks git {name} --git-dir \"${{GIT_DIR:-.git}}\" -- \"$@\"\n"
     )
+}
+
+/// The binary path as one shell word that runs exactly that path.
+///
+/// Double quotes, as every shim was written, while the path holds nothing
+/// those quotes would act on: uninstall and refresh recognise a shim by its
+/// exact text, so an ordinary path must keep producing the same bytes. A path
+/// holding `"`, `$`, `` ` `` or `\` would end the word early or expand inside
+/// it, so it is single-quoted instead, with each `'` closed, escaped and
+/// reopened.
+fn shell_word(path: &str) -> String {
+    if !path.contains(['"', '$', '`', '\\']) {
+        return format!("\"{path}\"");
+    }
+    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// Write every hook, chaining any pre-existing user hook aside. Returns the
@@ -291,5 +306,23 @@ mod tests {
                 "{name} shim leaks brand"
             );
         }
+    }
+
+    #[test]
+    fn an_ordinary_path_keeps_its_bytes_and_a_live_one_is_single_quoted() {
+        assert_eq!(
+            shell_word("/Users/a b/.local/bin/rift"),
+            "\"/Users/a b/.local/bin/rift\""
+        );
+        assert_eq!(shell_word("/opt/$HOME/rift"), "'/opt/$HOME/rift'");
+        assert_eq!(
+            shell_word("/opt/it's \"q\"/rift"),
+            r#"'/opt/it'\''s "q"/rift'"#
+        );
+        let text = shim_text(Path::new("/opt/$x`y`/rift"), "post-commit");
+        assert!(
+            text.contains("exec '/opt/$x`y`/rift' hooks git post-commit"),
+            "{text}"
+        );
     }
 }
