@@ -448,20 +448,21 @@ fn delivered_first_pointer(
     repo: &Path,
     db: &Path,
 ) -> (String, tokio::runtime::Runtime, rift_store::SqliteStore) {
-    let pointer =
-        session_pointer_in(repo, &CC, PROMPT, FIRST_PROMPT).expect("the first prompt injects");
+    // The candidate the hook itself builds, so the count it carries is the
+    // one the delivery books: the pointer's is pinned, not measured.
+    let candidate = super::session_context_candidate_in(repo, &CC, PROMPT, FIRST_PROMPT)
+        .expect("the first prompt injects");
+    let pointer = candidate.text.clone();
+    assert_eq!(
+        candidate.measured_tokens,
+        Some(crate::agent_help::SESSION_POINTER_TOKENS)
+    );
     assert_eq!(
         session_pointer_in(repo, &CC, PROMPT, FIRST_PROMPT),
         None,
         "the same session's next prompt is silent"
     );
-    let plan =
-        rift_recall_serve::ServeDispatcher::plan_context([rift_recall_types::ContextCandidate {
-            kind: rift_recall_types::ContextKind::SessionPointer,
-            text: pointer.clone(),
-            avoided_tokens: 0,
-            fallback: false,
-        }]);
+    let plan = rift_recall_serve::ServeDispatcher::plan_context([candidate]);
     record_context_delivery_in(repo, CC.as_str(), &plan, None);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()

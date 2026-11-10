@@ -15,6 +15,7 @@ fn context_planning_has_one_transport_independent_priority_order() {
         text: text.to_owned(),
         avoided_tokens: 0,
         fallback: false,
+        measured_tokens: None,
     };
     let plan = ServeDispatcher::plan_context([
         candidate(ContextKind::DeltaManifest, "delta"),
@@ -44,6 +45,26 @@ fn context_planning_has_one_transport_independent_priority_order() {
         ServeDispatcher::plan_context(std::iter::empty::<ContextCandidate>()).kind(),
         None
     );
+}
+
+#[test]
+fn a_candidate_that_carries_its_count_is_delivered_at_that_count() {
+    // The figure is deliberately not the text's real count: the dispatcher
+    // must take the author's number rather than measure the text again.
+    let plan = ServeDispatcher::plan_context([ContextCandidate {
+        kind: ContextKind::SessionPointer,
+        text: "pointer".to_owned(),
+        avoided_tokens: 0,
+        fallback: false,
+        measured_tokens: Some(41),
+    }]);
+    let ContextPlan::Deliver {
+        delivered_tokens, ..
+    } = plan
+    else {
+        panic!("a non-empty candidate is delivered");
+    };
+    assert_eq!(delivered_tokens, 41);
 }
 
 /// The surface is closed, and closed at a list rather than at a number: a

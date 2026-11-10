@@ -61,6 +61,12 @@ pub struct ContextCandidate {
     pub avoided_tokens: u32,
     /// Whether this is a fallback after a preferred native delivery failed.
     pub fallback: bool,
+    /// The exact token count of `text`, when its author already holds one —
+    /// static text whose count a test pins against the real tokenizer. `None`
+    /// leaves the count to the dispatcher. Carried because initialising the
+    /// tokenizer is most of a boundary hook's cost, and a fixed text should
+    /// not pay it to learn a number that cannot change.
+    pub measured_tokens: Option<u32>,
 }
 
 /// The sole input to native context encoders.

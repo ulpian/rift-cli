@@ -829,7 +829,9 @@ impl<'a> ServeDispatcher<'a> {
         };
         ContextPlan::Deliver {
             kind: selected.kind,
-            delivered_tokens: rift_tokens::count(&selected.text),
+            delivered_tokens: selected
+                .measured_tokens
+                .unwrap_or_else(|| rift_tokens::count(&selected.text)),
             text: selected.text,
             avoided_tokens: selected.avoided_tokens,
             fallback: selected.fallback,

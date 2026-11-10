@@ -409,6 +409,14 @@ pub(crate) fn session_pointer() -> String {
     )
 }
 
+/// The `cl100k_base` token count of [`session_pointer`], pinned here so the
+/// boundary that hands the pointer out never initialises the tokenizer to
+/// learn it: that initialisation is most of a session-start hook's cost, and
+/// the text cannot change without this file changing too. A test asserts the
+/// figure against the real tokenizer, so an edit to the text that forgets the
+/// number fails CI rather than booking a wrong figure.
+pub(crate) const SESSION_POINTER_TOKENS: u32 = 47;
+
 /// The command a per-turn delta manifest names for detail: the pull for the
 /// first file it names, spelled with that file's own path and the revision the
 /// session holds.
@@ -721,6 +729,17 @@ mod tests {
             "the session pointer costs {tokens} tokens (cap {POINTER_CAP})"
         );
         assert!(tokens > 0);
+    }
+
+    /// The pinned figure is the real tokenizer's, so a hook that books it
+    /// instead of counting books exactly what counting would have.
+    #[test]
+    fn the_pinned_pointer_count_is_the_real_tokenizers_count() {
+        assert_eq!(rift_tokens::provenance(), rift_tokens::TOKENIZER);
+        assert_eq!(
+            SESSION_POINTER_TOKENS,
+            rift_tokens::count(&session_pointer())
+        );
     }
 
     /// The provenance half of the map, locked: the three

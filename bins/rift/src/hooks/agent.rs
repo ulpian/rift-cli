@@ -331,6 +331,7 @@ fn session_context_plan(
             text: reason.to_owned(),
             avoided_tokens: 0,
             fallback: false,
+            measured_tokens: None,
         });
     if !rift_agent::respond::accepts_injection(&id, verb) {
         return rift_recall_serve::ServeDispatcher::plan_context(direct_replacement);
@@ -546,6 +547,7 @@ fn pending_replacement_candidate(
         text: message.to_owned(),
         avoided_tokens: 0,
         fallback: true,
+        measured_tokens: None,
     })
 }
 
@@ -636,6 +638,7 @@ fn session_context_candidate_in(
             text: map,
             avoided_tokens: 0,
             fallback: false,
+            measured_tokens: None,
         });
     }
     if let Some(pointer) = claimed_pointer(repo, agent, verb, &session, window.as_deref()) {
@@ -662,6 +665,7 @@ fn session_context_candidate_in(
         text,
         avoided_tokens: 0,
         fallback: false,
+        measured_tokens: None,
     })
 }
 
@@ -678,28 +682,26 @@ fn claimed_pointer(
     window: Option<&str>,
 ) -> Option<rift_recall_types::ContextCandidate> {
     let claim = claim_injection(repo, session, window)?;
-    let text = opening_text(repo, agent, verb, session, window)?;
-    // The pointer is spend: measure it with the real tokenizer and record
-    // it against the same savings ledger the serves land in, keyed by the
-    // session that paid for it, so the estimate stays honest about what
-    // injection costs: no token class is exempt from accounting. The
-    // coordinator section is measured in the same string, so its tokens are
+    let (text, pinned) = opening_text(repo, agent, verb, session, window)?;
+    // The pointer is spend: record its real-tokenizer count against the same
+    // savings ledger the serves land in, keyed by the session that paid for
+    // it, so the estimate stays honest about what injection costs: no token
+    // class is exempt from accounting. The pointer's count is pinned rather
+    // than measured, so the commonest boundary never initialises the
+    // tokenizer; the coordinator section is measured, and its tokens are
     // spend on the same row.
+    let tokens = pinned.unwrap_or_else(|| rift_tokens::count(&text));
     let attribution = super::audit::serve_attribution(
         Some(session),
         Some(&crate::window_journal::key(session, window)),
     );
-    record_injection_spend(
-        repo,
-        rift_tokens::count(&text),
-        &claim,
-        attribution.as_ref(),
-    );
+    record_injection_spend(repo, tokens, &claim, attribution.as_ref());
     Some(rift_recall_types::ContextCandidate {
         kind: rift_recall_types::ContextKind::SessionPointer,
         text,
         avoided_tokens: 0,
         fallback: false,
+        measured_tokens: Some(tokens),
     })
 }
 
@@ -712,16 +714,21 @@ fn claimed_pointer(
 /// The main thread's window has no coordinator, and every later boundary of a
 /// subagent's window is the manifest's, which speaks about what that window
 /// has read itself.
+///
+/// The second member is the text's pinned token count where it has one — the
+/// pointer's — and `None` for a section composed here, which is measured.
 fn opening_text(
     repo: &Path,
     agent: &rift_core::AgentId,
     verb: &str,
     session: &str,
     window: Option<&str>,
-) -> Option<String> {
-    let pointer = crate::agent_help::session_pointer();
+) -> Option<(String, Option<u32>)> {
     let (true, Some(window)) = (window_opens_here(agent, verb), window) else {
-        return Some(pointer);
+        return Some((
+            crate::agent_help::session_pointer(),
+            Some(crate::agent_help::SESSION_POINTER_TOKENS),
+        ));
     };
     let opening = Opening {
         repo,
@@ -730,7 +737,7 @@ fn opening_text(
         session,
         window,
     };
-    coordinator_section(&opening, "")
+    coordinator_section(&opening, "").map(|section| (section, None))
 }
 
 /// Whether this boundary is the one that **opens** a context window rather than
