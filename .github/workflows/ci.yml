@@ -69,6 +69,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --no-fail-fast
+      # install.sh has `xtask release` fixture flows; install.ps1 gets the same
+      # local-manifest install here, over the rift.exe the tests just built.
+      - name: install.ps1 fixture install
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ci/install-ps1-fixture.ps1
   release-build:
     runs-on: ubuntu-latest
     steps:

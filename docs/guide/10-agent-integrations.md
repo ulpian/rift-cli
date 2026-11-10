@@ -205,6 +205,14 @@ through once. Hook failures fail open and mark support degraded. Codex `PreToolU
 strict recognised redundant shell read into a shell-safe `printf`; the first configured `updatedInput`
 wins, so enablement places Rift's group first, preserving unrelated groups' order.
 
+**Windows: shell reads are not intercepted.** On Windows, Claude Code runs commands through its
+`PowerShell` tool instead of `Bash`, and Rift deliberately recognises nothing that tool runs as a
+shell read: the grammar it matches is a list of POSIX commands, and in PowerShell several of those
+names (`cat`, `type`, `ls` as aliases) mean other programs, so a match could amend a command that
+does something else. Those reads pass through untouched and earn nothing, so on Windows the
+read-gate savings come only from Claude Code's native `Read` tool, which is gated exactly as on
+macOS and Linux. A low shell-read saving there is the missing channel, not a fault.
+
 ---
 
 ## 10.8 Enabling and disabling

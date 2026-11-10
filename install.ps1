@@ -15,7 +15,25 @@ if ([int]$tls -ne 0 -and -not ([int]$tls -band [int][Net.SecurityProtocolType]::
     [Net.ServicePointManager]::SecurityProtocol = $tls -bor [Net.SecurityProtocolType]::Tls12
 }
 
-function Fetch-RiftFile([string]$Url, [string]$Destination) {
+# Downloads stream to disk and stop at a cap, as curl's --max-filesize does for
+# install.sh, so a hostile or broken server cannot fill the disk first.
+$RiftArchiveLimit = 268435456
+$RiftManifestLimit = 1048576
+function Copy-RiftCapped([IO.Stream]$Source, [string]$Destination, [long]$Limit) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(120)
+    $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $buffer = New-Object byte[] 65536
+        $total = 0L
+        while (($count = $Source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $total += $count
+            if ($total -gt $Limit) { throw 'The download is larger than this installer accepts; nothing was changed.' }
+            if ([DateTime]::UtcNow -gt $deadline) { throw 'Download unavailable or invitation expired. Request a fresh link.' }
+            $output.Write($buffer, 0, $count)
+        }
+    } finally { $output.Dispose() }
+}
+function Fetch-RiftFile([string]$Url, [string]$Destination, [long]$Limit) {
     $uri = $null
     if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.Host -ne 'storage.googleapis.com' -or $uri.UserInfo -or $uri.Fragment) {
         throw 'Use the Google Cloud download link from your invitation.'
@@ -26,8 +44,89 @@ function Fetch-RiftFile([string]$Url, [string]$Destination) {
     if ($env:RIFT_DOWNLOAD_BUCKET -and -not $uri.AbsolutePath.StartsWith("/$($env:RIFT_DOWNLOAD_BUCKET)/", [StringComparison]::Ordinal)) {
         throw 'This link is not from the Rift release bucket. Use the link from your invitation.'
     }
-    try { Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 120 }
-    catch { throw 'Download unavailable or invitation expired. Request a fresh link.' }
+    # CI's stand-in for install.sh's PATH-resolved fixture curl: the preview
+    # bucket served from a local directory through the same capped copy. Never
+    # under a named release bucket, which `rift update` always sets.
+    if ($env:RIFT_INSTALL_FIXTURE_DIR -and -not $env:RIFT_DOWNLOAD_BUCKET -and $uri.AbsolutePath -match '^/rift-install-preview/([A-Za-z0-9][A-Za-z0-9._-]*)$') {
+        $source = [IO.File]::OpenRead((Join-Path $env:RIFT_INSTALL_FIXTURE_DIR $Matches[1]))
+        try { Copy-RiftCapped $source $Destination $Limit } finally { $source.Dispose() }
+        return
+    }
+    try {
+        $request = [Net.WebRequest]::Create($uri)
+        $request.Timeout = 120000
+        $request.ReadWriteTimeout = 120000
+        $request.MaximumAutomaticRedirections = 5
+        $response = $request.GetResponse()
+    } catch { throw 'Download unavailable or invitation expired. Request a fresh link.' }
+    try {
+        if ($response.ResponseUri.Scheme -ne 'https') { throw 'Download unavailable or invitation expired. Request a fresh link.' }
+        if ($response.ContentLength -gt $Limit) { throw 'The download is larger than this installer accepts; nothing was changed.' }
+        $body = $response.GetResponseStream()
+        try { Copy-RiftCapped $body $Destination $Limit }
+        catch [Net.WebException], [IO.IOException] { throw 'Download unavailable or invitation expired. Request a fresh link.' }
+        finally { $body.Dispose() }
+    } finally { $response.Close() }
+}
+# The lock records "PID EPOCH" of its holder, as install.sh and `rift uninstall`
+# do (theirs is a directory holding an `owner` file). One whose holder is gone,
+# or older than fifteen minutes whoever holds it (a recycled PID must not pin
+# it), was left by a closed window and is reclaimed.
+$RiftLockStaleSeconds = 900
+function Get-RiftLockBusy([string]$Path) {
+    "Another Rift install, update or uninstall is running. Wait for it to finish; if none is, remove $Path and try again (a lock left by a closed window is reclaimed after 15 minutes)."
+}
+function Open-RiftLockFile([string]$Path) {
+    try { $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
+    catch { return $null }
+    $owner = [Text.Encoding]::ASCII.GetBytes("$PID $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`n")
+    $stream.Write($owner, 0, $owner.Length)
+    $stream.Flush()
+    return $stream
+}
+function Test-RiftLockStale([string]$Path) {
+    # A live installer holds its lock file open unshared, so failing to read it means busy.
+    try {
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        $ownerPath = if ($item.PSIsContainer) { Join-Path $Path 'owner' } else { $Path }
+        $text = ''
+        if (Test-Path -LiteralPath $ownerPath -PathType Leaf) { $text = [IO.File]::ReadAllText($ownerPath).Trim() }
+    } catch { return $false }
+    if ($text -match '^([0-9]{1,9}) ([0-9]{1,12})$') {
+        $started = [long]$Matches[2]
+        if (-not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) { return $true }
+        return ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $started) -gt $RiftLockStaleSeconds
+    }
+    # No owner line (an older installer's lock): only its age speaks for it.
+    return ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds -gt $RiftLockStaleSeconds
+}
+function Lock-RiftInstall([string]$Path) {
+    $stream = Open-RiftLockFile $Path
+    if ($stream) { return $stream }
+    if (-not (Test-RiftLockStale $Path)) { throw (Get-RiftLockBusy $Path) }
+    try {
+        if (Test-Path -LiteralPath $Path -PathType Container) { [IO.Directory]::Delete($Path, $true) }
+        else { [IO.File]::Delete($Path) }
+    } catch { throw (Get-RiftLockBusy $Path) }
+    $stream = Open-RiftLockFile $Path
+    if (-not $stream) { throw (Get-RiftLockBusy $Path) }
+    Write-Warning 'Reclaimed a stale installation lock left by an interrupted run.'
+    return $stream
+}
+# Only the x64 build is published. Windows 11 on ARM runs it under emulation;
+# Windows 10 on ARM has no x64 emulation, so it is refused before downloading.
+function Assert-RiftArchitecture {
+    if (-not [Environment]::Is64BitOperatingSystem) { throw 'This alpha requires 64-bit Windows.' }
+    # The machine-scope value names the hardware even inside an emulated or 32-bit host.
+    $arch = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
+    if (-not $arch) { $arch = $env:PROCESSOR_ARCHITEW6432 }
+    if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
+    if ($arch -ne 'ARM64') { return }
+    if ([Environment]::OSVersion.Version.Build -lt 22000) {
+        throw 'Windows 10 on ARM cannot run this alpha: only an x64 build is published and Windows 10 on ARM has no x64 emulation. Use Windows 11 or an x64 machine.'
+    }
+    Write-Output 'Windows on ARM: installing the x64 build, so rift and its agent hooks run under emulation and start more slowly.'
 }
 # Release tags this installer understands: vMAJOR.MINOR.PATCH-alpha[.N],
 # each number one to six digits.
@@ -100,7 +199,7 @@ if ((Test-Path -LiteralPath $bin) -and ((Get-Item -LiteralPath $bin -Force).Attr
 }
 [IO.Directory]::CreateDirectory($bin) | Out-Null
 $lockPath = Join-Path $bin '.rift-install.lock'
-$lock = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+$lock = Lock-RiftInstall $lockPath
 $stage = Join-Path $bin ('.rift-install.' + [Guid]::NewGuid().ToString('N'))
 $binary = Join-Path $bin 'rift.exe'
 $receipt = Join-Path $bin 'rift.install-receipt'
@@ -127,9 +226,11 @@ try {
     $manifestPath = Join-Path $stage 'manifest'
     Write-Output "  @--o--o  Step 1/3: Download invitation and binary"
     # `rift update` verified this manifest's signature and hands over that copy.
-    if ($env:RIFT_UPDATE -eq '1' -and $env:RIFT_VERIFIED_MANIFEST) { Copy-Item -LiteralPath $env:RIFT_VERIFIED_MANIFEST -Destination $manifestPath }
-    else { Fetch-RiftFile $env:RIFT_DOWNLOAD_MANIFEST $manifestPath }
-    if ((Get-Item -LiteralPath $manifestPath).Length -gt 1048576) { throw 'Invitation manifest is too large.' }
+    if ($env:RIFT_UPDATE -eq '1' -and $env:RIFT_VERIFIED_MANIFEST) {
+        if ((Get-Item -LiteralPath $env:RIFT_VERIFIED_MANIFEST).Length -gt $RiftManifestLimit) { throw 'Invitation manifest is too large.' }
+        Copy-Item -LiteralPath $env:RIFT_VERIFIED_MANIFEST -Destination $manifestPath
+    }
+    else { Fetch-RiftFile $env:RIFT_DOWNLOAD_MANIFEST $manifestPath $RiftManifestLimit }
     $manifestLines = [IO.File]::ReadAllLines($manifestPath)
     if ($manifestLines.Length -lt 2) { throw 'Invalid invitation.' }
     $header = $manifestLines[0] -split "`t"
@@ -152,10 +253,9 @@ try {
         Complete-RiftInstall
         return
     }
-    # The x64 build also runs on Windows ARM64 through Windows' x64 emulation.
-    if (-not [Environment]::Is64BitOperatingSystem) { throw 'This alpha requires 64-bit Windows.' }
+    Assert-RiftArchitecture
     $archive = Join-Path $stage 'archive.zip'
-    Fetch-RiftFile $archiveUrl $archive
+    Fetch-RiftFile $archiveUrl $archive $RiftArchiveLimit
     Write-Output "  *--@--o  Step 2/3: Verify archive and executable"
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
         throw 'Archive checksum mismatch; existing installation was preserved.'

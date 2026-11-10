@@ -19,6 +19,7 @@ pub(crate) fn preferences(ascii: bool) -> Result<Outcome> {
     }
 }
 
+mod lock;
 mod path_entry;
 mod release_feed;
 mod uninstall;

@@ -1,5 +1,6 @@
 //! Uninstall through the same ownership-aware integration services used by setup.
 
+use super::lock::InstallLock;
 use super::{path_entry, refusal, Installation, UninstallArgs};
 use crate::cli::{exit, Outcome};
 use rift_core::Result;
@@ -27,15 +28,12 @@ pub(crate) fn run(args: &UninstallArgs) -> Result<Outcome> {
         return Ok(Outcome::coded(exit::PRECONDITION,
             "Purging deletes Rift's machine-local capture/Recall caches, settings, and project runtime state. Stop agents first. Review `rift uninstall --purge --dry-run`, then confirm with `rift uninstall --purge --yes`.", summary));
     }
-    let lock = install
-        .binary
-        .parent()
-        .ok_or_else(|| refusal("installation directory unavailable"))?
-        .join(".rift-install.lock");
-    std::fs::create_dir(&lock).map_err(|_| {
-        refusal("another installation operation is running, or its lock needs inspection")
-    })?;
-    let install_lock = Lock(lock);
+    let install_lock = InstallLock::acquire(
+        install
+            .binary
+            .parent()
+            .ok_or_else(|| refusal("installation directory unavailable"))?,
+    )?;
     install.recheck()?;
     for project in &projects {
         remove_integrations(project, &install.binary)?;
@@ -46,18 +44,11 @@ pub(crate) fn run(args: &UninstallArgs) -> Result<Outcome> {
         }
     }
     install.recheck()?;
-    let status = remove_executable(&install, &install_lock.0)?;
+    let status = remove_executable(&install, install_lock.path())?;
     path_entry::remove(&path_plan)?;
     #[cfg(windows)]
     std::mem::forget(install_lock); // The deferred child now owns the installation lock.
     Ok(Outcome::ok(format!("Rift uninstall {status}. Captured Git history and repository policy were preserved. Local data: {}.", if args.purge { "purged" } else { "preserved" }), serde_json::json!({ "status": status, "operation": "uninstall", "purged": args.purge, "binary": install.binary })))
-}
-
-struct Lock(PathBuf);
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.0);
-    }
 }
 
 fn project_paths() -> Result<Vec<PathBuf>> {
@@ -196,6 +187,8 @@ fn remove_executable(install: &Installation, lock: &Path) -> Result<&'static str
     const SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 try {
+# This child now holds the lock: record it, or a run that sees the parent gone would reclaim it.
+[IO.File]::WriteAllText((Join-Path $env:RIFT_UNINSTALL_LOCK 'owner'), "$PID $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`n")
 try { $parent = [Diagnostics.Process]::GetProcessById([int]$env:RIFT_UNINSTALL_PID) }
 catch [ArgumentException] { $parent = $null }
 if ($parent -and -not $parent.WaitForExit(30000)) { exit 1 }
@@ -207,7 +200,7 @@ if ($receipt.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 1 }
 if ([IO.File]::ReadAllText($receipt.FullName) -ne $env:RIFT_UNINSTALL_RECORD) { exit 1 }
 Remove-Item -LiteralPath $file.FullName
 Remove-Item -LiteralPath $env:RIFT_UNINSTALL_RECEIPT
-} finally { [IO.Directory]::Delete($env:RIFT_UNINSTALL_LOCK) }
+} finally { [IO.Directory]::Delete($env:RIFT_UNINSTALL_LOCK, $true) }
 "#;
     let parent = install.binary.parent().unwrap_or(install.binary.as_path());
     // After the checks and the removal, never before: a deferred run that

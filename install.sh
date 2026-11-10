@@ -177,9 +177,49 @@ case "$bin_dir" in /*) ;; *) die 'RIFT_BIN_DIR must be absolute.' ;; esac
 [ ! -L "$bin_dir" ] || die 'Refusing a symbolic-link installation directory.'
 mkdir -p "$bin_dir"
 lock="$bin_dir/.rift-install.lock"
-mkdir "$lock" 2>/dev/null || die 'Another installation is running, or a stale .rift-install.lock needs inspection.'
+# The lock records "PID EPOCH" of its holder, as `rift uninstall` and install.ps1
+# do. One whose holder is gone, or older than fifteen minutes whoever holds it (a
+# recycled PID must not pin it), was left by a killed run and is reclaimed.
+lock_stale_seconds=900
+lock_busy() { die "Another Rift install, update or uninstall is running. Wait for it to finish; if none is, remove $lock and try again (a lock left by a closed terminal is reclaimed after 15 minutes)."; }
+lock_owner() { sed -n '1p' "$1/owner" 2>/dev/null || :; }
+take_lock() {
+    mkdir "$lock" 2>/dev/null || return 1
+    printf '%s %s\n' "$$" "$(date -u +%s 2>/dev/null || :)" >"$lock/owner"
+}
+lock_stale() {
+    [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+    owner=$(lock_owner "$lock")
+    pid=${owner%% *}
+    started=${owner#* }
+    case "$pid" in '' | *[!0-9]*)
+        # No owner line (an older installer's lock): only its age speaks for it.
+        [ -n "$(find "$lock" -prune -mmin +15 2>/dev/null)" ]
+        return ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || return 0
+    now=$(date -u +%s 2>/dev/null) || return 1
+    case "$now" in '' | *[!0-9]*) return 1 ;; esac
+    case "$started" in '' | *[!0-9]*) return 1 ;; esac
+    [ $((now - started)) -gt "$lock_stale_seconds" ]
+}
+reclaim_lock() {
+    lock_stale || lock_busy
+    seen=$(lock_owner "$lock")
+    # Move it aside before deleting, so two runs reclaiming at once cannot both win.
+    aside="$lock.stale-$$"
+    mv "$lock" "$aside" 2>/dev/null || lock_busy
+    if [ "$(lock_owner "$aside")" != "$seen" ]; then
+        [ -e "$lock" ] || mv "$aside" "$lock" 2>/dev/null || :
+        lock_busy
+    fi
+    rm -rf "$aside"
+    printf 'rift: reclaimed a stale installation lock left by an interrupted run.\n' >&2
+    take_lock || lock_busy
+}
+take_lock || reclaim_lock
 stage=
-cleanup() { [ -z "$stage" ] || rm -rf "$stage"; rmdir "$lock" 2>/dev/null || :; }
+cleanup() { [ -z "$stage" ] || rm -rf "$stage"; { rm -f "$lock/owner"; rmdir "$lock"; } 2>/dev/null || :; }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
