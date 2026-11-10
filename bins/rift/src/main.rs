@@ -48,6 +48,7 @@ pub(crate) use projection::{runtime, worktree_root};
 mod adopt;
 mod agent_help;
 mod agent_queue;
+mod agent_settings_guard;
 mod agents;
 mod backfill;
 mod bundle;
@@ -123,6 +124,11 @@ fn main() -> ExitCode {
         if offered_update() {
             return ExitCode::SUCCESS;
         }
+        // Opening a repository keeps its agent settings out of git; anything
+        // that needs the person (a committed file) is said by init and doctor.
+        if let Ok(cwd) = std::env::current_dir() {
+            let _ = agent_settings_guard::ensure(&cwd);
+        }
         return match launch_canopy(&cli) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -180,6 +186,31 @@ fn main() -> ExitCode {
     }
 }
 
+/// `outcome` with the agent-settings guard applied to `root` and its
+/// findings added: every sentence to the human text, and the findings that
+/// need the person under `agent_settings` in the JSON.
+fn with_settings_guard(root: &Path, mut outcome: Outcome) -> Outcome {
+    let findings = agent_settings_guard::ensure(root);
+    let lines = agent_settings_guard::notable(&findings);
+    if lines.is_empty() {
+        return outcome;
+    }
+    for line in &lines {
+        outcome.human.push('\n');
+        outcome.human.push_str(line);
+    }
+    let action_needed = findings
+        .iter()
+        .any(agent_settings_guard::Finding::needs_action);
+    if let Some(object) = outcome.json.as_object_mut() {
+        object.insert(
+            "agent_settings".to_owned(),
+            serde_json::json!({ "findings": lines, "action_needed": action_needed }),
+        );
+    }
+    outcome
+}
+
 /// Whether `rift` was just updated in answer to the start-up offer, in which
 /// case this (old) process stops and the person runs the command again.
 fn offered_update() -> bool {
@@ -202,9 +233,9 @@ fn route(cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
         Command::Install => installation::preferences(cli.ascii),
         Command::Update(args) => installation::update(args),
         Command::Uninstall(args) => installation::uninstall(args),
-        Command::Init(a) => cmd_init(root, a),
+        Command::Init(a) => cmd_init(root, a).map(|o| with_settings_guard(root, o)),
         Command::Doctor(a) if a.report => Ok(doctor::cmd_doctor_report(root)),
-        Command::Doctor(a) => Ok(cmd_doctor(root, a.fix)),
+        Command::Doctor(a) => Ok(with_settings_guard(root, cmd_doctor(root, a.fix))),
         Command::Clean(a) => match not_init_guard(root) {
             Some(refusal) => Ok(refusal),
             None => session_verbs::clean(root, a.dry_run, a.ttl_days),
@@ -218,7 +249,7 @@ fn route(cli: &Cli, cmd: &Command, root: &Path) -> rift_core::Result<Outcome> {
         Command::Sync(s) => route_sync(root, s),
         Command::Configure(a) => cmd_configure(root, a),
         // enable/disable mutate; they may run before `init` and create `.rift/`.
-        Command::Enable(a) => enable_agent(root, &a.agent),
+        Command::Enable(a) => enable_agent(root, &a.agent).map(|o| with_settings_guard(root, o)),
         Command::Disable(a) => disable_agent(root, &a.agent),
         // Read-only projection queries — guard on init state first.
         Command::Status => projection_read(root, |s, rt| rt.block_on(query::status(s)))

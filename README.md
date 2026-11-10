@@ -133,6 +133,10 @@ captured history is kept unless you add `--purge`.
 - **Redaction happens before storage.** The type system makes writing
   unredacted bytes to disk a compile error. Raw transcripts are opt-in and come
   with a warning.
+- **Agent settings stay out of git.** Claude Code saves commands you approve
+  with "don't ask again", secrets included, in `.claude/settings.local.json`.
+  Rift makes sure git ignores that file and warns you if it is already
+  committed.
 - **History is append-only.** Corrections are added as new records, and hash
   chains and Merkle roots make tampering visible.
 - **Downloads are pinned and signed.** The installers and `rift update` only
