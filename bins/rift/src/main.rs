@@ -56,6 +56,7 @@ mod capture_queue;
 mod capture_recovery;
 mod chain;
 mod cli;
+mod column_key;
 mod configure;
 #[cfg(feature = "tui")]
 mod dispatch;

@@ -26,14 +26,17 @@
 //! dispatcher's own tests. Every serve is still real: capped
 //! manifests, compiled packs, policy-gated exacts, sealed events.
 
-use rift_core::{Result, RiftError, Timestamp};
+use rift_core::{RepoId, Result, RiftError, Timestamp};
 use rift_recall_policy::{PolicyEngine, TurnBudget};
 use rift_recall_serve::{
     RecallContext, ServeDispatcher, ToolError, ToolName, ToolRequest, ToolResponse,
 };
 use rift_recall_substrate::MemorySubstrate;
 use rift_recall_types::{CheckpointWindow, NoAncestry, NoProvenance, Scope};
-use rift_store::{apply_migrations, recall_migrations, CanonicalStore, SqliteStore, Value};
+use rift_store::{
+    apply_migrations, recall_migrations, CanonicalStore, DekCipher, MemoryKeyStore, SqliteStore,
+    Value,
+};
 
 use crate::{replay, PairedRun, ReplayMode, RunMetrics, Scenario, ScenarioFile};
 
@@ -50,6 +53,10 @@ pub(crate) const EVAL_NOW_MS: i64 = 1_000_000_000;
 /// a real serve reads, and the checkout it is bound to.
 struct Fixture {
     store: SqliteStore,
+    /// The fixture store's column cipher: an ephemeral key, as in-memory as
+    /// the store it opens, so the harness reads summaries the way production
+    /// does — encrypted — without touching any machine's key custody.
+    cipher: DekCipher<MemoryKeyStore>,
     reader: MemorySubstrate,
     /// `(path, sha256)` in scenario order.
     files: Vec<(String, String)>,
@@ -197,6 +204,7 @@ pub fn replay_served_with_capture(scenario: &Scenario, est_multiplier: u32) -> R
 fn eval_context(fixture: &Fixture) -> RecallContext<'_, SqliteStore, MemorySubstrate> {
     RecallContext {
         store: &fixture.store,
+        cipher: &fixture.cipher,
         reader: &fixture.reader,
         snapshots: None,
         // The harness computes a family fact over a synthetic fixture (eval is
@@ -296,6 +304,7 @@ async fn seed(scenario: &Scenario, est_multiplier: u32) -> Result<Fixture> {
     }
     Ok(Fixture {
         store,
+        cipher: DekCipher::new(MemoryKeyStore::generate()?, RepoId::new("eval")?),
         reader,
         files,
         held,

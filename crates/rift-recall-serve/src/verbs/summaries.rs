@@ -15,7 +15,7 @@ use rift_recall_substrate::SubstrateReader;
 use rift_recall_validity::{
     outline_shape, outline_versions, OutlineShape, SummaryVersions, Validity,
 };
-use rift_store::{CanonicalStore, PlainCipher};
+use rift_store::{CanonicalStore, ColumnCipher};
 use serde_json::{json, Value};
 
 use super::credit::{Current, Evidence};
@@ -55,7 +55,7 @@ pub(crate) async fn checked_summaries<S: CanonicalStore, R: SubstrateReader>(
         .iter()
         .map(|lc| (lc.candidate.path.as_str(), lc.content_sha256.as_str()))
         .collect();
-    let Ok(found) = current_summaries(ctx.store, &PlainCipher, &wanted, served_versions()).await
+    let Ok(found) = current_summaries(ctx.store, ctx.cipher, &wanted, served_versions()).await
     else {
         return BTreeMap::new();
     };
@@ -73,13 +73,15 @@ pub(crate) async fn checked_summaries<S: CanonicalStore, R: SubstrateReader>(
 /// of that revision is bound.
 ///
 /// For the recovery map, which already holds the store open at a turn
-/// boundary and has already hashed the file: one read, no tokenizer.
+/// boundary and has already hashed the file: one read, no tokenizer. The
+/// caller's `cipher` opens the digest; one that cannot is no outline.
 pub async fn current_outline_shape(
     store: &impl CanonicalStore,
+    cipher: &dyn ColumnCipher,
     path: &str,
     current: &str,
 ) -> Option<OutlineShape> {
-    let bound = current_summary(store, &PlainCipher, path, Some(current), served_versions())
+    let bound = current_summary(store, cipher, path, Some(current), served_versions())
         .await
         .ok()?;
     match bound {

@@ -198,6 +198,7 @@ pub(super) fn ctx<'a>(
 ) -> RecallContext<'a, SqliteStore, MemorySubstrate> {
     RecallContext {
         store,
+        cipher: &rift_store::PlainCipher,
         reader,
         snapshots: None,
         // These fixtures assert what the SURFACE does — the four states, the

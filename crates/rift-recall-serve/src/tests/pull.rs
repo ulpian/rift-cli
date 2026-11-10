@@ -30,6 +30,7 @@ fn the_hunk_verb_reports_what_containment_held_back() {
     // so no path survives ranking and the early exit is the one taken.
     let held = RecallContext {
         store: &store,
+        cipher: &rift_store::PlainCipher,
         reader: &reader,
         snapshots: None,
         scope: Scope::for_worktree(
@@ -522,11 +523,11 @@ fn a_hunk_that_rests_on_a_masked_basis_is_served_as_counts() {
             },
         )
         .unwrap();
-
     let cfg = cfg();
     let s = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let c = RecallContext {
         store: &store,
+        cipher: &rift_store::PlainCipher,
         reader: &reader,
         snapshots: Some(&snapshots),
         scope: Scope::unbounded("repo"),

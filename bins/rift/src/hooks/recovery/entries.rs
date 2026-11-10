@@ -206,8 +206,10 @@ fn recovery_verdict(
     };
     // The shape of what the file is now, from a valid outline of exactly
     // these bytes: the store is already open, and nothing is counted here.
+    let cipher = crate::column_key::column_cipher_at(repo);
     let shape = rt.block_on(rift_recall_serve::current_outline_shape(
         store,
+        &cipher,
         rel_path,
         &blob.content_sha256,
     ));
@@ -486,7 +488,7 @@ mod tests {
             .unwrap();
         let bound = rt.block_on(rift_recall_ledger::validity_store::put_file_outline(
             &store,
-            &rift_store::PlainCipher,
+            &crate::column_key::column_cipher_at(repo),
             &file,
             &counts,
         ));

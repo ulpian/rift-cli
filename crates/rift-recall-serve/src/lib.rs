@@ -100,7 +100,7 @@ pub use rift_recall_types::{ContextCandidate, ContextKind, ContextPlan};
 /// renderer. `bins/rift` reaches it here because this dispatcher is already the
 /// validity crate's caller, so no crate edge is added.
 pub use rift_recall_validity::trust::{render_search_answer, PathStatus, SearchHit};
-use rift_store::CanonicalStore;
+use rift_store::{CanonicalStore, ColumnCipher};
 use serde_json::Value;
 
 /// The push half of the trust chokepoint, re-exported for the hook path.
@@ -589,6 +589,10 @@ pub enum ToolError {
 pub struct RecallContext<'a, S: CanonicalStore, R: SubstrateReader> {
     /// The recall.db projection.
     pub store: &'a S,
+    /// Opens the projection's encrypted columns (summary digests). The caller
+    /// supplies it because only the caller holds key custody; a cipher that
+    /// cannot open a digest makes that summary a miss, never an error.
+    pub cipher: &'a dyn ColumnCipher,
     /// The read-only substrate (for exact blob resolution).
     pub reader: &'a R,
     /// The family's read-time basis snapshots — the ladder's second rung, and

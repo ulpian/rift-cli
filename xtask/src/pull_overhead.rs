@@ -125,6 +125,8 @@ fn serve(fixture: &Fixture, tool: ToolName, req: &ToolRequest) -> ToolResponse {
     let server = ServeDispatcher::new(PolicyEngine::new(&cfg));
     let ctx = RecallContext {
         store: &fixture.store,
+        // A synthetic in-memory fixture with no summaries bound: nothing to open.
+        cipher: &rift_store::PlainCipher,
         reader: &fixture.reader,
         snapshots: None,
         // A synthetic fixture has no repository to walk and nothing to contain.

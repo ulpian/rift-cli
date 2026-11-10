@@ -25,6 +25,8 @@
 //! * `ignores` — every `#[ignore]` carries its reason.
 //! * `cache_root` — the `rift` binary resolves its cache root in one function,
 //!   the one its test build redirects to a temp directory.
+//! * `plain_cipher` — no production code under `bins/` or the recall crates
+//!   names the no-key `PlainCipher`, so sensitive columns stay encrypted.
 //!
 //! This file holds what the screens share — the file read, the two walkers
 //! that define "every first-party source file" and "every tracked path", the
@@ -43,6 +45,7 @@ mod guide_size;
 mod ignores;
 mod lints;
 mod network;
+mod plain_cipher;
 mod proptest_newlines;
 mod retired_vocabulary;
 mod schema;
@@ -61,6 +64,7 @@ pub use lints::{
     lint_table_matches_baseline, no_blanket_allow_at_crate_root, unsafe_only_in_sanctioned_modules,
 };
 pub use network::{no_network_crate_in_the_resolved_graph, no_network_deps_in_capture_crates};
+pub use plain_cipher::no_plain_cipher_in_production;
 pub use proptest_newlines::proptest_generators_reach_newlines;
 pub use retired_vocabulary::retired_vocabulary_screen;
 pub use schema::no_schema_fastpath_in_bins;
@@ -86,6 +90,8 @@ pub struct MetaReport {
     pub ignores: usize,
     /// `bins/rift/src/` files the cache-root screen read.
     pub cache_root_files: usize,
+    /// `bins/` and recall-crate files the plain-cipher screen read.
+    pub plain_cipher_files: usize,
     /// Bytes in the tracked guide, measured against its ceiling.
     pub guide_bytes: u64,
     /// Everything any screen objects to. Empty means `ci-meta` passes.
@@ -205,6 +211,8 @@ pub fn run_all(root: &Path) -> Result<MetaReport, String> {
     v.extend(bare);
     let (cache_root_files, resolved) = one_cache_root_in_the_rift_binary(root)?;
     v.extend(resolved);
+    let (plain_cipher_files, plain) = no_plain_cipher_in_production(root)?;
+    v.extend(plain);
     let (guide_bytes, oversized_guide) = guide_within_ceiling(root)?;
     v.extend(oversized_guide);
     Ok(MetaReport {
@@ -212,6 +220,7 @@ pub fn run_all(root: &Path) -> Result<MetaReport, String> {
         ceilings,
         ignores,
         cache_root_files,
+        plain_cipher_files,
         guide_bytes,
         violations: v,
     })
@@ -317,9 +326,9 @@ mod tests {
         );
     }
 
-    /// The runner dispatches the cache-root screen: its planting test calls
-    /// the screen directly, so only the count it leaves on the report shows
-    /// that `run_all` ran it over the binary's sources.
+    /// The runner dispatches the cache-root and plain-cipher screens: their
+    /// planting tests call the screens directly, so only the counts they
+    /// leave on the report show that `run_all` ran them.
     #[test]
     fn the_runner_dispatches_the_cache_root_screen() {
         let report = run_all(&workspace_root()).expect("meta checks run");
@@ -327,6 +336,11 @@ mod tests {
             report.cache_root_files > 100,
             "the cache-root screen read {} files",
             report.cache_root_files
+        );
+        assert!(
+            report.plain_cipher_files > report.cache_root_files,
+            "the plain-cipher screen read {} files",
+            report.plain_cipher_files
         );
     }
 }

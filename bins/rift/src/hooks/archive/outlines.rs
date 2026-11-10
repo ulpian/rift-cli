@@ -66,8 +66,9 @@ pub(in crate::hooks) fn bind_and_cache_outlines(
     if !cfg.recall_enabled() {
         return None;
     }
-    let db = crate::family::recall_db(work_tree).ok()?;
-    let recall = rift_store::open_recall_projection(&db).ok()?;
+    let family = crate::family::try_at(work_tree)?;
+    let recall = rift_store::open_recall_projection(crate::family::recall_db_of(&family)).ok()?;
+    let cipher = crate::column_key::column_cipher(&family);
     let engine = rift_recall_policy::PolicyEngine::new(&cfg).with_serve_policy(
         rift_recall_policy::ServePolicy::load(&work_tree.join(".rift")),
     );
@@ -86,12 +87,9 @@ pub(in crate::hooks) fn bind_and_cache_outlines(
         tokenizer: rift_tokens::provenance(),
     };
     let counts = rt.block_on(rift_recall_ledger::validity_store::bind_read_outlines(
-        &recall,
-        &rift_store::PlainCipher,
-        &batch,
-        reads,
+        &recall, &cipher, &batch, reads,
     ));
-    cache_bound_outlines(rt, &recall, work_tree, reads);
+    cache_bound_outlines(rt, &recall, &cipher, work_tree, reads);
     Some(counts)
 }
 
@@ -101,6 +99,7 @@ pub(in crate::hooks) fn bind_and_cache_outlines(
 fn cache_bound_outlines(
     rt: &tokio::runtime::Runtime,
     recall: &rift_store::SqliteStore,
+    cipher: &dyn rift_store::ColumnCipher,
     work_tree: &Path,
     reads: &[(String, String)],
 ) {
@@ -113,7 +112,7 @@ fn cache_bound_outlines(
         if !rift_recall_serve::is_outlinable_path(path) || !seen.insert((path, sha)) {
             continue;
         }
-        let Some(outline) = rt.block_on(bound_outline(recall, path, sha)) else {
+        let Some(outline) = rt.block_on(bound_outline(recall, cipher, path, sha)) else {
             continue;
         };
         if let Err(error) = write_outline_cache(&common_dir, sha, &outline) {
@@ -127,11 +126,12 @@ fn cache_bound_outlines(
 /// valid binding at that revision.
 async fn bound_outline(
     recall: &rift_store::SqliteStore,
+    cipher: &dyn rift_store::ColumnCipher,
     path: &str,
     sha: &str,
 ) -> Option<CachedOutline> {
     let versions = rift_recall_serve::outline_versions(rift_recall_policy::SERVE_POLICY_VERSION);
-    let found = current_summary(recall, &rift_store::PlainCipher, path, Some(sha), versions).await;
+    let found = current_summary(recall, cipher, path, Some(sha), versions).await;
     let Ok(CurrentSummary::Bound(Validity::Valid(summary))) = found else {
         return None;
     };

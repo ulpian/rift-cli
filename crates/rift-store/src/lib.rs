@@ -39,6 +39,7 @@ pub mod durable;
 pub mod encrypted_dao;
 pub mod identity_store;
 pub mod integrity;
+pub mod key_file;
 pub mod key_metadata;
 pub mod keychain;
 #[cfg(feature = "keyring")]
@@ -100,7 +101,8 @@ pub use capture::{
     BoundedBoundaryObservation,
 };
 pub use crypto::{
-    decrypt_column, encrypt_column, ColumnCipher, DekCipher, KeyStore, MemoryKeyStore, PlainCipher,
+    decrypt_column, encrypt_column, is_plain_framed, ColumnCipher, DekCipher, KeyStore,
+    MemoryKeyStore, PlainCipher,
 };
 pub use cursor::{
     cursor_of, head_by, parse_canonical_u64, suffix_after_by, StreamCursor, CURSOR_SCHEMA_VERSION,
@@ -117,6 +119,7 @@ pub use integrity::{
     record_cost_if_changed, record_imported_checkpoint_if_new, verify_against_source, BookedCost,
     ChainSource, CheckpointRecord, CostFact, ImportedCheckpointRecord, VerifyReport,
 };
+pub use key_file::{load_or_mint_key_file, FileKeyStore};
 pub use key_metadata::{
     key_metadata_for_generation, latest_key_metadata, record_key_metadata, KeyMetadataRow,
 };

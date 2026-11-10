@@ -9,8 +9,9 @@
 //! Each ciphertext is `nonce ‖ AEAD(plaintext)` with `aad = table/column/row_id`,
 //! binding it to its location so a relocated/copied ciphertext fails
 //! authentication (anti-relocation). Keys come from the [`KeyStore`] seam — a
-//! [`MemoryKeyStore`] for tests/headless, an OS-keychain-backed store in
-//! production (the `keyring`-backed impl is the swappable production variant).
+//! [`MemoryKeyStore`] for tests and in-memory fixtures, and the file-backed
+//! [`crate::FileKeyStore`] (one key per family under the machine's config
+//! root) in production.
 
 use rift_core::{RepoId, Result, RiftError};
 use rift_crypto::{aead_open, aead_seal, DataKey, Nonce, SensitiveBytes, NONCE_LEN};
@@ -22,6 +23,14 @@ pub trait KeyStore {
     /// # Errors
     /// Implementation-defined (e.g. keychain unavailable).
     fn repo_dek(&self, repo_id: &RepoId) -> Result<DataKey>;
+}
+
+/// A borrowed store custodies the same keys: lets one process-wide store back
+/// every cipher a process builds.
+impl<K: KeyStore + ?Sized> KeyStore for &K {
+    fn repo_dek(&self, repo_id: &RepoId) -> Result<DataKey> {
+        (**self).repo_dek(repo_id)
+    }
 }
 
 /// An in-memory key store: holds an already-provisioned DEK for the process
@@ -109,6 +118,13 @@ const FRAME_PLAIN: u8 = 0x00;
 /// Framing byte for an AEAD-encrypted sensitive value.
 const FRAME_AEAD: u8 = 0x01;
 
+/// Whether a stored sensitive value is plain-framed — written with no key.
+/// For the tests that hold production write paths to ciphertext.
+#[must_use]
+pub fn is_plain_framed(stored: &[u8]) -> bool {
+    stored.first() == Some(&FRAME_PLAIN)
+}
+
 /// Value-level cipher seam for sensitive columns whose write/read paths live in
 /// crates that must stay key-blind (e.g. the recall ledger's digest bodies).
 /// The stored form is self-describing (`frame ‖ payload`) so plain rows written
@@ -129,10 +145,10 @@ pub trait ColumnCipher: Send + Sync {
     fn decrypt(&self, table: &str, column: &str, row_id: &str, stored: &[u8]) -> Result<Vec<u8>>;
 }
 
-/// The no-custody cipher: stores plaintext (framed). For headless environments
-/// with no OS keychain — the documented residual-exposure path — and tests. It
-/// refuses to read encrypted values (no key), failing closed rather than
-/// returning ciphertext as data.
+/// The no-custody cipher: stores plaintext (framed). For tests and offline
+/// tooling only — no production path under `bins/` or the recall crates may
+/// name it (`xtask ci-meta` screens for it). It refuses to read encrypted
+/// values (no key), failing closed rather than returning ciphertext as data.
 pub struct PlainCipher;
 
 impl ColumnCipher for PlainCipher {
@@ -153,8 +169,7 @@ impl ColumnCipher for PlainCipher {
         match stored.split_first() {
             Some((&FRAME_PLAIN, rest)) => Ok(rest.to_vec()),
             Some((&FRAME_AEAD, _)) => Err(RiftError::crypto(format!(
-                "{table}.{column} is encrypted but no key custody is available \
-                 (OS keychain required)"
+                "{table}.{column} is encrypted but this cipher holds no key"
             ))),
             _ => Err(RiftError::crypto(format!(
                 "{table}.{column} has an unrecognized storage frame"
@@ -279,6 +294,7 @@ mod tests {
             .encrypt("digest_blob", "bytes", "ref1", b"payload")
             .unwrap();
         assert_eq!(plain_stored[0], FRAME_PLAIN);
+        assert!(is_plain_framed(&plain_stored) && !is_plain_framed(&stored));
         assert_eq!(
             plain
                 .decrypt("digest_blob", "bytes", "ref1", &plain_stored)

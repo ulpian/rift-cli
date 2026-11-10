@@ -19,7 +19,7 @@ use rift_recall_substrate::worktree::CurrentRefusal;
 use rift_recall_substrate::SubstrateReader;
 use rift_recall_types::{Envelope, Trust};
 use rift_recall_validity::{manifest_envelope, Budget, ValidSummary, Validity};
-use rift_store::{CanonicalStore, PlainCipher};
+use rift_store::CanonicalStore;
 use serde_json::{json, Value};
 
 use super::credit::{Current, Evidence, STATED_UNRECORDED};
@@ -192,7 +192,7 @@ impl ServeDispatcher<'_> {
             Some(Current::Verified(now)) => Some(now.as_str()),
             Some(Current::Unverified(_)) | None => None,
         };
-        let bound = current_summary(ctx.store, &PlainCipher, &path, now, served_versions())
+        let bound = current_summary(ctx.store, ctx.cipher, &path, now, served_versions())
             .await
             .map_err(internal)?;
         let summary = SummaryCall {

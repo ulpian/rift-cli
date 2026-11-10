@@ -124,8 +124,11 @@ async fn serve_raw(
         .may_read_the_substrate()
         .then(|| crate::hooks::basis_snapshots_at(repo))
         .flatten();
+    // Built without reading the key: only a verb that opens a summary loads it.
+    let cipher = crate::column_key::column_cipher_at(repo);
     let at = ServeAt {
         store,
+        cipher: &cipher,
         scope,
         ancestry,
         provenance,
@@ -150,11 +153,12 @@ struct ServeIn<'a> {
 
 /// Everything one dispatch needs except the reader it reads bytes through.
 ///
-/// Five borrows that always travel together and are never stored: a context
+/// Six borrows that always travel together and are never stored: a context
 /// struct keeps the call sites of [`dispatch_over`] readable where the reader
 /// is the only thing that differs between them.
 struct ServeAt<'a> {
     store: &'a SqliteStore,
+    cipher: &'a dyn rift_store::ColumnCipher,
     scope: &'a Scope,
     ancestry: &'a dyn AncestryOracle,
     provenance: &'a dyn ProvenanceOracle,
@@ -202,6 +206,7 @@ async fn dispatch_over<R: SubstrateReader>(
 ) -> std::result::Result<ToolResponse, ToolError> {
     let ctx = RecallContext {
         store: at.store,
+        cipher: at.cipher,
         reader,
         snapshots: at.snapshots,
         scope: at.scope.clone(),

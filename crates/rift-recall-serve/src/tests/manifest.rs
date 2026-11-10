@@ -369,6 +369,7 @@ fn a_manifest_reports_what_branch_containment_held_back() {
     // not tell" is the thing being asserted.
     let ctx = RecallContext {
         store: &store,
+        cipher: &rift_store::PlainCipher,
         reader: &reader,
         snapshots: None,
         scope: Scope::for_worktree(

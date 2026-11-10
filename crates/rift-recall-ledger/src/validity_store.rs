@@ -35,9 +35,9 @@ use crate::graph::{file_revision_id, Built};
 /// outline's own ([`outline_versions`]), so the serve-time loader names the
 /// same key.
 ///
-/// Redacted bytes only: digests are read back through the plain cipher, since
-/// no recall key custody exists, so an outline is never built from bytes the
-/// redaction gate has not cleared. A file whose redaction masked anything
+/// Redacted bytes only: a digest is encrypted at rest, but encryption is not
+/// redaction, so an outline is never built from bytes the redaction gate has
+/// not cleared. A file whose redaction masked anything
 /// hashes differently from the checkout, so its binding is never valid.
 pub struct OutlineSource<'a> {
     /// The repository path, `/`-spelled.
@@ -238,7 +238,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 ///
 /// The digest body is a registered sensitive column (Layer-2 encryption at
 /// rest): it reaches the store only through `cipher` — [`rift_store::DekCipher`]
-/// in production custody, [`rift_store::PlainCipher`] where no keychain exists.
+/// over the family's file-held key in production, and `PlainCipher` in tests.
 /// The content address (`digest_ref`) is computed over the *plaintext*, so
 /// idempotency and hash-binding are cipher-independent.
 ///
