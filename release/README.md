@@ -186,6 +186,13 @@ rift update --from \
 ```
 
 The short curl command uses a literal HTTPS URL without following redirects.
+The published wrappers also name the release bucket, and `rift update` pins
+the same bucket at build time (`RELEASE_BUCKET` in
+`bins/rift/src/installation.rs`, kept equal to `release/public-storage.toml` by
+a test; `cargo rift plan` refuses any other bucket). A link into another bucket
+is refused before anything is downloaded, because the manifest that carries
+the checksums comes from the same place. An older alpha never replaces a newer
+one unless `RIFT_ALLOW_DOWNGRADE=1` is set. The manifest is not yet signed.
 The wrapper embeds the manifest URL. The bootstrap detects OS and CPU, selects
 exactly one target row, verifies archive and executable versions, installs under
 `~/.local/bin` (or `RIFT_BIN_DIR`), and opens native preferences. Windows users get

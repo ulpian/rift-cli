@@ -95,6 +95,24 @@ impl Installation {
     }
 }
 
+/// The release bucket every download link must point into. Kept equal to
+/// `release/public-storage.toml` by a test and by the release tooling: the
+/// manifest carries the checksums, so the bucket it comes from is the anchor.
+const RELEASE_BUCKET: &str = "rift-e59ea04337d9";
+
+/// Whether `link` points into the release bucket over HTTPS. A dot segment,
+/// a percent escape or a backslash is refused outright: curl resolves
+/// `bucket/../other` before fetching, so a prefix test alone would pass a
+/// link that fetches from another bucket.
+fn in_release_bucket(link: &str) -> bool {
+    if link.contains("/.") || link.contains('%') || link.contains('\\') {
+        return false;
+    }
+    link.strip_prefix("https://storage.googleapis.com/")
+        .and_then(|rest| rest.strip_prefix(RELEASE_BUCKET))
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
     let link = args
         .from
@@ -106,6 +124,11 @@ pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
                 "Use `rift update --from <fresh update link>` from your latest invitation email.",
             )
         })?;
+    if !in_release_bucket(link.trim()) {
+        return Err(refusal(
+            "This link is not from the Rift release bucket. Use the update link from your invitation.",
+        ));
+    }
     let install = Installation::current()?;
     let parent = install
         .binary
@@ -133,6 +156,7 @@ pub(crate) fn update(args: &UpdateArgs) -> Result<Outcome> {
         .env("RIFT_BIN_DIR", parent)
         .env("RIFT_UPDATE", "1")
         .env("RIFT_DOWNLOAD_MANIFEST", link)
+        .env("RIFT_DOWNLOAD_BUCKET", RELEASE_BUCKET)
         .env("RIFT_UPDATE_PID", std::process::id().to_string())
         .env("RIFT_UPDATE_SHA", &install.checksum)
         .env_remove("RIFT_VERSION")
@@ -203,6 +227,30 @@ fn refusal(reason: &str) -> RiftError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_links_are_pinned_to_the_recorded_release_bucket() {
+        let recorded = include_str!("../../../release/public-storage.toml");
+        assert!(
+            recorded.contains(&format!("bucket = \"{RELEASE_BUCKET}\"")),
+            "RELEASE_BUCKET and release/public-storage.toml drifted apart"
+        );
+        assert!(in_release_bucket(&format!(
+            "https://storage.googleapis.com/{RELEASE_BUCKET}/a/downloads.tsv"
+        )));
+        for foreign in [
+            "https://storage.googleapis.com/attacker-bucket/downloads.tsv",
+            &format!("https://storage.googleapis.com/{RELEASE_BUCKET}-evil/downloads.tsv"),
+            &format!("http://storage.googleapis.com/{RELEASE_BUCKET}/a/downloads.tsv"),
+            &format!("https://example.com/{RELEASE_BUCKET}/downloads.tsv"),
+            &format!("https://storage.googleapis.com/{RELEASE_BUCKET}"),
+            &format!("https://storage.googleapis.com/{RELEASE_BUCKET}/../attacker/downloads.tsv"),
+            &format!("https://storage.googleapis.com/{RELEASE_BUCKET}/a/%2e%2e/x.tsv"),
+            &format!("https://storage.googleapis.com/{RELEASE_BUCKET}/a\\..\\x.tsv"),
+        ] {
+            assert!(!in_release_bucket(foreign), "{foreign}");
+        }
+    }
 
     #[test]
     fn development_and_modified_binaries_are_never_admitted() {

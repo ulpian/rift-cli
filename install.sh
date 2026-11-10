@@ -8,6 +8,21 @@ umask 077
 die() { printf 'rift: %s\n' "$*" >&2; exit 1; }
 fetch() {
     printf '%s' "$1" | LC_ALL=C grep -Eq '^https://storage\.googleapis\.com/[^[:space:]#]+$' || die 'Use the Google Cloud download link from your invitation.'
+    # The published installer and `rift update` name the release bucket: a link
+    # into any other bucket is refused, however valid its checksums look,
+    # because the manifest that carries them came from the same place.
+    if [ -n "${RIFT_DOWNLOAD_BUCKET:-}" ]; then
+        # curl removes dot segments and decodes nothing, so `bucket/../other`
+        # would pass a prefix test and fetch from another bucket: refuse any
+        # dot segment, escape or backslash outright.
+        case "$1" in
+            *'/.'* | *%* | *\\*) die 'This link is not from the Rift release bucket. Use the link from your invitation.' ;;
+        esac
+        case "$1" in
+            "https://storage.googleapis.com/$RIFT_DOWNLOAD_BUCKET/"*) ;;
+            *) die 'This link is not from the Rift release bucket. Use the link from your invitation.' ;;
+        esac
+    fi
     if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
         --silent --show-error --connect-timeout 10 --max-time 120 --max-filesize "${3:-268435456}" --output "$2" "$1"; then
         die 'Download unavailable or invitation expired. Request a fresh link.'
@@ -103,7 +118,7 @@ restart_shell() {
     cleanup
     trap - EXIT
     umask "$user_umask"
-    unset RIFT_DOWNLOAD_MANIFEST
+    unset RIFT_DOWNLOAD_MANIFEST RIFT_DOWNLOAD_BUCKET
     PATH="$bin_dir:${PATH:-}"
     export PATH
     exec "$SHELL" <"$terminal" 3<&-
@@ -123,7 +138,18 @@ finish() {
     fi
 }
 
+# The alpha ordinal of a version: v1.0.0-alpha is 0, v1.0.0-alpha.N is N.
+alpha_ordinal() {
+    case "$1" in
+        v1.0.0-alpha) echo 0 ;;
+        *) echo "${1#v1.0.0-alpha.}" ;;
+    esac
+}
+
 command -v curl >/dev/null 2>&1 || die 'curl is required.'
+if [ -n "${RIFT_DOWNLOAD_BUCKET:-}" ]; then
+    printf '%s' "$RIFT_DOWNLOAD_BUCKET" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$' || die 'Invalid release bucket name.'
+fi
 command -v tar >/dev/null 2>&1 || die 'tar is required.'
 case "$(uname -s)" in
     Darwin) platform=apple-darwin ;;
@@ -200,6 +226,14 @@ archive_url=$(manifest_value 2) || die 'Invitation has no unique download for th
 expected=$(manifest_value 3) || die 'Invitation has no unique checksum for this platform.'
 printf '%s\n' "$expected" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || die 'Invalid archive checksum in invitation.'
 recheck_installation
+if [ -f "$binary" ] && [ "${RIFT_ALLOW_DOWNGRADE:-0}" != 1 ]; then
+    installed=$(sed -n '3p' "$receipt")
+    # Compared only when the receipt names an alpha too, so both ordinals are digits.
+    if printf '%s\n' "$installed" | LC_ALL=C grep -Eq '^v1\.0\.0-alpha(\.[0-9]+)?$' &&
+        [ "$(alpha_ordinal "$installed")" -gt "$(alpha_ordinal "$version")" ]; then
+        die "Rift $installed is newer than $version; nothing was changed. Set RIFT_ALLOW_DOWNGRADE=1 to install the older build."
+    fi
+fi
 if [ -f "$binary" ] && [ "$(sed -n '3p' "$receipt")" = "$version" ]; then
     printf 'Rift %s is already installed.\n' "$version"
     preferences

@@ -20,8 +20,21 @@ function Fetch-RiftFile([string]$Url, [string]$Destination) {
     if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.Host -ne 'storage.googleapis.com' -or $uri.UserInfo -or $uri.Fragment) {
         throw 'Use the Google Cloud download link from your invitation.'
     }
+    # The published installer and `rift update` name the release bucket: a link
+    # into any other bucket is refused, however valid its checksums look,
+    # because the manifest that carries them came from the same place.
+    if ($env:RIFT_DOWNLOAD_BUCKET -and -not $uri.AbsolutePath.StartsWith("/$($env:RIFT_DOWNLOAD_BUCKET)/", [StringComparison]::Ordinal)) {
+        throw 'This link is not from the Rift release bucket. Use the link from your invitation.'
+    }
     try { Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 120 }
     catch { throw 'Download unavailable or invitation expired. Request a fresh link.' }
+}
+# The alpha ordinal of a version: v1.0.0-alpha is 0, v1.0.0-alpha.N is N.
+function Get-RiftAlphaOrdinal([string]$Version) {
+    $ordinal = [decimal]0
+    # An ordinal too long to parse compares as the first alpha, never as an error.
+    if ($Version -ne 'v1.0.0-alpha') { [void][decimal]::TryParse($Version.Substring('v1.0.0-alpha.'.Length), [ref]$ordinal) }
+    return $ordinal
 }
 function Assert-RiftRegular([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
@@ -75,6 +88,7 @@ function Complete-RiftInstall {
     } else { Write-Output "Add $bin to your user PATH, then open a terminal and run rift inside your project." }
 }
 
+if ($env:RIFT_DOWNLOAD_BUCKET -and $env:RIFT_DOWNLOAD_BUCKET -cnotmatch '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$') { throw 'Invalid release bucket name.' }
 $bin = $env:RIFT_BIN_DIR
 if (-not $bin) { $bin = Join-Path $env:LOCALAPPDATA 'Rift\bin' }
 if (-not [IO.Path]::IsPathRooted($bin)) { throw 'RIFT_BIN_DIR must be absolute.' }
@@ -123,6 +137,10 @@ try {
     if ($fields.Length -ne 3 -or $fields[2] -notmatch '^[0-9a-f]{64}$') { throw 'Invalid archive checksum in invitation.' }
     $archiveUrl = $fields[1]
     $expected = $fields[2]
+    if ((Test-Path -LiteralPath $binary) -and $env:RIFT_ALLOW_DOWNGRADE -ne '1' -and $record[2] -match '^v1\.0\.0-alpha(\.[0-9]+)?$' -and
+        (Get-RiftAlphaOrdinal $record[2]) -gt (Get-RiftAlphaOrdinal $version)) {
+        throw "Rift $($record[2]) is newer than $version; nothing was changed. Set RIFT_ALLOW_DOWNGRADE=1 to install the older build."
+    }
     if ((Test-Path -LiteralPath $binary) -and $record[2] -eq $version) {
         Write-Output "Rift $version is already installed."
         Set-RiftPreferences

@@ -67,6 +67,14 @@ pub(super) fn run(command: &str, opts: &Options<'_>) -> Result<()> {
     };
     opts.validate(1, &flags)?;
     let destination = Destination::new(opts.value("--bucket")?, opts.value("--prefix")?)?;
+    // `rift update` refuses links into any bucket but the one it was built to
+    // trust, so publishing elsewhere would strand every installed binary.
+    let recorded = crate::read_toml(&crate::workspace_root().join("release/public-storage.toml"))?;
+    ensure(
+        recorded.get("bucket").and_then(toml::Value::as_str) == Some(destination.bucket.as_str()),
+        "the bucket must be the one in release/public-storage.toml, which `rift update` pins \
+         (bins/rift/src/installation.rs RELEASE_BUCKET); change both together",
+    )?;
     let dist = opts.path("--dist")?;
     let (tag, entries) = artifacts::assets(&dist)?;
     let stage = prepare(&destination, &tag, &entries)?;
@@ -130,16 +138,21 @@ fn prepare(
     write(
         &stage.join("install.sh"),
         format!(
-            "#!/bin/sh\nexport RIFT_DOWNLOAD_MANIFEST={}\n{shell}\n",
-            quote(&manifest_url)
+            "#!/bin/sh\nexport RIFT_DOWNLOAD_MANIFEST={}\nexport RIFT_DOWNLOAD_BUCKET={}\n{shell}\n",
+            quote(&manifest_url),
+            quote(&destination.bucket)
         ),
     )?;
     write(
         &stage.join("install.ps1"),
         format!(
-            "$RiftPreviousManifest = $env:RIFT_DOWNLOAD_MANIFEST\ntry {{\n\
-        $env:RIFT_DOWNLOAD_MANIFEST = '{manifest_url}'\n{powershell}\n\
-        }} finally {{ $env:RIFT_DOWNLOAD_MANIFEST = $RiftPreviousManifest }}\n"
+            "$RiftPreviousManifest = $env:RIFT_DOWNLOAD_MANIFEST\n\
+        $RiftPreviousBucket = $env:RIFT_DOWNLOAD_BUCKET\ntry {{\n\
+        $env:RIFT_DOWNLOAD_MANIFEST = '{manifest_url}'\n\
+        $env:RIFT_DOWNLOAD_BUCKET = '{bucket}'\n{powershell}\n\
+        }} finally {{ $env:RIFT_DOWNLOAD_MANIFEST = $RiftPreviousManifest; \
+        $env:RIFT_DOWNLOAD_BUCKET = $RiftPreviousBucket }}\n",
+            bucket = destination.bucket
         ),
     )?;
     write(&stage.join("DOWNLOADS.md"), instructions(destination, tag))?;

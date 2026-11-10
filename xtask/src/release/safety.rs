@@ -169,12 +169,54 @@ fn path_registration() -> Result<()> {
     )
 }
 
+/// A named release bucket refuses links into any other, and an older alpha
+/// never replaces a newer one unless the operator says so.
+fn pinning_and_downgrade() -> Result<()> {
+    let (mut fixture, stub) = prepare()?;
+    fixture.set("RIFT_DOWNLOAD_BUCKET", "another-bucket");
+    install(&fixture, false)?;
+    ensure(
+        !fixture.root().join("bin/rift").exists(),
+        "a link outside the named bucket installed",
+    )?;
+    fixture.set("RIFT_DOWNLOAD_BUCKET", "rift-install-preview");
+    // curl would resolve the dot segment and fetch from the other bucket.
+    fixture.set(
+        "RIFT_DOWNLOAD_MANIFEST",
+        "https://storage.googleapis.com/rift-install-preview/../evil/downloads.tsv",
+    );
+    install(&fixture, false)?;
+    ensure(
+        !fixture.root().join("bin/rift").exists(),
+        "a dot segment escaped the named bucket",
+    )?;
+    fixture.set("RIFT_DOWNLOAD_MANIFEST", fixture::MANIFEST);
+    make_version(&mut fixture, &stub, "v1.0.0-alpha.2")?;
+    install(&fixture, true)?;
+    let receipt = fixture.root().join("bin/rift.install-receipt");
+    let newer = read(&receipt)?;
+    make_version(&mut fixture, &stub, "v1.0.0-alpha.1")?;
+    fixture.set("RIFT_UPDATE", "1");
+    install(&fixture, false)?;
+    ensure(
+        read(&receipt)? == newer,
+        "an older alpha replaced a newer one",
+    )?;
+    fixture.set("RIFT_ALLOW_DOWNGRADE", "1");
+    install(&fixture, true)?;
+    ensure(
+        read(&receipt)?.ends_with("v1.0.0-alpha.1\n"),
+        "an explicit downgrade was refused",
+    )
+}
+
 pub(super) fn check() -> Result<()> {
     versions()?;
     foreign()?;
     race()?;
     corrupt_and_linked()?;
     path_registration()?;
-    println!("PASS offline installer safety: fresh/update, ownership, concurrent edits, checksum, symlink refusal and PATH registration");
+    pinning_and_downgrade()?;
+    println!("PASS offline installer safety: fresh/update, ownership, concurrent edits, checksum, symlink refusal, PATH registration, bucket pin and downgrade refusal");
     Ok(())
 }
