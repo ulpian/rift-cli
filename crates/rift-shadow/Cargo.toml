@@ -11,20 +11,20 @@ description = "rift-shadow: git-native, immutable system of record for AI agent 
 workspace = true
 
 [dependencies]
-rift-core = { version = "1.1.0-alpha", path = "../rift-core" }
-rift-hashchain = { version = "1.1.0-alpha", path = "../rift-hashchain" }
+rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
+rift-hashchain = { version = "1.2.0-alpha", path = "../rift-hashchain" }
 # Native git write plumbing for the NativeBackend.
-rift-git = { version = "1.1.0-alpha", path = "../rift-git" }
-rift-store = { version = "1.1.0-alpha", path = "../rift-store" }
-rift-shadow-hooks = { version = "1.1.0-alpha", path = "../rift-shadow-hooks" }
-rift-shadow-redact = { version = "1.1.0-alpha", path = "../rift-shadow-redact" }
-rift-shadow-attribution = { version = "1.1.0-alpha", path = "../rift-shadow-attribution" }
-rift-shadow-cost = { version = "1.1.0-alpha", path = "../rift-shadow-cost" }
+rift-git = { version = "1.2.0-alpha", path = "../rift-git" }
+rift-store = { version = "1.2.0-alpha", path = "../rift-store" }
+rift-shadow-hooks = { version = "1.2.0-alpha", path = "../rift-shadow-hooks" }
+rift-shadow-redact = { version = "1.2.0-alpha", path = "../rift-shadow-redact" }
+rift-shadow-attribution = { version = "1.2.0-alpha", path = "../rift-shadow-attribution" }
+rift-shadow-cost = { version = "1.2.0-alpha", path = "../rift-shadow-cost" }
 # The single parser home: the artifact bridge reads checkpoint shards
 # through the substrate seam + lenient parsers. gix stays off — the production
 # reader is constructed by the bin; tests use MemorySubstrate.
-rift-recall-substrate = { version = "1.1.0-alpha", path = "../rift-recall-substrate", default-features = false }
-rift-recall-types = { version = "1.1.0-alpha", path = "../rift-recall-types" }
+rift-recall-substrate = { version = "1.2.0-alpha", path = "../rift-recall-substrate", default-features = false }
+rift-recall-types = { version = "1.2.0-alpha", path = "../rift-recall-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -42,5 +42,5 @@ proptest = { workspace = true }
 # The native-archive round-trip test reads the shard it wrote back through the
 # production gix substrate reader — a cross-implementation check that the
 # writer and the reader agree.
-rift-recall-substrate = { version = "1.1.0-alpha", path = "../rift-recall-substrate", features = ["gix"] }
-rift-git = { version = "1.1.0-alpha", path = "../rift-git", features = ["gix", "test-support"] }
+rift-recall-substrate = { version = "1.2.0-alpha", path = "../rift-recall-substrate", features = ["gix"] }
+rift-git = { version = "1.2.0-alpha", path = "../rift-git", features = ["gix", "test-support"] }

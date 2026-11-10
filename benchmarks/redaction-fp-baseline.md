@@ -130,8 +130,17 @@ unclassified and is still redacted in captured text. This records its measured
 cost without changing detector behavior. The ceiling is frozen again at 61;
 all other ceilings and both classification rules stay unchanged.
 
+**Owner decision, v1.1.0-alpha / v1.2.0-alpha releases:** `entropy.high` moves
+80 → 90. The measured tree has 87 raw hits − 1 classified = 86. The added hits
+are the public install and update links (the release bucket's name is a random
+token) in `README.md`, the release notes and the release tooling; the owner
+asked for those commands to be printed for users to copy. A bucket name is
+product configuration, so these hits stay unclassified and are still redacted
+in captured text; one redundant mention in `release/README.md` was shed. The
+ceiling is frozen again at 90; the shed-only policy is unchanged.
+
 ```fp-baseline
-entropy.high = 80
+entropy.high = 90
 pii.email = 61
 pii.ipv4 = 0
 pii.us_taxpayer_id = 0

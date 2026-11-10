@@ -17,25 +17,25 @@ path = "src/main.rs"
 [dependencies]
 blake3 = { workspace = true }
 getrandom = { workspace = true }
-rift-core = { version = "1.1.0-alpha", path = "../../crates/rift-core" }
+rift-core = { version = "1.2.0-alpha", path = "../../crates/rift-core" }
 # `--repo` is discovery-resolved through the repository family, never taken as a
 # bare path, so a linked worktree resolves to the family's one identity.
-rift-git = { version = "1.1.0-alpha", path = "../../crates/rift-git" }
+rift-git = { version = "1.2.0-alpha", path = "../../crates/rift-git" }
 # The `eval` verb: runs the deterministic Lost-in-Delta conditions end-to-end
 # and appends the bitemporal experiment rows.
-rift-recall-eval = { version = "1.1.0-alpha", path = "../../crates/rift-recall-eval" }
-rift-recall-ledger = { version = "1.1.0-alpha", path = "../../crates/rift-recall-ledger" }
-rift-recall-serve = { version = "1.1.0-alpha", path = "../../crates/rift-recall-serve" }
-rift-recall-events = { version = "1.1.0-alpha", path = "../../crates/rift-recall-events" }
-rift-recall-policy = { version = "1.1.0-alpha", path = "../../crates/rift-recall-policy" }
-rift-recall-substrate = { version = "1.1.0-alpha", path = "../../crates/rift-recall-substrate" }
-rift-recall-types = { version = "1.1.0-alpha", path = "../../crates/rift-recall-types" }
-rift-config = { version = "1.1.0-alpha", path = "../../crates/rift-config" }
+rift-recall-eval = { version = "1.2.0-alpha", path = "../../crates/rift-recall-eval" }
+rift-recall-ledger = { version = "1.2.0-alpha", path = "../../crates/rift-recall-ledger" }
+rift-recall-serve = { version = "1.2.0-alpha", path = "../../crates/rift-recall-serve" }
+rift-recall-events = { version = "1.2.0-alpha", path = "../../crates/rift-recall-events" }
+rift-recall-policy = { version = "1.2.0-alpha", path = "../../crates/rift-recall-policy" }
+rift-recall-substrate = { version = "1.2.0-alpha", path = "../../crates/rift-recall-substrate" }
+rift-recall-types = { version = "1.2.0-alpha", path = "../../crates/rift-recall-types" }
+rift-config = { version = "1.2.0-alpha", path = "../../crates/rift-config" }
 # The run-state layout: where a member's session phase hints live once moved
 # out of the git dir, read by `doctor` without moving anything.
-rift-shadow-hooks = { version = "1.1.0-alpha", path = "../../crates/rift-shadow-hooks" }
+rift-shadow-hooks = { version = "1.2.0-alpha", path = "../../crates/rift-shadow-hooks" }
 # The recall.db projection (a separate store from the capture projection.db).
-rift-store = { version = "1.1.0-alpha", path = "../../crates/rift-store" }
+rift-store = { version = "1.2.0-alpha", path = "../../crates/rift-store" }
 clap = { workspace = true }
 # Structured, redaction-safe diagnostics on stderr; opt in with RIFT_LOG.
 tracing = { workspace = true }
@@ -50,6 +50,6 @@ tempfile = { workspace = true }
 # The repository fixtures the family refusals are asserted over (`fake_repo`):
 # a dev-only feature of a dependency this binary already has. The crate-graph
 # snapshot counts `[dependencies]` edges only, so this adds no edge to it.
-rift-git = { version = "1.1.0-alpha", path = "../../crates/rift-git", features = [
+rift-git = { version = "1.2.0-alpha", path = "../../crates/rift-git", features = [
     "test-support",
 ] }

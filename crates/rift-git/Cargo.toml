@@ -21,7 +21,7 @@ gix = ["dep:gix"]
 test-support = []
 
 [dependencies]
-rift-core = { version = "1.1.0-alpha", path = "../rift-core" }
+rift-core = { version = "1.2.0-alpha", path = "../rift-core" }
 sha2 = { workspace = true }
 # The family manifest: a machine-local JSON record in the common
 # dir. Both are already in the shipped binaries' resolved graph.
@@ -39,4 +39,4 @@ tempfile = { workspace = true }
 # ones: a phantom `.git` can be planted at any depth.
 proptest = { workspace = true }
 # Construct a RedactedBytes via the sanctioned redaction gate (its sole constructor).
-rift-shadow-redact = { version = "1.1.0-alpha", path = "../rift-shadow-redact" }
+rift-shadow-redact = { version = "1.2.0-alpha", path = "../rift-shadow-redact" }
