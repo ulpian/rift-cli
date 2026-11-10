@@ -148,21 +148,53 @@ fn atomic_policy_replace(path: &Path, bytes: &[u8]) -> Result<(), ServePolicyEdi
         source,
     })?;
     let tmp = parent.join(format!(".serve.toml.rift-tmp-{}", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|source| ServePolicyEditError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|source| ServePolicyEditError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| ServePolicyEditError::Io { path, source }
+    };
+    // `create_new` refuses a file or link already at the temporary name, so
+    // the bytes never follow a planted link, and the committed file is left
+    // untouched whatever fails.
+    if let Err(error) = write_new(&tmp, bytes) {
+        // Something already at the temporary name is not this edit's to
+        // remove; anything this edit created and could not finish is.
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return Err(io(&tmp)(error));
     }
-    std::fs::rename(&tmp, path).map_err(|source| ServePolicyEditError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    // `rename` replaces the target in one step on every platform (Windows
+    // included, through MOVEFILE_REPLACE_EXISTING), so a reader never finds
+    // the file missing and falls back to secure defaults. A Windows reader
+    // holding the file open can refuse it for a moment: try a few times.
+    let mut last = None;
+    for attempt in 0..RENAME_ATTEMPTS {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+        if attempt + 1 < RENAME_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(io(path)(
+        last.unwrap_or_else(|| std::io::Error::other("rename failed")),
+    ))
+}
+
+/// How many times a refused replace is tried before the edit gives up.
+const RENAME_ATTEMPTS: u32 = 4;
+
+/// Write `bytes` to a file that must not already exist, flushed to disk.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// Write `value` under `key`, keeping the comment and spacing written around

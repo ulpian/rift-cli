@@ -325,21 +325,53 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), PolicyEditError> {
         source,
     })?;
     let tmp = parent.join(format!(".config.toml.rift-tmp-{}", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|source| PolicyEditError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|source| PolicyEditError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| PolicyEditError::Io { path, source }
+    };
+    // `create_new` refuses a file or link already at the temporary name, so
+    // the bytes never follow a planted link, and the committed file is left
+    // untouched whatever fails.
+    if let Err(error) = write_new(&tmp, bytes) {
+        // Something already at the temporary name is not this edit's to
+        // remove; anything this edit created and could not finish is.
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return Err(io(&tmp)(error));
     }
-    std::fs::rename(&tmp, path).map_err(|source| PolicyEditError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    // `rename` replaces the target in one step on every platform (Windows
+    // included, through MOVEFILE_REPLACE_EXISTING), so a reader never finds
+    // the file missing and falls back to secure defaults. A Windows reader
+    // holding the file open can refuse it for a moment: try a few times.
+    let mut last = None;
+    for attempt in 0..RENAME_ATTEMPTS {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+        if attempt + 1 < RENAME_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(io(path)(
+        last.unwrap_or_else(|| std::io::Error::other("rename failed")),
+    ))
+}
+
+/// How many times a refused replace is tried before the edit gives up.
+const RENAME_ATTEMPTS: u32 = 4;
+
+/// Write `bytes` to a file that must not already exist, flushed to disk.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -444,5 +476,40 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, PolicyEditError::Refused(_)));
         assert_eq!(std::fs::read_to_string(target).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_replace_overwrites_in_one_step_and_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        atomic_replace(&path, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["config.toml"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_the_temporary_name_is_refused_and_the_config_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "kept").unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "untouched").unwrap();
+        let tmp = dir
+            .path()
+            .join(format!(".config.toml.rift-tmp-{}", std::process::id()));
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        assert!(atomic_replace(&path, b"new").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "untouched");
+        assert!(
+            std::fs::symlink_metadata(&tmp).is_ok(),
+            "what this edit did not create is not this edit's to remove"
+        );
     }
 }
