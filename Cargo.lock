@@ -3143,7 +3143,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rift"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "cap-fs-ext",
@@ -3186,7 +3186,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-antigravity"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3206,7 +3206,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-claude-code"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-agent",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-codex"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-copilot"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-cursor"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-factory-droid"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-gemini"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3261,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-install"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "rift-agent",
@@ -3279,7 +3279,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-ollama"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3288,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "rift-agent-opencode"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "rift-agent",
  "rift-core",
@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "rift-canopy"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "criterion",
  "crossterm",
@@ -3316,7 +3316,7 @@ dependencies = [
 
 [[package]]
 name = "rift-canopy-data"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "notify",
  "proptest",
@@ -3342,7 +3342,7 @@ dependencies = [
 
 [[package]]
 name = "rift-config"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "insta",
@@ -3358,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "rift-core"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "insta",
@@ -3372,7 +3372,7 @@ dependencies = [
 
 [[package]]
 name = "rift-crypto"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -3386,7 +3386,7 @@ dependencies = [
 
 [[package]]
 name = "rift-git"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "gix",
  "proptest",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "rift-hashchain"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3410,7 +3410,7 @@ dependencies = [
 
 [[package]]
 name = "rift-memd"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "clap",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "rift-nic-gauge"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-doc"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "anydoc",
  "rift-core",
@@ -3455,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-eval"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "insta",
  "proptest",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-events"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "proptest",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-ledger"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "imara-diff",
  "proptest",
@@ -3512,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-pack"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "insta",
  "proptest",
@@ -3527,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-policy"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "blake3",
  "proptest",
@@ -3543,7 +3543,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-rank"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-search"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "fff-grep",
  "fff-query-parser",
@@ -3571,7 +3571,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-serve"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "insta",
  "proptest",
@@ -3597,7 +3597,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-substrate"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "gix",
  "insta",
@@ -3614,7 +3614,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-types"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "rift-recall-validity"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3639,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "rift-registry"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "rift-shadow"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "rift-shadow-attribution"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "imara-diff",
  "proptest",
@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "rift-shadow-cost"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-core",
@@ -3698,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "rift-shadow-hooks"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "rift-agent",
@@ -3724,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "rift-shadow-redact"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "proptest",
  "regex",
@@ -3738,7 +3738,7 @@ dependencies = [
 
 [[package]]
 name = "rift-store"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "async-trait",
  "insta",
@@ -3758,7 +3758,7 @@ dependencies = [
 
 [[package]]
 name = "rift-tokens"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "tiktoken-rs",
 ]
@@ -5142,7 +5142,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.3.0-alpha"
+version = "1.3.1-alpha"
 dependencies = [
  "ed25519-dalek",
  "flate2",

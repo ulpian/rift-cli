@@ -16,20 +16,20 @@ workspace = true
 # budgets, policy gates, and audit events as `rift recall <verb>` — over a
 # fixture store, so the emitted claim the harness reconciles is the serving
 # side's own number, never the harness's arithmetic.
-rift-config = { version = "1.3.0-alpha", path = "../rift-config" }
-rift-core = { version = "1.3.0-alpha", path = "../rift-core" }
-rift-recall-events = { version = "1.3.0-alpha", path = "../rift-recall-events" }
-rift-recall-ledger = { version = "1.3.0-alpha", path = "../rift-recall-ledger" }
-rift-recall-serve = { version = "1.3.0-alpha", path = "../rift-recall-serve" }
+rift-config = { version = "1.3.1-alpha", path = "../rift-config" }
+rift-core = { version = "1.3.1-alpha", path = "../rift-core" }
+rift-recall-events = { version = "1.3.1-alpha", path = "../rift-recall-events" }
+rift-recall-ledger = { version = "1.3.1-alpha", path = "../rift-recall-ledger" }
+rift-recall-serve = { version = "1.3.1-alpha", path = "../rift-recall-serve" }
 # The pack under test: the delta-served runs compile real packs.
-rift-recall-pack = { version = "1.3.0-alpha", path = "../rift-recall-pack" }
-rift-recall-policy = { version = "1.3.0-alpha", path = "../rift-recall-policy" }
-rift-recall-substrate = { version = "1.3.0-alpha", path = "../rift-recall-substrate" }
-rift-recall-types = { version = "1.3.0-alpha", path = "../rift-recall-types" }
-rift-store = { version = "1.3.0-alpha", path = "../rift-store" }
+rift-recall-pack = { version = "1.3.1-alpha", path = "../rift-recall-pack" }
+rift-recall-policy = { version = "1.3.1-alpha", path = "../rift-recall-policy" }
+rift-recall-substrate = { version = "1.3.1-alpha", path = "../rift-recall-substrate" }
+rift-recall-types = { version = "1.3.1-alpha", path = "../rift-recall-types" }
+rift-store = { version = "1.3.1-alpha", path = "../rift-store" }
 # The one token-counting authority: measured savings use the same
 # tokenizer the serving side reports, so reconciliation is apples-to-apples.
-rift-tokens = { version = "1.3.0-alpha", path = "../rift-tokens" }
+rift-tokens = { version = "1.3.1-alpha", path = "../rift-tokens" }
 # The temporary repository the intercepted condition writes its policy into:
 # the lever it measures is resolved from a real `.rift/policies/serve.toml`, and
 # never from this repository's.

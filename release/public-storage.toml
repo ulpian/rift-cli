@@ -3,7 +3,7 @@
 project = "gen-lang-client-0144758115"
 bucket = "rift-e59ea04337d9"
 location = "europe-west1"
-prefix = "v1.3.0-alpha"
+prefix = "v1.3.1-alpha"
 # Ed25519 public key of the manifest signing secret (rift-release-manifest-key
 # in Secret Manager). Compiled into the binary as MANIFEST_PUBLIC_KEY.
 manifest_public_key = "ddd5c7b7e93857d0bdd6de3c4d02263584864e6a103d5b3eb1d6a21851926097"
