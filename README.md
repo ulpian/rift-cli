@@ -1,5 +1,8 @@
 # Rift
 
+<img width="782" height="720" alt="rift_visual-optimize" src="https://github.com/user-attachments/assets/d7fd75f3-8c9d-4fa2-8987-30b3e4f461dd" />
+
+
 **A terminal dashboard and memory layer for AI coding agents.**
 
 Rift records every agent session in your repository as a tamper-evident,
