@@ -157,9 +157,9 @@ recorded and the call runs untouched — how a pool is priced before anything ac
 or **Decline**, once, with a reason the model reads.
 
 **The levers and their modes.** `[interception] mode`, `first_contact`,
-`decline_family_held` and `inherit_by_name` default to `enforce`; `narrow`,
-`recognise_by_output`, `substitute_held_output` and `fold_command_output` default
-to `observe` until their own pools are sized. `[interception.agents]` overrides
+`decline_family_held`, `recognise_by_output`, `substitute_held_output` and
+`fold_command_output` default to `enforce`; `narrow` and `inherit_by_name`
+default to `observe` (a name in a brief is not the bytes). `[interception.agents]` overrides
 them per family ([02 §2.6](02-configuration.md#the-read-gate-interception)).
 No lever exceeds the family's read lever, which never exceeds what its pinned
 reason channel confirms, so an unconfirmed family observes (the caps are in
