@@ -246,8 +246,12 @@ pub const CONFIG_ROOT_UNSET: &str =
 /// Rift's binaries refuse before reaching it (they ask
 /// [`configured_config_root`] first); the old fallback, `.`, wrote the
 /// registry into whatever directory the process ran in.
+///
+/// Windows has no device file that refuses a child: `\\.\NUL\…` answers
+/// `create_dir_all` with success. The interior NUL byte there is refused by
+/// the standard library before any system call.
 const UNRESOLVED_CONFIG_ROOT: &str = if cfg!(windows) {
-    r"\\.\NUL\rift-config-unset"
+    "\\\\.\\NUL\\rift-config-unset\0"
 } else {
     "/dev/null/rift-config-unset"
 };

@@ -22,8 +22,12 @@ pub const CACHE_ROOT_UNSET: &str =
 /// it (they ask [`configured_cache_root`] first); the old fallback, `.`, put
 /// projections and the install salt in whatever repository a cron job or a
 /// service happened to run in.
+///
+/// Windows has no device file that refuses a child: `\\.\NUL\…` answers
+/// `create_dir_all` with success. The interior NUL byte there is refused by
+/// the standard library (and by SQLite's C string) before any system call.
 const UNRESOLVED_CACHE_ROOT: &str = if cfg!(windows) {
-    r"\\.\NUL\rift-cache-unset"
+    "\\\\.\\NUL\\rift-cache-unset\0"
 } else {
     "/dev/null/rift-cache-unset"
 };

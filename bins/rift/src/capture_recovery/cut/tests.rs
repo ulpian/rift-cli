@@ -349,8 +349,12 @@ fn a_missing_pin_after_restart_stays_owed_even_when_an_identical_same_name_sourc
     // The second original is gone and an identical B takes its name.
     let path = source_path(&rig, &second);
     let (_, job) = crate::agent_queue::read_job(&path).unwrap();
+    // Held open across the swap: ext4 hands a freed inode number straight to
+    // the next file, which would make B the original's ino by reuse alone.
+    let original_alive = std::fs::File::open(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     let replacement = crate::agent_queue::enqueue_in(&queue_dir(&rig.fixture), &job).unwrap();
+    drop(original_alive);
     assert_eq!(replacement, path);
     let b = std::fs::symlink_metadata(&replacement).unwrap();
     assert_ne!(b.ino(), second.ino);
