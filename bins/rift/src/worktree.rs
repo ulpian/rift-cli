@@ -253,7 +253,12 @@ fn list(root: &Path) -> Result<Outcome> {
 fn status(root: &Path, path: Option<&Path>) -> Result<Outcome> {
     let start = path.unwrap_or(root);
     let (_, rows) = rows(start)?;
-    let here = rift_git::discover(start)?;
+    // Discovered from the canonical spelling, because the worktree token is
+    // a hash of the spelling and the hooks file observations under the
+    // canonical one: a cwd spelled otherwise (Windows' 8.3 `RUNNER~1`, a
+    // `\\?\` prefix, macOS's `/var` alias) would name no observation at all.
+    let here =
+        rift_git::discover(&std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf()))?;
     let Some(row) = rows
         .iter()
         .find(|r| crate::adopt::same_tree(&r.member.work_tree, &here.work_tree))

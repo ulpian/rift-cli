@@ -193,7 +193,10 @@ fn a_cold_rebuild_restores_every_worktree_observation_the_live_hooks_recorded() 
 fn replay_session(fx: &Fixture) {
     fx.hook("SessionStart", serde_json::json!({"source": "startup"}));
     fx.hook("UserPromptSubmit", serde_json::json!({"prompt": "look"}));
-    let command = format!("cd {} && head -n 1 a.txt", fx.member.display());
+    // Spelled with `/`, as a POSIX shell needs it: the grammar reads a
+    // Windows path's `\` as an escape.
+    let member = fx.member.display().to_string().replace('\\', "/");
+    let command = format!("cd {member} && head -n 1 a.txt");
     let read = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {"command": command},
