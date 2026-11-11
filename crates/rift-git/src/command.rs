@@ -298,6 +298,9 @@ mod tests {
         git(&main, &["config", "user.name", "T"]);
         git(&main, &["config", "commit.gpgsign", "false"]);
         git(&main, &["config", "core.quotePath", "true"]);
+        // Windows runners set `core.autocrlf=true` globally, which would
+        // check `one\n` back out as `one\r\n`; the fixture's bytes are exact.
+        git(&main, &["config", "core.autocrlf", "false"]);
         std::fs::write(main.join("a.txt"), b"one\n").unwrap();
         git(&main, &["add", "a.txt"]);
         git(&main, &["commit", "-q", "-m", "seed"]);

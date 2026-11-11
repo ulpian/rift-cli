@@ -603,7 +603,7 @@ fn a_read_after_cd_into_a_member_is_the_members_on_every_surface() {
     let read = serde_json::json!({
         "session_id": "cd-1", "cwd": main, "hook_event_name": "PostToolUse",
         "tool_name": "Bash", "tool_use_id": "t-1",
-        "tool_input": { "command": format!("cd {} && sed -n '1,2p' a.txt", f.member.display()) },
+        "tool_input": { "command": format!("cd {} && sed -n '1,2p' a.txt", common::shell_spelling(&f.member)) },
         "tool_response": { "stdout": "one\ntwo\n" },
     });
     claude_hook(&f, &f.main, "PostToolUse", &read);

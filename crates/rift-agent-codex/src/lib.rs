@@ -1022,7 +1022,8 @@ mod execution_dir {
             vec![format!("{external}/sub/README.md")]
         );
         let elsewhere = format!("{}/notes.md", abs("x"));
-        let native = shell(Some(&abs("r")), &format!("cat {elsewhere}"), &extra);
+        // Quoted, as a shell needs a Windows path's backslashes to be.
+        let native = shell(Some(&abs("r")), &format!("cat '{elsewhere}'"), &extra);
         assert_eq!(read_paths(&native), vec![elsewhere]);
     }
 

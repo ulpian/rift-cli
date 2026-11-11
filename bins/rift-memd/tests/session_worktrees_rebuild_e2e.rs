@@ -69,7 +69,11 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        // Canonical, so macOS's /var alias is resolved, but never in Windows'
+        // verbatim `\\?\` spelling: git cannot create a worktree under it.
+        let canonical_root = std::fs::canonicalize(tmp.path()).unwrap();
+        let spelled = canonical_root.display().to_string();
+        let root = PathBuf::from(spelled.strip_prefix(r"\\?\").unwrap_or(&spelled));
         let (repo, member, home) = (root.join("repo"), root.join("lane-a"), root.join("home"));
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&home).unwrap();
