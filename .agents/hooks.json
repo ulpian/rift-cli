@@ -1,0 +1,50 @@
+{
+  "rift-recall": {
+    "PostInvocation": [
+      {
+        "command": "\"/Users/ulpian/Developer/rift/rift-cli/target/release/rift\" hooks antigravity PostInvocation",
+        "timeout": 10,
+        "type": "command"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Developer/rift/rift-cli/target/release/rift\" hooks antigravity PostToolUse",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "command": "\"/Users/ulpian/Developer/rift/rift-cli/target/release/rift\" hooks antigravity PreInvocation",
+        "timeout": 10,
+        "type": "command"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "\"/Users/ulpian/Developer/rift/rift-cli/target/release/rift\" hooks antigravity PreToolUse",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "\"/Users/ulpian/Developer/rift/rift-cli/target/release/rift\" hooks antigravity Stop",
+        "timeout": 10,
+        "type": "command"
+      }
+    ],
+    "enabled": true
+  }
+}

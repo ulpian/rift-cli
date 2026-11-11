@@ -1,0 +1,4 @@
+# Written by rift init: Rift's own state is never committed.
+# Agent descriptors name this machine's rift binary; each machine writes its own.
+state/
+agents/
