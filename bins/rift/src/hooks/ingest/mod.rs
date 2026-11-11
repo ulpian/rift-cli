@@ -176,7 +176,7 @@ fn capture_into_projection(
     // token counts. Any of the first three already dispatched; otherwise the
     // owed counts dispatch here.
     if (owed > 0 || gate_journaled || sweep_owed) && !matches!(condense_queued, Ok(true)) {
-        t.phase("spawn_worker", || dispatch_agent_worker(git_dir));
+        t.phase("spawn_worker", || dispatch_capture_worker(git_dir));
     }
     Ok(())
 }
@@ -311,7 +311,7 @@ fn bind_hook_identity(
 /// background child). Same variable, same two arms, same code either way as
 /// the post-commit path: it chooses **who** drains and **when**, never
 /// **whether**.
-fn dispatch_agent_worker(git_dir: &Path) {
+pub(crate) fn dispatch_capture_worker(git_dir: &Path) {
     if std::env::var_os(CAPTURE_SYNC_ENV).is_some() {
         let _ = drain_capture_queue(git_dir.to_str());
     } else {

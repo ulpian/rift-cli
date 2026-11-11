@@ -4,25 +4,34 @@ on:
     branches: [main]
   workflow_dispatch:
   pull_request:
+  schedule:
+    - cron: '43 3 * * *'
 permissions:
   contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+  # Hundreds of integration executables do not need full debug/PDB files.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_HTTP_MULTIPLEXING: 'false'
 concurrency:
-  group: ci-${{ github.ref }}
+  # A push must not cancel the daily/manual cross-platform validation.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 jobs:
-  # Cheap single-leg gates first: a fmt/clippy failure reports in minutes
-  # without burning three OS legs.
+  # Routine pushes/PRs use Linux. Daily/manual runs also exercise macOS and
+  # Windows and run instrumentation; none of those checks is removed.
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
         with: { components: "rustfmt" }
       - run: cargo fmt --all --check
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
         with: { components: "clippy" }
       - uses: Swatinem/rust-cache@v2
@@ -36,14 +45,15 @@ jobs:
       # keeps this step from being dropped quietly.
       - run: cargo clippy -p rift --no-default-features --all-targets -- -D warnings
   test:
+    timeout-minutes: 60
     strategy:
       # A Windows-only break must stay visible even when Linux fails first.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-24.04","macos-15","windows-2025"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Prepare Linux capacity for Rust builds
         if: runner.os == 'Linux'
         shell: bash
@@ -76,18 +86,18 @@ jobs:
         shell: pwsh
         run: ./ci/install-ps1-fixture.ps1
   release-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --release
   # Proves the declared MSRV floor (rust-version = 1.94) actually compiles, even
   # though the dev/build toolchain is pinned to 1.96.0 (rust-toolchain.toml).
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-features
@@ -97,9 +107,15 @@ jobs:
   # rustc, so this job (only) runs nightly — selected explicitly with `+nightly`,
   # because rust-toolchain.toml would otherwise pin every `cargo` call to 1.96.0.
   coverage:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    env:
+      # Keep full source mapping for instrumented reports.
+      CARGO_PROFILE_DEV_DEBUG: '2'
+      CARGO_PROFILE_TEST_DEBUG: '2'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Prepare Linux capacity for Rust builds
         shell: bash
         run: |
@@ -131,16 +147,19 @@ jobs:
       - run: cargo +nightly llvm-cov report --lcov --skip-functions --output-path lcov.info --fail-under-lines 85 --ignore-filename-regex 'keychain_os\.rs'
       - run: cargo +nightly llvm-cov report --json --output-path cov.json --ignore-filename-regex 'keychain_os\.rs'
       - run: cargo run -p xtask -- check-coverage cov.json   # per-crate ≥95% line + ≥75% branch
-      # Coverage-drop signal on every PR: the summary lands in the job
+      # Coverage-drop signal on every instrumented run: the summary lands in the job
       # summary page, so a large-but-above-threshold drop is visible.
       - run: cargo +nightly llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: coverage-lcov, path: lcov.info }
   security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: security-tools
       - run: cargo install cargo-deny cargo-audit --locked
       - run: cargo deny check
       - run: cargo audit --deny warnings   # honours .cargo/audit.toml ignores
@@ -148,9 +167,9 @@ jobs:
   # lint-table baseline, no unsafe, no crate-root blanket allows, no schema
   # fast-path in bins — plus actionlint on this file.
   ci-meta:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p xtask -- ci-meta
@@ -166,9 +185,9 @@ jobs:
   # `cargo test -p xtask` (in the `test` job) is what proves the legs still
   # catch a planted violation.
   gate-intercept:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p xtask -- gate-intercept
@@ -179,9 +198,9 @@ jobs:
   # `git log -1 -- <paths>` against real history (src/provenance.rs), which a
   # shallow clone answers wrongly.
   bench-harness:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
@@ -192,13 +211,15 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test
-  # Every fuzz target survives a smoke budget on PRs. A crash here is
-  # a real finding, not flakiness — the job is required. Long-budget runs are
+  # Every fuzz target survives a daily/manual smoke budget. A crash here is
+  # a real finding, not flakiness. Long-budget runs are
   # scheduled in fuzz-nightly.yml.
   fuzz-smoke:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 45
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: "fuzz" }
@@ -215,9 +236,9 @@ jobs:
   # is checked for verbatim leakage. A forbidden-span leak blocks merge — never
   # advisory.
   red-team:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rift-recall-validity --test red_team
@@ -226,11 +247,11 @@ jobs:
       # typed, budgeted pack — zero forbidden spans in ANY section, both ends.
       - run: cargo test -p rift-recall-pack red_team
   docs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       # The rustdoc gate. Zero baseline — every warning (broken
@@ -242,9 +263,9 @@ jobs:
       # commit has one honest home, by name, instead of a blanket allow.
       - run: cargo run -q -p xtask -- rustdoc-baseline
   dialect-conformance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       # The dialect suites — legacy-import goldens (both layouts), the two-era
@@ -256,9 +277,15 @@ jobs:
       - run: cargo test -p rift-shadow --test legacy_import_golden --test dual_source --test shard_goldens --test parity_anchors
       - run: cargo test -p rift-recall-substrate --test gix_walker
   miri:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    env:
+      # These tests use filesystem-backed fixtures and proptest persistence.
+      MIRIFLAGS: '-Zmiri-disable-isolation'
+      PROPTEST_CASES: '16'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # @nightly auto-selects the latest nightly that actually carries the
       # requested components. Scope: the security crates whose zeroize/AEAD drop
       # paths must be miri-clean, plus the FFI-bearing crates.

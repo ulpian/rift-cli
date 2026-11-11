@@ -47,11 +47,18 @@ runs. Its **fifteen jobs** are all named in `REQUIRED_JOBS`
 (`xtask/src/ci_meta/workflow.rs`) and checked by `ci-meta`, so a job cannot be
 deleted while CI stays green.
 
+Pushes to `main` and pull requests run the Linux test suite, lint, security,
+docs, metadata and release-build gates. The daily 03:43 UTC run and manual
+`workflow_dispatch` also run the full Linux/macOS/Windows matrix, coverage,
+fuzz smoke and Miri. Superseded runs are cancelled. CI omits debug/PDB files
+from test builds to reduce linking and cache costs; local builds keep them.
+Use the manual run before a release when fresh cross-platform evidence is needed.
+
 | Job | Guards |
 |---|---|
 | `fmt` | formatting is mechanical |
 | `clippy` | `-D warnings`, then `rift` with **no** default features: an item that exists only behind a feature is dead code in the all-off build somebody ships (a clippy pass, not `cargo check`, so it denies the same warnings and builds tests) |
-| `test` | the suite on Linux, macOS and Windows with `fail-fast` off, so a Windows-only break survives a Linux failure |
+| `test` | Linux on pushes/PRs; Linux, macOS and Windows daily/manually with `fail-fast` off |
 | `msrv` | the declared minimum (1.94) compiles |
 | `coverage` | [§16.6](#166-coverage-as-a-gate-not-a-dashboard) |
 | `security` | `cargo deny` and `cargo audit` ([§16.10](#1610-supply-chain)) |
@@ -65,7 +72,8 @@ deleted while CI stays green.
 | `miri` | crypto, hash-chain and dashboard crates; advisory, with `continue-on-error` so the failure stays visible rather than swallowed by `\|\| true` |
 | `release-build` | the optimised profile compiles |
 
-`coverage`, `fuzz-smoke` and `miri` need nightly.
+`coverage`, `fuzz-smoke` and `miri` need nightly and run daily/manually.
+The separate `fuzz-nightly.yml` runs 10-minute budgets weekly or manually.
 
 ---
 

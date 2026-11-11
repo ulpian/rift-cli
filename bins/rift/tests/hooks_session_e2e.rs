@@ -58,10 +58,12 @@ impl OutOfBand {
     /// Left to git's auto-detection it depends on the machine: a Linux
     /// runner's hostname yields one, a Windows box's `(none)` domain is
     /// refused outright.
-    fn env(&self) -> [(&'static str, &str); 7] {
+    /// Drain any pending migration inline before the next attach takes ownership.
+    fn env(&self) -> [(&'static str, &str); 8] {
         [
             ("RIFT_CACHE_DIR", self.cache.to_str().unwrap()),
             ("RIFT_NO_KEYCHAIN", "1"),
+            ("RIFT_CAPTURE_SYNC", "1"),
             ("HOME", self.home.to_str().unwrap()),
             ("GIT_AUTHOR_NAME", "T"),
             ("GIT_AUTHOR_EMAIL", "t@t"),

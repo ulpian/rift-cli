@@ -21,8 +21,9 @@ version; per-agent overrides live in [.agents/](.agents/).
 ./skills.sh gc        # sweep nested e2e targets, incremental caches, and stale queue locks
 ```
 
-CI runs the same gate across three OSes plus a release build, `cargo deny`, and
-`cargo audit`.
+Push/PR CI runs the same gate on Linux plus a release build, `cargo deny`, and
+`cargo audit`. Daily/manual CI adds macOS/Windows, coverage, fuzz smoke and Miri;
+long-budget fuzzing runs weekly or manually.
 
 ## Conventions (do not break)
 

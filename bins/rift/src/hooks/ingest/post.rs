@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rift_core::Result;
 
-use super::{dispatch_agent_worker, CapturedHook};
+use super::{dispatch_capture_worker, CapturedHook};
 use crate::agent_queue::{
     AgentJob, BoundaryEdge, BoundarySnapshot, IntervalArchive, IntervalReason, JobKind, SealTurn,
 };
@@ -127,7 +127,7 @@ pub(super) fn drive_post_ingest(
 ) -> Result<bool> {
     let archived = drive_archives(run, agent, state, effects);
     if snapshots_owed && !matches!(archived, Ok(true)) {
-        dispatch_agent_worker(&run.repo.git_dir);
+        dispatch_capture_worker(&run.repo.git_dir);
         return Ok(true);
     }
     archived
@@ -182,7 +182,7 @@ fn queue_session_condense(git_dir: &Path, repo_id: &str, session: &str, agent: &
             },
         },
     )?;
-    dispatch_agent_worker(git_dir);
+    dispatch_capture_worker(git_dir);
     Ok(())
 }
 
@@ -256,7 +256,7 @@ fn queue_interval_archive(
     now: i64,
 ) -> Result<()> {
     journal_once(repo, JobKind::Archive(archive), now)?;
-    dispatch_agent_worker(&repo.git_dir);
+    dispatch_capture_worker(&repo.git_dir);
     Ok(())
 }
 

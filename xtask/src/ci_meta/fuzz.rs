@@ -75,7 +75,7 @@ fn cargo_bin_names(text: &str) -> Vec<String> {
 }
 
 /// Every fuzz target on disk is declared in `fuzz/Cargo.toml` and named by both
-/// the PR smoke job and the nightly matrix — and neither workflow names one that
+/// the daily/manual smoke job and the long-budget matrix — and neither workflow names one that
 /// does not exist.
 ///
 /// Both lists are hand-maintained, and `required_jobs_present` only asserts that

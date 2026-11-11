@@ -1,16 +1,20 @@
 name: fuzz-nightly
-# Long-budget coverage-guided fuzzing: 10 minutes per target, daily.
-# PR CI runs the 60s smoke in ci.yml; this run goes deep and uploads any crash
+# Long-budget coverage-guided fuzzing: 10 minutes per target, weekly.
+# Daily/manual CI runs the 60s smoke in ci.yml; this run goes deep and uploads any crash
 # artifacts + the grown corpus for triage.
 on:
   schedule:
-    - cron: "17 3 * * *" # daily, off-peak
+    - cron: "17 3 * * 0" # weekly, off-peak
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: fuzz-long-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   fuzz-long:
-    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +37,7 @@ jobs:
             doc_convert,
           ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: "fuzz" }
@@ -43,7 +47,7 @@ jobs:
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600 -timeout=25
       - name: upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}

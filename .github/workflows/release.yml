@@ -36,7 +36,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
         with:
           targets: ${{ matrix.target }}
@@ -52,7 +52,7 @@ jobs:
         run: |
           version=$(tr -d '\r\n' < release/alpha-version)
           cargo run --locked -p xtask -- release native-check ${{ matrix.target }} --binary target/${{ matrix.target }}/release/rift${{ runner.os == 'Windows' && '.exe' || '' }} --archive "dist/rift-$version-${{ matrix.target }}${{ runner.os == 'Windows' && '.zip' || '.tar.gz' }}" --out dist/native-evidence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rift-${{ matrix.target }}
           path: dist/*
@@ -61,18 +61,18 @@ jobs:
   bundle:
     name: Collect release archives and checksums
     needs: package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
         with:
           key: alpha-bundle
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: rift-*
           path: dist
@@ -83,7 +83,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             test "$GITHUB_REF_NAME" = "$(tr -d '\r\n' < release/alpha-version)"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rift-release-bundle
           path: |

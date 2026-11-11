@@ -71,10 +71,11 @@ Prefer the task runner; it is the single source of truth for common workflows:
 
 Raw cargo equivalents work too. CI declares fifteen required jobs, the release
 build among them: single-leg `fmt` and `clippy -D warnings`; `test` across
-macOS/Linux/Windows (fail-fast off); an `msrv` build; `coverage` (≥85% line +
+Linux on pushes/PRs, with macOS/Windows added daily or manually (fail-fast off);
+an `msrv` build; daily/manual `coverage` (≥85% line +
 ≥75% branch workspace-wide, ≥95% line for the crates listed in
 `ci/security-crates.txt`, enforced by `xtask check-coverage`); `security`
-(`cargo deny` + `cargo audit`); advisory `miri`; a required 60s-per-target
+(`cargo deny` + `cargo audit`); daily/manual advisory `miri`; daily/manual 60s-per-target
 `fuzz-smoke` over `fuzz/`; `red-team`, which replays the adversarial serving
 corpora; `dialect-conformance` (the legacy-import golden suites, held to a
 pinned suite list); `docs` (rustdoc at a zero-warning baseline,
@@ -92,7 +93,7 @@ file composes an agent's hook response, the channels answered on match
 decides with opens a store or loads the tokenizer, one module writes the
 sentences a model reads, an amended tool call names only `file_path` or
 `head_limit`, and every cache is keyed by the repository family). A scheduled
-`fuzz-nightly.yml` runs 10-minute budgets daily.
+`fuzz-nightly.yml` runs 10-minute budgets weekly or manually.
 
 ## Workspace layout
 

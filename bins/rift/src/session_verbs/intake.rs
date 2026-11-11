@@ -227,7 +227,8 @@ fn forget_compaction_progress(git_dir: &Path, session_id: &str) -> Result<()> {
     }
 }
 
-/// Release before the prompt, then give pending deliveries one ordinary wakeup.
+/// Release before the prompt, then dispatch pending deliveries through the
+/// same sync/detached choice as hooks, so inline callers leave no racing worker.
 /// A failed spawn leaves their existing debt for the next hook or doctor.
 struct AttachOwner(Option<crate::capture_queue::QueueLock>);
 
@@ -241,7 +242,7 @@ impl Drop for AttachOwner {
         if !crate::agent_queue::jobs(&git_dir).is_empty()
             || !crate::capture_queue::entries(&git_dir).is_empty()
         {
-            crate::hooks::spawn_capture_worker(&git_dir);
+            crate::hooks::dispatch_capture_worker(&git_dir);
         }
     }
 }
