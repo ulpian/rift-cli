@@ -137,3 +137,6 @@ try {
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
+# The last installer run is refused on purpose, and the Actions pwsh wrapper
+# exits with whatever $LASTEXITCODE that left; every assertion above throws.
+exit 0

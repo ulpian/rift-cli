@@ -243,8 +243,20 @@ pub(crate) fn rift_json(
     args: &[&str],
     extra_env: &[(&str, &str)],
 ) -> serde_json::Value {
-    let (code, out) = run_rift_stdout(cwd, args, extra_env);
-    assert_eq!(code, 0, "{args:?}: {out}");
+    // Both channels kept: a verb that refuses says why on stderr, and a
+    // failure that only shows the empty stdout cannot be diagnosed from CI.
+    let mut cmd = rift_cmd(cwd);
+    cmd.args(args)
+        .envs(extra_env.iter().copied())
+        .stdin(Stdio::null());
+    let output = cmd.output().unwrap();
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{args:?}: {out}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("{args:?} answered no json: {e}: {out}"))
 }
 
