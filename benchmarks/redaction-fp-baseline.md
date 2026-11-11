@@ -576,6 +576,13 @@ demanded). Note `pii.email` sitting exactly on its ceiling: that is the next
 detector a change will meet, and it is the synthetic fixture addresses, not
 this rule's doing.
 
+**2026-11-11, README animation:** the hosted image source added one entropy
+hit after the CI repair's local gate ran. An HTML-escaped path separator
+keeps the public attachment id separate from the URL prefix in source;
+HTML decoding still produces the exact original image URL. The local
+re-measure is **91 raw − 1 classified = 90 of 90**. The image, detector and
+ceiling are unchanged.
+
 ## History
 
 | date | tree | change |
